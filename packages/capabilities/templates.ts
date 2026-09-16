@@ -170,13 +170,10 @@ export function templates(store?: Store) {
       const draft = await repo.findDraft(key);
       if (!draft) throw new TemplatePublishError([{ severity: "error", code: "publish", path: "", message: `Template ${key} has no draft` }]);
 
+      // Exactement la liste que l'éditeur affiche pour ce brouillon : la porte et l'éditeur ne divergent jamais.
       const diagnostics = (await diagnose(draft.yaml, key)).filter((diagnostic) => diagnostic.severity === "error");
-      const { parseDocument } = await import("yaml");
-      const header = (parseDocument(draft.yaml).toJS() as { template?: { id?: unknown; version?: unknown } } | null)?.template;
-      if (header?.id !== key) diagnostics.push({ severity: "error", code: "publish", path: "template.id", message: `template.id must be ${key}` });
-      const version = typeof header?.version === "string" ? header.version : null;
-      if (!version) diagnostics.push({ severity: "error", code: "publish", path: "template.version", message: "template.version is required" });
       if (diagnostics.length > 0) throw new TemplatePublishError(diagnostics);
+      const version = (await headerOf(draft.yaml)).version as string;
 
       let flow: FlowDefinition;
       try {
@@ -218,11 +215,33 @@ export function templates(store?: Store) {
 }
 
 /** Les diagnostics d'un texte : le validateur en mode collecteur (T2 y ajoutera le modèle partiel). */
-async function diagnose(yaml: string, key: string): Promise<TemplateDiagnostic[]> {
+async function headerOf(yaml: string): Promise<{ id?: unknown; version?: unknown }> {
+  const { parse } = await import("yaml");
+  try {
+    const document = parse(yaml) as { template?: { id?: unknown; version?: unknown } } | null;
+    return document && typeof document.template === "object" && document.template ? document.template : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Les diagnostics d'un brouillon : le validateur en mode collecteur sur le
+ * modèle partiel, ce que la v1 ne compile pas, et ce que la publication exige
+ * en plus (la clé du document est celle du template). C'est la liste que
+ * l'éditeur affiche à chaque écriture et celle qui refuse une publication.
+ */
+export async function diagnose(yaml: string, key: string): Promise<TemplateDiagnostic[]> {
   const { checkTemplateSource } = await import("../interpreter/check.js");
   const report = checkTemplateSource(yaml, key);
   const path = (segments: readonly (string | number)[]) => segments.join(".");
+  const header = await headerOf(yaml);
+  const publication: TemplateDiagnostic[] =
+    typeof header.id === "string" && header.id !== key
+      ? [{ severity: "error", code: "publish", path: "template.id", message: `template.id must be ${key}` }]
+      : [];
   return [
+    ...publication,
     ...report.errors.map((issue) => ({ severity: "error" as const, code: issue.pass, path: path(issue.path), message: issue.message })),
     ...report.gaps.map((gap) => ({ severity: "error" as const, code: "support", path: path(gap.path), message: `${gap.feature}: ${gap.message}` })),
     ...report.advisories.map((issue) => ({ severity: "advisory" as const, code: issue.pass, path: path(issue.path), message: issue.message })),

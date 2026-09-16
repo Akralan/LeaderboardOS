@@ -55,14 +55,19 @@ export function checkTemplate(raw: unknown, name: string, options: CheckOptions 
   if (!format.model) {
     return { name, valid: false, errors: format.issues, advisories: [], gaps: [], model: null, types: null };
   }
-  const { issues, gaps, types } = analyzeTemplate(format.model, {
+  // Le modèle partiel s'analyse aussi : un brouillon troué reçoit ses diagnostics de
+  // références, de types et de forme sur ce qui tient debout. La publication lit la
+  // même liste — l'éditeur et la porte ne peuvent pas diverger.
+  const analysis = analyzeTemplate(format.model, {
     catalog: options.catalog ?? DEFAULT_CATALOG,
     coreVersion: options.coreVersion ?? CORE_VERSION,
     gridExists: options.gridExists,
   });
+  const issues = [...format.issues, ...analysis.issues];
+  const { gaps, types } = analysis;
   const errors = issues.filter((issue) => issue.severity === "error").sort(byPass);
   return {
-    name: format.model.shell.template.id,
+    name: format.complete ? format.model.shell.template.id : name,
     valid: errors.length === 0,
     errors,
     advisories: issues.filter((issue) => issue.severity === "advisory").sort(byPass),

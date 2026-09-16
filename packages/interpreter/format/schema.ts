@@ -232,48 +232,53 @@ export const paramDecl = z.strictObject({
   default: z.unknown().optional(),
 });
 
+export const templateHeader = z.strictObject({
+  id: z.string().regex(/^[a-z][a-z0-9-]*$/, "a template id is kebab-case"),
+  version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/, "a template version is semver"),
+  name: z.string().min(1),
+  summary: z.string().min(1),
+});
+
+export const requiresDecl = z.strictObject({ core: z.number().int().min(1) });
+
+export const counterDecl = z.strictObject({
+  type: z.enum(["int", "number", "ratio", "points"]),
+  /** Les `lag` claims livrés les plus récents ne comptent pas encore : un compteur qui ne trahit pas le geste qui l'a fait bouger. */
+  lag: z.number().int().min(0).optional(),
+});
+
+/** Ce que le template dit de sa présentation, hors du programme. */
+export const presentationDecl = z.strictObject({
+  icon: z.string().optional(),
+  /** Le nom dans une phrase ; `template.name` à défaut. */
+  long_label: z.string().min(1).optional(),
+  /** Ce que rejoindre implique, affiché sous le brief. */
+  join_caption: z.string().min(1).optional(),
+  /** Un non-membre passe par le brief et le `Join` ; vrai par défaut. */
+  brief_required: z.boolean().optional(),
+  /** Un visiteur anonyme peut ouvrir un challenge public de ce flow ; faux par défaut. */
+  public: z.boolean().optional(),
+  /** La contribution qui porte les lignes du ledger d'un participant. */
+  contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
+});
+
+export const statesDecl = z.union([z.literal("standard"), z.strictObject({ close_at: exprSource.optional() })]);
+
+/** Les clés d'un document : ce que le parse de sauvetage lit section par section (validate/format.ts). */
+export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "lifecycle", "lanes"] as const;
+export const LIFECYCLE_KEYS = ["states", "aggregates", "on_close"] as const;
+
 export const documentShell = z.strictObject({
   format: z.literal("leaderboardos/1"),
-  template: z.strictObject({
-    id: z.string().regex(/^[a-z][a-z0-9-]*$/, "a template id is kebab-case"),
-    version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/, "a template version is semver"),
-    name: z.string().min(1),
-    summary: z.string().min(1),
-  }),
+  template: templateHeader,
   params: z.record(identifier, paramDecl).default({}),
-  requires: z.strictObject({ core: z.number().int().min(1) }),
+  requires: requiresDecl,
   resources: z.record(identifier, resourceDecl).default({}),
-  counters: z
-    .record(
-      identifier,
-      z.strictObject({
-        type: z.enum(["int", "number", "ratio", "points"]),
-        /** Les `lag` claims livrés les plus récents ne comptent pas encore : un compteur qui ne trahit pas le geste qui l'a fait bouger. */
-        lag: z.number().int().min(0).optional(),
-      })
-    )
-    .default({}),
-  /** Ce que le template dit de sa présentation, hors du programme. */
-  presentation: z
-    .strictObject({
-      icon: z.string().optional(),
-      /** Le nom dans une phrase ; `template.name` à défaut. */
-      long_label: z.string().min(1).optional(),
-      /** Ce que rejoindre implique, affiché sous le brief. */
-      join_caption: z.string().min(1).optional(),
-      /** Un non-membre passe par le brief et le `Join` ; vrai par défaut. */
-      brief_required: z.boolean().optional(),
-      /** Un visiteur anonyme peut ouvrir un challenge public de ce flow ; faux par défaut. */
-      public: z.boolean().optional(),
-      /** La contribution qui porte les lignes du ledger d'un participant. */
-      contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
-    })
-    .optional(),
+  counters: z.record(identifier, counterDecl).default({}),
+  presentation: presentationDecl.optional(),
   lifecycle: z
     .strictObject({
-      states: z
-        .union([z.literal("standard"), z.strictObject({ close_at: exprSource.optional() })])
-        .optional(),
+      states: statesDecl.optional(),
       aggregates: z.array(aggregateDecl).default([]),
       on_close: z.array(z.record(z.string(), z.unknown())).default([]),
     })

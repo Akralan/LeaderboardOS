@@ -81,6 +81,10 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
 
   // ── Types déclarés ──────────────────────────────────────────────────────
   const resourceNames = new Set(Object.keys(shell.resources));
+  // Les marqueurs d'un modèle partiel (validate/format.ts) : ce qui y fait référence vaut `dyn`, sans erreur en cascade.
+  const brokenResources = model.broken.resources;
+  const partial =
+    Object.values(model.broken).some((names) => names.size > 0) || model.lanes.some((lane) => lane.broken.length > 0);
   const resourceFieldTypes = new Map<string, Record<string, Type>>();
   const env = {
     resourceFields: (name: string) => resourceFieldTypes.get(name),
@@ -169,7 +173,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
       case "ref":
         if (!resourceNames.has(node.resource)) {
-          report("reference", path, `unknown resource type '${node.resource}'`);
+          brokenResources.has(node.resource) || report("reference", path, `unknown resource type '${node.resource}'`);
           return T.dyn;
         }
         return T.resource(node.resource);
@@ -184,6 +188,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   };
 
   for (const [name, node] of typeNodes) paramTypes[name] = resolveType(node, ["params", name, "type"], null);
+  for (const name of model.broken.params) paramTypes[name] = T.dyn;
   const paramsScope = Scope.root({ params: T.record(paramTypes) });
   for (const [name, node] of typeNodes) {
     if (JSON.stringify(node).includes("enum_expr")) {
@@ -207,6 +212,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   for (const [name, counter] of Object.entries(shell.counters)) {
     counterTypes[name] = counter.type === "int" || counter.type === "points" ? T.int : T.number;
   }
+  for (const name of model.broken.counters) counterTypes[name] = T.dyn;
 
   // Les champs des ressources, puis leurs colonnes du moteur.
   const declaredFieldTypes = (fields: Record<string, FieldDecl>, base: TemplatePath): Record<string, Type> => {
@@ -247,6 +253,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     participation: T.record({ user: T.user }),
   };
   for (const name of resourceNames) baseBindings[name] = T.list(T.resource(name));
+  for (const name of brokenResources) baseBindings[name] = T.dyn;
   const base = Scope.root(baseBindings);
 
   /** Les règles de visibilité : `author`, `admin`, `claimant`, `everyone`, `role(params.x)`. */
@@ -401,6 +408,9 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const declared = resource.created_by ?? [];
     const actual = creators.get(name) ?? [];
     declared.forEach((entry, i) => {
+      // Un créateur dans une lane ou un nœud écartés : il existe, le format l'a déjà dit.
+      const [laneId, nodeId] = entry.split(".");
+      if (model.broken.lanes.has(laneId) || model.lanes.find((lane) => lane.id === laneId)?.broken.includes(nodeId)) return;
       if (!actual.includes(entry)) {
         report("reference", ["resources", name, "created_by", i], `'${entry}' is not an act creating ${name}`);
       }
@@ -468,13 +478,17 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         count: T.int,
       });
     }
+    // Un aggregate écarté se lit quand même : `aggregates.<id>` vaut `dyn`.
+    if (model.broken.aggregates.size > 0) {
+      for (const id of model.broken.aggregates) fields[id] = T.dyn;
+    }
     return T.record(fields);
   };
 
   for (const aggregate of model.aggregates) {
     const { decl, path } = aggregate;
     if (!resourceNames.has(decl.over)) {
-      report("reference", [...path, "over"], `unknown resource type '${decl.over}'`);
+      brokenResources.has(decl.over) || report("reference", [...path, "over"], `unknown resource type '${decl.over}'`);
       continue;
     }
     const closure = shell.resources[decl.over].closure;
@@ -515,6 +529,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const { entry } = lane;
     const entryPath = [...lane.path, "entry"];
     const bindings: Record<string, Type> = {};
+    // Les nœuds écartés de la lane : leurs lectures valent `dyn`.
+    for (const id of lane.broken) bindings[id] = T.dyn;
 
     if ((entry.trigger === "user") !== Boolean(entry.access)) {
       report("shape", entryPath, entry.trigger === "user" ? "a user lane declares its access" : `a ${entry.trigger} lane has no access`);
@@ -522,7 +538,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     if (entry.trigger === "cron") {
       if (!entry.schedule) report("shape", entryPath, "a cron lane needs a schedule");
       if (entry.over) {
-        if (!resourceNames.has(entry.over.resource)) report("reference", [...entryPath, "over", "resource"], `unknown resource type '${entry.over.resource}'`);
+        if (!resourceNames.has(entry.over.resource)) brokenResources.has(entry.over.resource) || report("reference", [...entryPath, "over", "resource"], `unknown resource type '${entry.over.resource}'`);
         else {
           bindings[entry.over.resource] = T.resource(entry.over.resource);
           bindings.aggregates = aggregatesOver(entry.over.resource);
@@ -564,7 +580,9 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         report("shape", [...accessPath, "role"], "role belongs to mode: role");
       }
       if (access.mode === "author_of") {
-        if (!access.resource || !resourceNames.has(access.resource)) report("reference", [...accessPath, "resource"], `author_of needs a declared resource type`);
+        if (!access.resource || !resourceNames.has(access.resource)) {
+          if (!(access.resource && brokenResources.has(access.resource))) report("reference", [...accessPath, "resource"], `author_of needs a declared resource type`);
+        }
         else bindings[access.resource] = T.resource(access.resource);
       }
       if (access.group !== undefined) {
@@ -727,7 +745,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
       if (claim.substitute) {
         const sub = claim.substitute.resource;
-        if (!resourceNames.has(sub)) report("reference", [...path, "substitute", "resource"], `unknown resource type '${sub}'`, { node });
+        if (!resourceNames.has(sub)) brokenResources.has(sub) || report("reference", [...path, "substitute", "resource"], `unknown resource type '${sub}'`, { node });
         else {
           if (!shell.resources[sub].claim) report("claim", [...path, "substitute", "resource"], `${sub} declares no claim mode`, { node });
           outputs[sub] = T.resource(sub);
@@ -850,7 +868,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     if (body.create !== undefined) {
       const resource = body.create;
       if (!resourceNames.has(resource)) {
-        report("reference", [...path, "create"], `unknown resource type '${resource}'`, { node: id });
+        brokenResources.has(resource) || report("reference", [...path, "create"], `unknown resource type '${resource}'`, { node: id });
         return null;
       }
       const fields = resourceFieldTypes.get(resource)!;
@@ -903,7 +921,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
 
     if (body.match_or_create) {
       const { resource, decision } = body.match_or_create;
-      if (!resourceNames.has(resource)) report("reference", [...path, "match_or_create", "resource"], `unknown resource type '${resource}'`, { node: id });
+      if (!resourceNames.has(resource)) brokenResources.has(resource) || report("reference", [...path, "match_or_create", "resource"], `unknown resource type '${resource}'`, { node: id });
       else if (shell.resources[resource].match_or_create?.by !== "human") {
         report("shape", [...path, "match_or_create"], `${resource} does not declare match_or_create: {by: human}`, { node: id });
       }
@@ -985,7 +1003,9 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       const at = [...path, "emit"];
       const target = /^lifecycle\.([a-z][a-z0-9_]*)$/.exec(body.emit.to);
       const aggregate = target ? aggregateIds.get(target[1]) : undefined;
-      if (!aggregate) report("reference", [...at, "to"], `unknown aggregate '${body.emit.to}' (emit to lifecycle.<aggregate>)`, { node: id });
+      if (!aggregate && !(target && model.broken.aggregates.has(target[1]))) {
+        report("reference", [...at, "to"], `unknown aggregate '${body.emit.to}' (emit to lifecycle.<aggregate>)`, { node: id });
+      }
       const { type } = expr(body.emit.scope, scope, [...at, "scope"], id);
       if (aggregate) {
         const over = aggregate.decl.over;
@@ -1072,7 +1092,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     if (typeof body.amount === "object" && "reverse" in body.amount) {
       const target = body.amount.reverse;
       negative = true;
-      if (!rewardKeys.has(target)) {
+      // Dans un modèle partiel, la récompense nommée peut être dans ce qui a été écarté.
+      if (!rewardKeys.has(target) && !partial) {
         report("reference", [...path, "amount", "reverse"], `reverse names no reward: use its rule_key or <lane>.<node>`, { node });
       }
       if (body.to === undefined) {
@@ -1106,7 +1127,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
           expr(mapping.input, scope, [...at, "input"], node);
         }
       } else {
-        if (!resourceNames.has(mapping.over)) report("reference", [...at, "over"], `unknown resource type '${mapping.over}'`, { node });
+        if (!resourceNames.has(mapping.over)) brokenResources.has(mapping.over) || report("reference", [...at, "over"], `unknown resource type '${mapping.over}'`, { node });
         const rankScope = resourceNames.has(mapping.over)
           ? scope.with({ [mapping.over]: T.resource(mapping.over), aggregates: aggregatesOver(mapping.over) })
           : scope;
