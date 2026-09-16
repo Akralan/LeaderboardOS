@@ -34,14 +34,25 @@ export interface FlowCatalog {
   readonly defaultKey: string;
   /** Le descripteur du type, ou `undefined` s'il n'est pas installé. */
   get(key: string | null | undefined): FlowDescriptor | undefined;
-  /** Le descripteur du type, ou celui du flow par défaut quand le type est absent ou inconnu. */
+  /**
+   * Le descripteur du type ; celui du flow par défaut quand le type est absent,
+   * ou inconnu d'un catalogue qui ne sait pas décrire les types qu'il ignore.
+   */
   resolve(key: string | null | undefined): FlowDescriptor;
   list(): FlowDescriptor[];
 }
 
 export function createFlowCatalog(
   descriptors: readonly FlowDescriptor[],
-  options: { defaultKey: string }
+  options: {
+    defaultKey: string;
+    /**
+     * Le descripteur d'un type présent mais absent du catalogue — un template
+     * publié en base, que le client ne connaît pas à la compilation. Sans lui,
+     * un tel type prend le flow par défaut.
+     */
+    unknown?: (key: string) => FlowDescriptor;
+  }
 ): FlowCatalog {
   const byKey = new Map<string, FlowDescriptor>();
   for (const descriptor of descriptors) {
@@ -61,7 +72,7 @@ export function createFlowCatalog(
   return {
     defaultKey: options.defaultKey,
     get,
-    resolve: (key) => get(key) ?? fallback,
+    resolve: (key) => get(key) ?? (key && options.unknown ? options.unknown(key) : fallback),
     list: () => [...byKey.values()],
   };
 }

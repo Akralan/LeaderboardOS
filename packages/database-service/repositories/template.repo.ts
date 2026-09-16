@@ -107,6 +107,12 @@ export class TemplateRepository {
     }
   }
 
+  /** Toutes les lignes d'un template, brouillon compris. */
+  async listVersions(key: string): Promise<TemplateVersionRecord[]> {
+    const rows = await db.select().from(template_versions).where(eq(template_versions.template_key, key));
+    return rows as TemplateVersionRecord[];
+  }
+
   async findDraft(key: string): Promise<TemplateVersionRecord | null> {
     const [row] = await db
       .select()

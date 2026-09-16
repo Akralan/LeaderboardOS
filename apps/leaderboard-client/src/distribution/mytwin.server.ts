@@ -17,8 +17,7 @@ import { githubSnapshotSource } from '../../../../content/bundle-sources/github-
 import { kaggleArtifactSource } from '../../../../content/bundle-sources/kaggle-artifact';
 import { GitHubBranchProvider } from '../../../../content/workspace-providers/github-branch';
 import { templates } from '../../../../packages/capabilities/templates';
-import { templateSource as dataAnnotationSource } from '../../../../content/templates/data-annotation/template.source';
-import { templateSource as endpointCheckSource } from '../../../../content/templates/endpoint-check/template.source';
+import { systemTemplateSources } from './mytwin.templates';
 import { platform } from './mytwin.platform';
 
 /**
@@ -70,12 +69,6 @@ export function installServerDistribution(): void {
 
   holder[INSTALLED_KEY] = true;
 }
-
-/** Les templates système de la distribution, par clé : leur texte, dont la dérive se surveille. */
-export const systemTemplateSources = [
-  { key: 'data-annotation', yaml: dataAnnotationSource },
-  { key: 'endpoint-check', yaml: endpointCheckSource },
-];
 
 /**
  * Après l'installation : les versions publiées des templates en base, toutes

@@ -1,4 +1,4 @@
-import { BrainCircuit, Code2, ShieldCheck, Tags, type LucideIcon } from 'lucide-react';
+import { BrainCircuit, Code2, ShieldCheck, Sparkles, Tags, type LucideIcon } from 'lucide-react';
 
 /**
  * Les icônes proposées aux flows. Un flow désigne la sienne par une clé dans

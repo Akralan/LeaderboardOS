@@ -9,6 +9,9 @@ import { GeneratedOverview } from '@/components/generated/GeneratedOverview';
 import { FlowArrow, FlowBox, SectionLabel } from '@/components/challenges/rules/RuleFlow';
 import { fgAt, humanize } from '@/components/generated/format';
 
+/** Ce que les slots générés lisent d'un template : son descripteur et sa surface — ce que `describe` sert en JSON. */
+export type DescribedTemplate = Pick<TemplateDescription, 'descriptor' | 'surface'>;
+
 /**
  * Les slots générés d'un template (note §5)
  * -----------------------------------------
@@ -25,7 +28,7 @@ function configOf(challenge: { flow_config?: unknown }): Record<string, unknown>
 }
 
 /** Les lanes réservées : visibles seulement de qui détient la qualification que la configuration nomme. */
-function QualifiedLanes({ challenge, lanes, render }: { challenge: SlotChallenge; lanes: TemplateDescription['surface']['lanes']; render: (lane: TemplateDescription['surface']['lanes'][number]) => ReactNode }) {
+function QualifiedLanes({ challenge, lanes, render }: { challenge: SlotChallenge; lanes: DescribedTemplate['surface']['lanes']; render: (lane: DescribedTemplate['surface']['lanes'][number]) => ReactNode }) {
   const [held, setHeld] = useState<string[] | null>(null);
   const needsQualification = lanes.some((lane) => lane.role);
 
@@ -52,7 +55,7 @@ function QualifiedLanes({ challenge, lanes, render }: { challenge: SlotChallenge
   return <div className="space-y-4">{visible.map((lane) => <div key={lane.id}>{render(lane)}</div>)}</div>;
 }
 
-function heroStat(description: TemplateDescription, rewards: ChallengeRewards | null, contributions: number): HeroStat {
+function heroStat(description: DescribedTemplate, rewards: ChallengeRewards | null, contributions: number): HeroStat {
   const counts = rewards?.resources as Record<string, { total?: number; closed?: number }> | undefined;
   const resolved = description.surface.resources.find((resource) => resource.aggregates.length > 0) ?? description.surface.resources[0];
   const row = resolved ? counts?.[resolved.type] : undefined;
@@ -71,7 +74,7 @@ function heroStat(description: TemplateDescription, rewards: ChallengeRewards | 
   };
 }
 
-function rulesOf(description: TemplateDescription) {
+function rulesOf(description: DescribedTemplate) {
   return function GeneratedRules({ challenge }: { challenge: RulesChallenge }) {
     const params = { ...configOf(challenge), ...(challenge.reward_rules && typeof challenge.reward_rules === 'object' ? (challenge.reward_rules as Record<string, unknown>) : {}) };
     const lanes = description.surface.lanes;
@@ -104,7 +107,7 @@ function rulesOf(description: TemplateDescription) {
   };
 }
 
-export function generatedSlots(description: TemplateDescription): FlowUiSlots {
+export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
   const userLanes = description.surface.lanes.filter((lane) => lane.trigger === 'user');
   const adminLanes = description.surface.lanes.filter((lane) => lane.trigger === 'admin');
 
@@ -140,4 +143,93 @@ export function generatedSlots(description: TemplateDescription): FlowUiSlots {
 
     rulesView: rulesOf(description),
   };
+}
+
+// ── Un template publié en base : les mêmes slots, sur sa description servie ──
+
+const described = new Map<string, Promise<DescribedTemplate | null>>();
+
+/** La description d'une version publiée, une fois par `(clé, version)` : une version publiée ne change jamais. */
+function describe(key: string, version: string | null | undefined): Promise<DescribedTemplate | null> {
+  const ref = `${key}@${version ?? 'latest'}`;
+  if (!described.has(ref)) {
+    const query = version ? `?version=${encodeURIComponent(version)}` : '';
+    described.set(
+      ref,
+      fetch(`/api/templates/${encodeURIComponent(key)}/describe${query}`)
+        .then((res) => (res.ok ? (res.json() as Promise<DescribedTemplate>) : null))
+        .catch(() => null)
+    );
+  }
+  return described.get(ref)!;
+}
+
+function Described({ type, version, render }: { type: string; version?: string | null; render: (description: DescribedTemplate) => ReactNode }) {
+  const [description, setDescription] = useState<DescribedTemplate | null | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    describe(type, version).then((result) => !cancelled && setDescription(result));
+    return () => { cancelled = true; };
+  }, [type, version]);
+  if (description === undefined) return <p className="py-6 text-sm" style={{ color: fgAt(0.45) }}>Loading…</p>;
+  if (description === null) return <p className="py-6 text-sm" style={{ color: fgAt(0.45) }}>This template cannot be described.</p>;
+  return <>{render(description)}</>;
+}
+
+/** La mesure du hero sans description : les instances fermées du premier type que `rewards.summarize` compte. */
+function summarizedStat(rewards: ChallengeRewards | null, contributions: number): HeroStat {
+  const counts = rewards?.resources as Record<string, { total?: number; closed?: number }> | undefined;
+  const first = counts ? Object.entries(counts)[0] : undefined;
+  if (!first) return { key: 'contributions', label: 'Contributions', value: String(contributions), meta: 'recorded' };
+  const [type, row] = first;
+  const total = row.total ?? 0;
+  const closed = row.closed ?? 0;
+  return { key: type, label: humanize(type), value: String(closed), unit: `/ ${total}`, meta: 'resolved', barWidth: total > 0 ? `${Math.round((closed / total) * 100)}%` : '0%' };
+}
+
+const slotsByType = new Map<string, FlowUiSlots>();
+
+/**
+ * Les slots d'un type absent des tables du client : un template publié en
+ * base. Chaque panneau attend la description de la version du challenge,
+ * puis rend les slots générés — les mêmes composants que pour un template
+ * système, et que la prévisualisation d'un brouillon.
+ */
+export function describedSlots(type: string): FlowUiSlots {
+  const cached = slotsByType.get(type);
+  if (cached) return cached;
+  const slots: FlowUiSlots = {
+    readsRewards: true,
+    contributorTabs: (ctx) => [
+      {
+        label: 'Participate',
+        panel: <Described type={type} version={ctx.challenge.template_version} render={(description) => generatedSlots(description).contributorTabs(ctx)[0]?.panel} />,
+      },
+    ],
+    contributorHeroStat: (ctx) => summarizedStat(ctx.rewards, ctx.contributions.length),
+    anonymousView: () => <p className="py-6 text-sm" style={{ color: fgAt(0.45) }}>Sign in to take part in this challenge.</p>,
+    manageTabs: (ctx) => [
+      ctx.common.overview,
+      {
+        label: 'Manage',
+        panel: <Described type={type} version={ctx.challenge.template_version} render={(description) => generatedSlots(description).manageTabs(ctx)[1]?.panel} />,
+      },
+      ctx.common.rankings,
+    ],
+    manageHeroStat: (ctx) => summarizedStat(ctx.rewards, ctx.contributions.length),
+    rulesView: function DescribedRules({ challenge }: { challenge: RulesChallenge }) {
+      return (
+        <Described
+          type={type}
+          version={challenge.template_version}
+          render={(description) => {
+            const Rules = generatedSlots(description).rulesView;
+            return <Rules challenge={challenge} />;
+          }}
+        />
+      );
+    },
+  };
+  slotsByType.set(type, slots);
+  return slots;
 }

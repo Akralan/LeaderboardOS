@@ -24,5 +24,18 @@ export const flowCatalog = createFlowCatalog(
     dataAnnotationFlowDescriptor,
     endpointCheckFlowDescriptor,
   ],
-  { defaultKey: 'code' },
+  {
+    defaultKey: 'code',
+    // Un type hors du catalogue est un template publié en base : il se décrit
+    // lui-même (`/api/templates/:key/describe`) et s'affiche en UI générée,
+    // jamais sous le nom ni les écrans du flow code.
+    unknown: (key) => ({
+      key,
+      label: key.replace(/-/g, ' ').replace(/^./, (first) => first.toUpperCase()),
+      longLabel: key.replace(/-/g, ' ').replace(/^./, (first) => first.toUpperCase()),
+      icon: 'sparkles',
+      briefRequired: false,
+      publiclyVisible: false,
+    }),
+  },
 );

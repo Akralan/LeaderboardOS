@@ -44,6 +44,9 @@ type Store = Pick<
   | "findDraft"
   | "publishDraft"
   | "findPublished"
+  | "listTemplates"
+  | "listVersions"
+  | "usage"
   | "listPublished"
   | "listPublishedRefs"
   | "systemChecksums"
@@ -151,6 +154,100 @@ export function templates(store?: Store) {
       const template = await repo.createTemplate({ key: input.key, name: input.name, createdBy: input.by });
       const draft = await repo.saveDraft(input.key, input.yaml, input.by);
       return { template, draft, diagnostics: await diagnose(input.yaml, input.key) };
+    },
+
+    /**
+     * La bibliothèque : les templates système (lecture seule, duplicables) et
+     * ceux de la base, avec leurs versions publiées, leur brouillon et leur
+     * usage. Un template archivé n'y figure plus.
+     */
+    async library(system: readonly { key: string; yaml: string }[]) {
+      const repo = await storeOf();
+      const { describeTemplate } = await import("../interpreter/describe.js");
+      const described = (yaml: string, key: string) => {
+        try {
+          const { descriptor, surface } = describeTemplate(yaml, key);
+          return { descriptor, surface };
+        } catch {
+          return null;
+        }
+      };
+      const records = (await repo.listTemplates()).filter((template) => !template.archived_at);
+      const database = await Promise.all(
+        records.map(async (template) => {
+          const rows = await repo.listVersions(template.key);
+          const published = rows
+            .filter((row): row is PublishedTemplateVersion => row.status === "published")
+            .sort((a, b) => compareVersions(a.version, b.version));
+          const newest = published.at(-1);
+          const usage = await repo.usage(template.key);
+          const latestDescription = newest ? described(newest.yaml, template.key) : null;
+          return {
+            key: template.key,
+            name: template.name,
+            origin: "database" as const,
+            versions: published.map((row) => ({ version: row.version, published_at: row.published_at, challenges: usage[row.version] ?? 0 })),
+            draft: rows.some((row) => row.status === "draft"),
+            latest: newest && latestDescription ? { version: newest.version, ...latestDescription } : null,
+          };
+        })
+      );
+      const systemTemplates = system.map((source) => {
+        const description = described(source.yaml, source.key);
+        return { key: source.key, name: description?.descriptor.label ?? source.key, origin: "system" as const, readonly: true, descriptor: description?.descriptor ?? null };
+      });
+      return { system: systemTemplates, templates: database };
+    },
+
+    /** Un template en base : ses versions, son brouillon et les diagnostics de ce brouillon. */
+    async detail(key: string) {
+      const repo = await storeOf();
+      const template = await repo.findTemplate(key);
+      if (!template) return null;
+      const rows = await repo.listVersions(key);
+      const draft = rows.find((row) => row.status === "draft") ?? null;
+      const usage = await repo.usage(key);
+      return {
+        template,
+        versions: rows
+          .filter((row): row is PublishedTemplateVersion => row.status === "published")
+          .sort((a, b) => compareVersions(a.version, b.version))
+          .map((row) => ({ version: row.version, published_at: row.published_at, published_by: row.published_by, checksum: row.checksum, challenges: usage[row.version] ?? 0 })),
+        draft: draft ? { yaml: draft.yaml, updated_at: draft.updated_at, diagnostics: await diagnose(draft.yaml, key) } : null,
+      };
+    },
+
+    /**
+     * Le texte d'un nouveau brouillon : une copie d'un template système ou
+     * d'une version publiée, sous la clé du nouveau template.
+     */
+    async seedYaml(seed: { key: string; version?: string }, key: string, system: readonly { key: string; yaml: string }[]): Promise<string | null> {
+      let source = system.find((candidate) => candidate.key === seed.key)?.yaml ?? null;
+      if (!source) {
+        const repo = await storeOf();
+        const rows = (await repo.listVersions(seed.key))
+          .filter((row): row is PublishedTemplateVersion => row.status === "published")
+          .sort((a, b) => compareVersions(a.version, b.version));
+        source = (seed.version ? rows.find((row) => row.version === seed.version) : rows.at(-1))?.yaml ?? null;
+      }
+      if (source === null) return null;
+      const { parseDocument } = await import("yaml");
+      const document = parseDocument(source);
+      if (document.hasIn(["template", "id"])) document.setIn(["template", "id"], key);
+      return document.toString();
+    },
+
+    /** La description d'un brouillon — la prévisualisation passe par les mêmes composants générés. */
+    async describeDraft(key: string) {
+      const draft = await (await storeOf()).findDraft(key);
+      if (!draft) return null;
+      const { describeTemplate } = await import("../interpreter/describe.js");
+      try {
+        const { descriptor, surface } = describeTemplate(draft.yaml, key);
+        return { ok: true as const, descriptor, surface };
+      } catch {
+        return { ok: false as const, diagnostics: await diagnose(draft.yaml, key) };
+      }
     },
 
     /** Écrit le brouillon ; les diagnostics reviennent avec chaque écriture. */
