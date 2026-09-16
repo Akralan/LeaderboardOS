@@ -1,0 +1,74 @@
+format: leaderboardos/1
+
+template:
+  id: localization
+  version: 1.0.0
+  name: Localization pipeline
+  summary: >
+    Translators claim source strings exclusively; native reviewers approve
+    or reject; approval pays the translator per string.
+
+params:
+  pool:          {type: points, mutable: false}
+  per_string:    {type: points, mutable: true}
+  reviewer_role: {type: role, mutable: false}
+  target_locale: {type: string, mutable: false}
+
+requires: {core: 1}
+
+resources:
+  string:
+    fields:
+      key:     {type: string}
+      source:  {type: string}
+      context: {type: string}
+    created_by: [import.explode]
+    claim:
+      mode: exclusive
+      ttl: 72h
+      where: "count(translation.filter(t, t.open && t.string == self)) == 0"
+    closure: {by: transition, verdict: [translated]}
+  translation:
+    fields:
+      string: {type: "ref(string)"}
+      text:   {type: string}
+    created_by: [translator.register]
+    claim: {mode: exclusive, ttl: 72h}
+    closure: {by: transition, verdict: [approved, rejected]}
+
+lanes:
+  - id: import
+    entry: {trigger: admin}
+    nodes:
+      - collect: {id: batch, fields: {file: {type: file}}}
+      - act: {id: explode, create: string, many: {from_file: batch.file}}
+
+  - id: translator
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - act: {id: take, claim: {resource: string}}
+      - collect: {id: submit, fields: {text: {type: string}}}
+      - act: {id: register, create: translation, from: submit, set: {string: take.string}}
+
+  - id: review
+    entry: {trigger: user, access: {mode: role, role: params.reviewer_role}}
+    nodes:
+      - act: {id: take, claim: {resource: translation}}
+      - gate: {id: not_own, all: ["take.translation.author != participation.user"]}
+      - assess:
+          id: judge
+          kind: human
+          fields:
+            decision: {type: "enum(approved, rejected)"}
+            note:     {type: string}
+      - gate:
+          id: route
+          branch:
+            - when: 'judge.decision == "approved"'
+              nodes:
+                - act: {id: close_t, transition: {resource: take.translation, to: closed, verdict: approved}}
+                - act: {id: close_s, transition: {resource: take.translation.string, to: closed, verdict: translated}}
+                - reward: {id: pay, to: take.translation.author, amount: params.per_string, pool: params.pool}
+            - else:
+                nodes:
+                  - act: {id: reject, transition: {resource: take.translation, to: closed, verdict: rejected}}

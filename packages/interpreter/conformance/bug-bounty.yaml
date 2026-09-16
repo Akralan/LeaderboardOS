@@ -1,0 +1,65 @@
+format: leaderboardos/1
+
+template:
+  id: bug-bounty
+  version: 1.0.0
+  name: Bug bounty
+  summary: >
+    Anyone reports; a security lane triages under exclusive claim, routing
+    each report to a new vulnerability or an existing duplicate; only the
+    first reporter of a novel vulnerability is paid, by severity tier.
+
+params:
+  pool:        {type: points, mutable: false}
+  triage_role: {type: role, mutable: false}
+  tiers:       {type: "list({severity: enum(low, medium, high, critical), points: points})", mutable: true}
+
+requires: {core: 1}
+
+resources:
+  report:
+    fields:
+      description: {type: string, visibility: [author, "role(params.triage_role)"]}
+      poc:         {type: file,   visibility: [author, "role(params.triage_role)"]}
+    created_by: [reporter.register, intake.register]
+    claim: {mode: exclusive, ttl: 72h}
+    closure: {by: transition, verdict: [novel, duplicate, invalid]}
+  vulnerability:
+    fields:
+      title:    {type: string, visibility: ["role(params.triage_role)", admin]}
+      severity: {type: "enum(low, medium, high, critical)", visibility: ["role(params.triage_role)", admin]}
+    match_or_create: {by: human}
+
+lanes:
+  - id: reporter
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - collect: {id: file_report, fields: {description: {type: string}, poc: {type: file}}}
+      - act: {id: register, create: report, from: file_report}
+
+  - id: intake
+    entry: {trigger: webhook, dedup: {by: external_id, window: 30d}}
+    nodes:
+      - act: {id: register, create: report, from: webhook.payload}
+
+  - id: triage
+    entry: {trigger: user, access: {mode: role, role: params.triage_role}}
+    nodes:
+      - act: {id: take, claim: {resource: report}}
+      - collect:
+          id: decide
+          fields:
+            outcome:  {type: "enum(novel, duplicate, invalid)"}
+            existing: {type: "ref(vulnerability)", when: 'outcome == "duplicate"'}
+            severity: {type: "enum(low, medium, high, critical)", when: 'outcome == "novel"'}
+      - act:
+          id: route
+          match_or_create: {resource: vulnerability, decision: decide}
+          attach: take.report
+      - act: {id: settle, transition: {resource: take.report, to: closed, verdict: decide.outcome}}
+      - gate: {id: novel_only, all: ['decide.outcome == "novel"']}
+      - reward:
+          id: bounty
+          to: take.report.author
+          amount: {mapping: tiers, tiers: params.tiers, key: severity, match: equals, input: decide.severity}
+          pool: params.pool

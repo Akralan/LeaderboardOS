@@ -1,0 +1,58 @@
+format: leaderboardos/1
+
+template:
+  id: design-contest
+  version: 1.0.0
+  name: Design contest
+  summary: >
+    Open submissions during the window; at closure a jury aggregate ranks
+    entries and the podium is paid by rank.
+
+params:
+  pool:       {type: points, mutable: false}
+  close_date: {type: date, mutable: true}
+  podium:     {type: "list(points)", mutable: false}
+  jury_role:  {type: role, mutable: false}
+
+requires: {core: 1}
+
+resources:
+  entry:
+    fields:
+      asset:     {type: file, visibility: [author, "role(params.jury_role)", admin]}
+      statement: {type: string}
+    created_by: [contributor.register]
+    closure: {by: transition}
+
+lifecycle:
+  states: {close_at: params.close_date}
+  aggregates:
+    - id: panel
+      over: entry
+      per_participation: 1
+      resolve:
+        when:    'challenge.state == "closed"'
+        verdict: "mean(inputs.map(i, i.score))"
+  on_close:
+    - reward:
+        id: podium_pay
+        amount: {mapping: rank, over: entry, by: aggregates.panel.verdict, order: desc, amounts: params.podium}
+        pool: params.pool
+
+lanes:
+  - id: contributor
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - collect: {id: submit, fields: {asset: {type: file}, statement: {type: string}}}
+      - act: {id: register, create: entry, from: submit}
+
+  - id: jury
+    entry: {trigger: user, access: {mode: role, role: params.jury_role}}
+    nodes:
+      - collect: {id: pick, fields: {entry: {type: "ref(entry)"}}}
+      - gate: {id: not_own, all: ["pick.entry.author != participation.user"]}
+      - assess:
+          id: score
+          kind: human
+          fields: {score: {type: number, check: "value >= 0.0 && value <= 9.0"}}
+          emit: {to: lifecycle.panel, scope: pick.entry}

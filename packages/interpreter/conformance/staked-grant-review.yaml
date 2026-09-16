@@ -1,0 +1,83 @@
+format: leaderboardos/1
+
+template:
+  id: staked-grant-review
+  version: 1.0.0
+  name: Staked grant review
+  summary: >
+    Reviewers stake points to enter; each application is reviewed by k
+    reviewers; consensus pays the aligned and slashes the deviant, bounded
+    by their stake; remaining stake is refunded at challenge close.
+
+params:
+  pool:       {type: points, mutable: false}
+  stake:      {type: points, mutable: false}
+  redundancy: {type: int, mutable: false}
+  per_review: {type: points, mutable: true}
+  slash:      {type: points, mutable: true}
+
+requires: {core: 1}
+
+resources:
+  application:
+    fields:
+      title:    {type: string}
+      document: {type: file}
+    created_by: [intake.register]
+    claim: {mode: k_bounded, k: params.redundancy, ttl: 96h}
+    closure: {by: aggregate, verdict: [fund, reject]}
+
+counters:
+  slashed: {type: points}
+
+lifecycle:
+  aggregates:
+    - id: consensus
+      over: application
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) == params.redundancy"
+        verdict: "majority(inputs.map(i, i.recommendation))"
+        then:
+          - transition: {resource: application, to: closed}
+          - reward:
+              to:     "inputs.filter(i, i.recommendation == verdict)"
+              amount: params.per_review
+              pool:   params.pool
+          - counters:
+              on: "inputs.filter(i, i.recommendation != verdict)"
+              update:
+                slashed: {add: "min(params.slash, params.stake - counters.slashed)"}
+  on_close:
+    - reward:
+        id: refund
+        to: each_participation
+        amount: "params.stake - counters.slashed"
+        rule_key: stake_refund
+
+lanes:
+  - id: intake
+    entry: {trigger: admin}
+    nodes:
+      - collect: {id: register_app, fields: {title: {type: string}, document: {type: file}}}
+      - act: {id: register, create: application, from: register_app}
+
+  - id: reviewer
+    entry:
+      trigger: user
+      access:
+        mode: open
+        stake: {amount: params.stake}
+    nodes:
+      - act: {id: take, claim: {resource: application}}
+      - collect:
+          id: review
+          fields:
+            recommendation: {type: "enum(fund, reject)"}
+            score:          {type: number}
+            rationale:      {type: string, visibility: [admin]}
+      - assess:
+          id: cast
+          kind: human
+          from: review
+          emit: {to: lifecycle.consensus, scope: take.application}

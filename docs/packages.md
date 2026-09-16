@@ -43,6 +43,17 @@ What flows, extensions and modules build on:
 - **`http-proxy/`** — `ssrf-guard.ts` (`assertPublicHttpUrl`, guarded DNS lookup) and `endpoint-proxy.ts` (the proxied call to a contributor's endpoint)
 - **`testing/action-context.ts`** — a fake action context for handler tests
 
+### `packages/interpreter`
+
+Reads and validates `leaderboardos/1` challenge templates (milestone J1 of `docs/input/interpreter-design-note.md`; compiling to a `FlowDefinition` is J2):
+- **`expr/`** — the CEL-syntax expression parser and its static type-checker
+- **`format/`** — the document schema (zod) and the declared-type syntax
+- **`validate/`** — the passes: format, references, types, graph shape, economy, claims; plus the features v1 does not compile yet (`SupportGap`)
+- **`catalog.ts`** — the capabilities a template may name, with their arguments, outputs and create-or-get flag
+- **`conformance/`** — the eleven templates of the conformance suite 0.2 in canonical form (`CANONICAL.md` lists the rewrites)
+
+`npm run templates:check` validates the corpus and `content/templates/*/template.yaml`.
+
 ### `packages/config`
 
 **Required by:** everything

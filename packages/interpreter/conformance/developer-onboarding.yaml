@@ -1,0 +1,49 @@
+format: leaderboardos/1
+
+template:
+  id: developer-onboarding
+  version: 1.0.0
+  name: Developer onboarding
+  summary: >
+    A single long run: each step gives an instruction, verifies on a
+    third-party API that it really happened, and pays a micro-reward.
+
+params:
+  pool:        {type: points, mutable: false}
+  repo:        {type: url, mutable: false}
+  step_points: {type: "list(points)", mutable: true}
+
+requires: {core: 1}
+
+resources: {}
+
+lanes:
+  - id: dev
+    entry:
+      trigger: user
+      access: {mode: open, runs_per_participation: 1}
+    nodes:
+      - collect: {id: identity, fields: {github_handle: {type: string}}}
+      - act:
+          id: v_fork
+          kind: observer
+          capability: github_check
+          check: fork_exists
+          of: params.repo
+          by: identity.github_handle
+      - gate:   {id: g1, all: ["v_fork.ok"]}
+      - reward: {id: r1, amount: "params.step_points[0]", pool: params.pool}
+      - collect: {id: pr, fields: {url: {type: url}}}
+      - act:
+          id: v_pr
+          kind: observer
+          capability: github_check
+          check: pr_open
+          url: pr.url
+          by: identity.github_handle
+      - gate:   {id: g2, all: ["v_pr.ok"]}
+      - reward: {id: r2, amount: "params.step_points[1]", pool: params.pool}
+      - collect: {id: deploy, fields: {endpoint: {type: url}}}
+      - act:    {id: v_live, kind: observer, capability: http_proxy, to: deploy.endpoint}
+      - gate:   {id: g3, all: ["v_live.status == 200"]}
+      - reward: {id: r3, amount: "params.step_points[2]", pool: params.pool}
