@@ -22,7 +22,8 @@ import type {
   PromotableSandbox,
   SavedChallenge,
 } from '@/lib/flowFormSlots';
-import { creatableFormSections, formSectionByKey, formSectionFor } from '@/distribution/mytwin.forms';
+import { creatableFormSections, formSectionByKey, formSectionFor, templateFormSection, type PublishedTemplateEntry } from '@/distribution/mytwin.forms';
+import type { FlowFormSection } from '@/lib/flowFormSlots';
 
 export type { EditableChallenge, PromotableSandbox, SavedChallenge } from '@/lib/flowFormSlots';
 
@@ -89,6 +90,8 @@ export function CreateChallengeDrawer({ open, onClose, projects, onCreated, chal
   const [sectionKey, setSectionKey] = useState(creatableFormSections[0].key);
   // L'état de chaque section, par entrée : revenir sur une entrée retrouve sa saisie.
   const [flowStates, setFlowStates] = useState<Record<string, unknown>>({});
+  // Les templates publiés en base : une entrée générée chacun, à côté des sections écrites à la main.
+  const [templateSections, setTemplateSections] = useState<FlowFormSection[]>([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [cp, setCp] = useState(100);
@@ -116,7 +119,7 @@ export function CreateChallengeDrawer({ open, onClose, projects, onCreated, chal
   const [pendingChallenge, setPendingChallenge] = useState<SavedChallenge | null>(null);
 
   const ctx: FlowFormContext = { mode, challenge, promotion, pool: cp, open };
-  const section = formSectionByKey(sectionKey);
+  const section = formSectionByKey(sectionKey, templateSections);
   const flowState = flowStates[section.key] ?? section.initialState(ctx);
   const patchFlowState = (patch: Record<string, unknown>) =>
     setFlowStates(prev => ({
@@ -183,6 +186,29 @@ export function CreateChallengeDrawer({ open, onClose, projects, onCreated, chal
       setProjectId((current) => current || projects[0]?.id || '');
     }
   }, [open, challenge, promotion]);
+
+  // Les templates publiés se chargent à l'ouverture (réservé aux admins : ailleurs, la liste reste vide).
+  // Un challenge édité sur l'un d'eux bascule sur sa section dès qu'elle est connue.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch('/api/templates')
+      .then(r => (r.ok ? r.json() : { templates: [] }))
+      .then((body: { templates?: PublishedTemplateEntry[] }) => {
+        if (cancelled) return;
+        const sections = (body.templates ?? []).filter(entry => entry.latest).map(templateFormSection);
+        setTemplateSections(sections);
+        const existing = challenge ?? promotion;
+        const owned = existing ? sections.find(candidate => candidate.covers(existing.type)) : undefined;
+        if (owned && challenge) {
+          setSectionKey(owned.key);
+          setFlowStates({ [owned.key]: owned.initialState({ mode: 'edit', challenge, pool: challenge.contribution_points_reward, open }) });
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Le brief vit dans les documents du challenge, pas dans sa ligne : en
   // édition il faut aller le chercher. Silencieux en cas d'échec — le tiroir
@@ -442,8 +468,8 @@ export function CreateChallengeDrawer({ open, onClose, projects, onCreated, chal
               the same reason seen from the other end: it is inherited from the
               sandbox, which already fixed the fields and the grid. */}
           <Field label="Type">
-            <div className="flex gap-2">
-              {creatableFormSections.map(opt => {
+            <div className="flex flex-wrap gap-2">
+              {[...creatableFormSections, ...templateSections].map(opt => {
                 const Icon = opt.icon;
                 const active = section.key === opt.key;
                 if (typeLocked && !active) return null;

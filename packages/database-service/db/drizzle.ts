@@ -89,6 +89,14 @@ export const challenges = pgTable("challenges", {
   // qui intéresse le digest est la dernière fermeture, pas la première.
   // 'archived' ne la pose pas — archiver retire des listings, ça ne termine pas.
   closed_at: timestamp("closed_at"),
+  // Un challenge servi par un template en base : la version publiée qu'il
+  // référence, jamais copiée. NULL pour les flows fichiers (templates système,
+  // flows écrits à la main). `template_status` vaut toujours 'published' à côté
+  // d'une version : il n'existe que pour la clé étrangère composite
+  // (type, template_version, template_status) → template_versions, qui interdit
+  // par la base de référencer un brouillon (scripts/db-apply-schema.ts).
+  template_version: varchar("template_version", { length: 32 }),
+  template_status: varchar("template_status", { length: 16 }),
 }, (table) => ({
   projectIdIdx: index("idx_challenges_project_id").on(table.project_id),
   statusIdx: index("idx_challenges_status").on(table.status),
@@ -1472,6 +1480,49 @@ export const blobs = pgTable("blobs", {
 }, (table) => ({
   challengeIdx: index("idx_blobs_challenge_id").on(table.challenge_id),
 }));
+
+// --- TEMPLATES EN BASE (challenge 021, T1) ---
+// Le texte YAML fait foi ; le compilé se dérive en mémoire. Une version publiée
+// est immuable : un trigger refuse toute mise à jour ou suppression d'une ligne
+// publiée, et impose qu'une publication soit strictement supérieure à la
+// précédente (semver comparé en entiers). Un brouillon n'a pas de version : elle
+// est lue dans le YAML à la publication. Un seul brouillon par template.
+// `created_by` et `published_by` sont une trace d'audit sans clé étrangère : un
+// ON DELETE SET NULL réécrirait une ligne publiée.
+export const templates = pgTable("templates", {
+  key: varchar("key", { length: 50 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  created_by: uuid("created_by"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  archived_at: timestamp("archived_at"),
+});
+
+export const template_versions = pgTable("template_versions", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  template_key: varchar("template_key", { length: 50 }).notNull().references(() => templates.key),
+  status: varchar("status", { length: 16 }).notNull().default("draft"),
+  version: varchar("version", { length: 32 }),
+  yaml: text("yaml").notNull(),
+  checksum: varchar("checksum", { length: 64 }).notNull(),
+  created_by: uuid("created_by"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+  published_at: timestamp("published_at"),
+  published_by: uuid("published_by"),
+}, (table) => ({
+  versionIdx: uniqueIndex("idx_template_versions_version").on(table.template_key, table.version),
+  referenceIdx: uniqueIndex("idx_template_versions_reference").on(table.template_key, table.version, table.status),
+  draftIdx: uniqueIndex("idx_template_versions_draft").on(table.template_key).where(sql`status = 'draft'`),
+}));
+
+// L'empreinte de chaque template système au dernier démarrage : un changement
+// de fichier entre deux déploiements lève une alerte (les challenges en cours
+// suivent le déploiement — arbitrage 7 de la note).
+export const system_template_checksums = pgTable("system_template_checksums", {
+  key: varchar("key", { length: 50 }).primaryKey(),
+  checksum: varchar("checksum", { length: 64 }).notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+});
 
 // --- DATABASE CLIENT ---
 

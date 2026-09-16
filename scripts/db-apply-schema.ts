@@ -1255,6 +1255,134 @@ const STATEMENTS: Array<{ label: string; sql: string } | { label: string; run: (
     sql: `CREATE INDEX IF NOT EXISTS idx_blobs_challenge_id ON blobs (challenge_id)`,
   },
 
+  // --- Templates en base (challenge 021, T1 — docs/input/templates-in-db-design-note.md) ---
+  {
+    label: "templates",
+    sql: `
+      CREATE TABLE IF NOT EXISTS templates (
+        key varchar(50) PRIMARY KEY,
+        name varchar(255) NOT NULL,
+        created_by uuid,
+        created_at timestamp NOT NULL DEFAULT now(),
+        archived_at timestamp,
+        -- L'invariant sans point : le premier point d'une clé de ledger préfixée sépare toujours la clé du template.
+        CONSTRAINT templates_key_kebab CHECK (key ~ '^[a-z][a-z0-9-]*$')
+      )`,
+  },
+  {
+    label: "template_versions",
+    sql: `
+      CREATE TABLE IF NOT EXISTS template_versions (
+        uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        template_key varchar(50) NOT NULL REFERENCES templates(key),
+        status varchar(16) NOT NULL DEFAULT 'draft',
+        version varchar(32),
+        yaml text NOT NULL,
+        checksum varchar(64) NOT NULL,
+        created_by uuid,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now(),
+        published_at timestamp,
+        published_by uuid,
+        CONSTRAINT template_versions_status CHECK (
+          (status = 'draft' AND version IS NULL AND published_at IS NULL)
+          OR (status = 'published' AND version IS NOT NULL AND published_at IS NOT NULL)
+        ),
+        CONSTRAINT template_versions_semver CHECK (version IS NULL OR version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$')
+      )`,
+  },
+  {
+    label: "template_versions (template_key, version) unique",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_template_versions_version ON template_versions (template_key, version)`,
+  },
+  {
+    label: "template_versions (template_key, version, status) unique — cible de la FK des challenges",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_template_versions_reference ON template_versions (template_key, version, status)`,
+  },
+  {
+    label: "template_versions: un seul brouillon par template",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_template_versions_draft ON template_versions (template_key) WHERE status = 'draft'`,
+  },
+  {
+    label: "template_versions: garde d'immuabilité et d'ordre (trigger)",
+    sql: `
+      CREATE OR REPLACE FUNCTION template_versions_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$
+      DECLARE
+        latest varchar;
+      BEGIN
+        IF TG_OP = 'INSERT' THEN
+          IF NEW.status <> 'draft' THEN
+            RAISE EXCEPTION 'template %: a version is created as a draft, then published', NEW.template_key USING ERRCODE = 'check_violation';
+          END IF;
+          RETURN NEW;
+        END IF;
+        IF OLD.status = 'published' THEN
+          RAISE EXCEPTION 'template % version % is published: it is immutable', OLD.template_key, OLD.version USING ERRCODE = 'check_violation';
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+          RETURN OLD;
+        END IF;
+        IF NEW.template_key <> OLD.template_key THEN
+          RAISE EXCEPTION 'a draft never changes template' USING ERRCODE = 'check_violation';
+        END IF;
+        IF NEW.status = 'published' THEN
+          SELECT version INTO latest FROM template_versions
+            WHERE template_key = NEW.template_key AND status = 'published'
+            ORDER BY string_to_array(version, '.')::int[] DESC LIMIT 1;
+          IF latest IS NOT NULL AND string_to_array(NEW.version, '.')::int[] <= string_to_array(latest, '.')::int[] THEN
+            RAISE EXCEPTION 'template % version % must be greater than the last published %', NEW.template_key, NEW.version, latest USING ERRCODE = 'check_violation';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END
+      $guard$`,
+  },
+  {
+    label: "template_versions: trigger",
+    sql: `
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'template_versions_guard') THEN
+          CREATE TRIGGER template_versions_guard BEFORE INSERT OR UPDATE OR DELETE ON template_versions
+            FOR EACH ROW EXECUTE FUNCTION template_versions_guard();
+        END IF;
+      END $$`,
+  },
+  {
+    label: "system_template_checksums",
+    sql: `
+      CREATE TABLE IF NOT EXISTS system_template_checksums (
+        key varchar(50) PRIMARY KEY,
+        checksum varchar(64) NOT NULL,
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+  },
+  {
+    label: "challenges.template_version",
+    sql: `ALTER TABLE challenges ADD COLUMN IF NOT EXISTS template_version varchar(32)`,
+  },
+  {
+    label: "challenges.template_status",
+    sql: `ALTER TABLE challenges ADD COLUMN IF NOT EXISTS template_status varchar(16)`,
+  },
+  {
+    label: "challenges: une version référencée est toujours publiée (check + FK composite)",
+    sql: `
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'challenges_template_reference') THEN
+          ALTER TABLE challenges ADD CONSTRAINT challenges_template_reference CHECK (
+            (template_version IS NULL AND template_status IS NULL)
+            OR (template_version IS NOT NULL AND template_status = 'published')
+          );
+        END IF;
+        -- MATCH SIMPLE : une colonne NULL (flows fichiers) passe ; une version en base doit être publiée.
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'challenges_template_version_fk') THEN
+          ALTER TABLE challenges ADD CONSTRAINT challenges_template_version_fk
+            FOREIGN KEY (type, template_version, template_status)
+            REFERENCES template_versions (template_key, version, status);
+        END IF;
+      END $$`,
+  },
+
   // --- Slugs des URLs publiques (docs/superpowers/plans/2026-09-15-slug-urls.md) ---
   //
   // En toute fin de tableau, volontairement : le SET NOT NULL rend la colonne

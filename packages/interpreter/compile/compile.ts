@@ -48,6 +48,15 @@ export class CompileError extends Error {}
 
 export interface CompileOptions {
   runtime?: TemplateRuntime;
+  /**
+   * Un template en base, publié sous cette version. Ses clés de ledger et son
+   * type de contribution déclarés sont préfixés par sa clé (`<clé>.<rule_key>`) :
+   * la clé ne contient jamais de point, le premier sépare donc toujours le
+   * préfixe, et deux versions produisent les mêmes clés. Ses jobs ne
+   * parcourent que les challenges de cette version. Absent : un template
+   * système, dont les clés nues sont celles de la distribution.
+   */
+  published?: { version: string };
   /** Présentation : le template n'en dit rien. */
   icon?: string;
   publiclyVisible?: boolean;
@@ -82,23 +91,25 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   const { shell } = model;
   const flowKey = shell.template.id;
   const runtime = options.runtime ?? defaultRuntime();
+  // Une clé déclarée d'un template en base porte son préfixe ; les clés par défaut l'ont déjà.
+  const declared = (key: string) => (options.published ? `${flowKey}.${key}` : key);
 
   // ── Récompenses : clés de ledger, pool ──────────────────────────────────
   const rewards: { body: RewardBody; key: string; ref?: string }[] = [];
   const collectRewards = (nodes: readonly NodeModel[], owner: string) => {
     for (const node of nodes) {
-      if (node.family === "reward") rewards.push({ body: node.body, key: node.body.rule_key ?? `${flowKey}.${owner}.${node.id}`, ref: `${owner}.${node.id}` });
+      if (node.family === "reward") rewards.push({ body: node.body, key: node.body.rule_key ? declared(node.body.rule_key) : `${flowKey}.${owner}.${node.id}`, ref: `${owner}.${node.id}` });
       if (node.family === "gate") for (const branch of node.branches ?? []) collectRewards(branch.nodes, owner);
     }
   };
   for (const lane of model.lanes) collectRewards(lane.nodes, lane.id);
   for (const aggregate of model.aggregates) {
     aggregate.then.forEach((effect, i) => {
-      if (effect.family === "reward") rewards.push({ body: effect.body, key: effect.body.rule_key ?? `${flowKey}.${aggregate.decl.id}.${i}` });
+      if (effect.family === "reward") rewards.push({ body: effect.body, key: effect.body.rule_key ? declared(effect.body.rule_key) : `${flowKey}.${aggregate.decl.id}.${i}` });
     });
   }
   model.onClose.forEach((effect, i) => {
-    if (effect.family === "reward") rewards.push({ body: effect.body, key: effect.body.rule_key ?? `${flowKey}.close.${effect.body.id ?? i}` });
+    if (effect.family === "reward") rewards.push({ body: effect.body, key: effect.body.rule_key ? declared(effect.body.rule_key) : `${flowKey}.close.${effect.body.id ?? i}` });
   });
 
   const poolParam = poolParamOf(model);
@@ -132,7 +143,10 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     counterWrites: model.lanes.flatMap((lane) => counterWritesOf(lane.nodes)),
     replays: replaysOf(flowKey, model.lanes, types.nodeFields),
     crossEmits: crossEmitsOf(model, types.nodeFields),
-    contribution: shell.presentation?.contribution ?? { type: flowKey, title: shell.template.name },
+    contribution: shell.presentation?.contribution
+      ? { ...shell.presentation.contribution, type: declared(shell.presentation.contribution.type) }
+      : { type: flowKey, title: shell.template.name },
+    version: options.published?.version ?? null,
   };
   const engine = new Engine(compiled);
 
@@ -506,6 +520,8 @@ function cronJob(lane: LaneModel, t: CompiledTemplate, engine: Engine, params: C
       const summary = { challenges: 0, instances: 0, ran: 0 };
       for (const challenge of await t.runtime.challengesOf(t.flowKey)) {
         if (challenge.status !== "active") continue;
+        // Chaque version exécute ses propres challenges : le registre réunit le même job de toutes les versions.
+        if ((challenge.template_version ?? null) !== t.version) continue;
         const values = params.valuesOf(challenge, flowConfigOf(challenge));
         if (!values) continue;
         summary.challenges++;

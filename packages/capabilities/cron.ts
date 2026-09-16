@@ -228,6 +228,15 @@ async function runClaimed(
  * est journalisé et inscrit dans `cron_runs` ; les suivants tournent quand même.
  */
 export async function runDueJobs(options: CronOptions = {}): Promise<JobRunSummary[]> {
+  // Les versions publiées depuis le démarrage de cette instance : sans elles,
+  // la boucle n'itérerait que les jobs qu'elle connaît déjà.
+  if (!options.jobs && PlatformRegistry.isInstalled()) {
+    try {
+      await (await import("./templates.js")).templates().refreshPublished();
+    } catch (error) {
+      console.error("[cron] Published templates could not be refreshed:", error);
+    }
+  }
   const jobs = options.jobs ?? installedJobs();
   const repo = options.repo ?? new CronRunRepository();
   const clock = options.clock ?? (() => new Date());

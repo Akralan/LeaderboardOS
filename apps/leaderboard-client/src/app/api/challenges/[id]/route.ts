@@ -94,7 +94,7 @@ export async function PUT(
     // Same rule: present-but-null clears the rules, absent leaves them alone.
     // Their shape belongs to the challenge's flow, which parses them.
     if (validated.reward_rules !== undefined) {
-      const rewardRules = parseFlowRules(before.type, validated.reward_rules);
+      const rewardRules = parseFlowRules(before.type, validated.reward_rules, before.template_version);
       if (!rewardRules.ok) {
         return NextResponse.json({ error: 'Invalid reward_rules' }, { status: 400 });
       }

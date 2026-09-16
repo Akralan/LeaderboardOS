@@ -178,6 +178,7 @@ export function toDomainChallenge(row: DbChallenge): Challenge {
     flow_config_version: row.flow_config_version ?? 1,
     created_at: new Date(row.created_at),
     closed_at: row.closed_at ? new Date(row.closed_at) : null,
+    template_version: row.template_version ?? null,
   };
 }
 
@@ -313,6 +314,9 @@ export function toDbChallenge(entity: Omit<Challenge, "uuid" | "created_at">): t
     source_challenge_id: entity.source_challenge_id ?? null,
     flow_config: entity.flow_config ?? null,
     flow_config_version: entity.flow_config_version ?? 1,
+    // La version référencée d'un template en base : toujours publiée (la FK composite le tient).
+    template_version: entity.template_version ?? null,
+    template_status: entity.template_version ? "published" : null,
     // Colonnes historiques écrites en miroir jusqu'au lot L7 (domain/legacyFlowConfig.ts).
     ...legacyChallengeColumns(entity.flow_config),
   };

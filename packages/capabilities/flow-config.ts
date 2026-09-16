@@ -20,6 +20,8 @@ import { PlatformRegistry, type FlowDefinition } from "../registry/platform.js";
 /** Ce qu'il faut d'un challenge pour lire sa configuration. */
 export interface FlowConfigSource {
   type?: string | null;
+  /** La version du template en base qui sert le challenge : sa configuration se lit avec ce flow-là. */
+  template_version?: string | null;
   flow_config?: unknown;
   flow_config_version?: number | null;
 }
@@ -91,7 +93,7 @@ function validate(flow: FlowDefinition, raw: Record<string, unknown>): FlowConfi
 /** La configuration d'un challenge, montée à la version courante de son flow. */
 export function readFlowConfig(challenge: FlowConfigSource): FlowConfigReading {
   const flowKey = challenge.type ?? "";
-  const flow = PlatformRegistry.flow(flowKey);
+  const flow = PlatformRegistry.flowFor(challenge);
   if (!flow) return { state: "unknown_flow", flowKey };
 
   const version = currentVersion(flow);
@@ -123,8 +125,8 @@ export interface StoredFlowConfig {
 }
 
 /** Valide la configuration d'un challenge à créer, dans la version courante de son flow. */
-export function prepareFlowConfig(flowKey: string, raw: unknown): StoredFlowConfig {
-  const flow = PlatformRegistry.flow(flowKey);
+export function prepareFlowConfig(flowKey: string, raw: unknown, templateVersion?: string | null): StoredFlowConfig {
+  const flow = templateVersion ? PlatformRegistry.flowFor({ type: flowKey, template_version: templateVersion }) : PlatformRegistry.flow(flowKey);
   if (!flow) throw new FlowConfigError(`Unknown challenge type "${flowKey}"`);
 
   try {
@@ -146,7 +148,7 @@ export function patchExtensionConfig(
   patch: Record<string, unknown>,
 ): StoredFlowConfig | null {
   const flowKey = challenge.type ?? "";
-  const extension = PlatformRegistry.flow(flowKey)
+  const extension = PlatformRegistry.flowFor(challenge)
     ? PlatformRegistry.extensionsFor(flowKey).find((candidate) => candidate.key === extensionKey)
     : undefined;
   if (!extension?.config) return null;
@@ -163,10 +165,11 @@ export function patchExtensionConfig(
   }
 
   const section = { ...(reading.config.extensions?.[extensionKey] ?? {}), ...patch };
-  return prepareFlowConfig(flowKey, {
-    ...reading.config,
-    extensions: { ...reading.config.extensions, [extensionKey]: section },
-  });
+  return prepareFlowConfig(
+    flowKey,
+    { ...reading.config, extensions: { ...reading.config.extensions, [extensionKey]: section } },
+    challenge.template_version
+  );
 }
 
 export type FlowConfigUpgradePlan =
@@ -201,9 +204,11 @@ export type FlowRulesParse = { ok: true; rules: unknown } | { ok: false };
  * Lit des règles de récompense avec le parseur du flow. `null` en entrée
  * efface les règles ; un flow sans règles n'en accepte aucune.
  */
-export function parseFlowRules(flowKey: string, raw: unknown): FlowRulesParse {
+export function parseFlowRules(flowKey: string, raw: unknown, templateVersion?: string | null): FlowRulesParse {
   if (raw == null) return { ok: true, rules: null };
-  const parse = PlatformRegistry.flow(flowKey)?.rules?.parse;
+  // Un challenge existant se lit avec sa version ; une création, avec la dernière publiée.
+  const flow = templateVersion ? PlatformRegistry.flowFor({ type: flowKey, template_version: templateVersion }) : PlatformRegistry.flow(flowKey);
+  const parse = flow?.rules?.parse;
   const rules = parse ? parse(raw) : null;
   return rules == null ? { ok: false } : { ok: true, rules };
 }

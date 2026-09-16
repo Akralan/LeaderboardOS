@@ -167,7 +167,7 @@ export function defaultRuntime(
         const { ChallengeRepository, ContributionRepository } = await repositories();
         const { PlatformRegistry } = await import("../../registry/platform.js");
         const source = await new ChallengeRepository().findById(challenge.source_challenge_id);
-        const deliverable = PlatformRegistry.flow(source?.type)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
+        const deliverable = (source ? PlatformRegistry.flowFor(source) : undefined)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
         if (!source || !deliverable) return [];
         const contributions = await new ContributionRepository().findByChallenge(source.uuid);
         return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map(linked);

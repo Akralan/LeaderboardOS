@@ -11,6 +11,9 @@ import { mlFormLogic } from './forms/ml';
 import { VALIDATION_FLOW_BY_SOURCE, validationFormLogic } from './forms/validation';
 import { sandboxKindOf, sandboxKinds } from './forms/sandbox';
 import { annotationFormLogic, optionKeyOf } from './forms/annotation';
+import { templateFormLogic } from './forms/template';
+import { endpointCheckTemplate } from '../../../../content/templates/endpoint-check/descriptor';
+import { dataAnnotationTemplate } from '../../../../content/templates/data-annotation/descriptor';
 
 const create: FlowFormContext = { mode: 'create', pool: 100, open: true };
 const edit = (challenge: Record<string, unknown>): FlowFormContext => ({
@@ -184,5 +187,48 @@ describe('sandbox kinds', () => {
   it('asks for a dataset and a model only on a proposal that becomes an ML challenge', () => {
     expect(sandboxKinds.map((kind) => [kind.key, kind.artifacts])).toEqual([['code', false], ['ml', true]]);
     expect(sandboxKindOf('unknown').key).toBe('code');
+  });
+});
+
+describe('generated section of a database template', () => {
+  // La même description que `GET /api/templates` sert : ici, celle du template endpoint-check.
+  const described = endpointCheckTemplate;
+  const entry = { key: 'db-check', name: 'DB check', latest: { version: '1.2.0', descriptor: described.descriptor, surface: described.surface } };
+  const logic = templateFormLogic(entry);
+
+  it('fills the config and rules params, never the pool, and asks for the source', () => {
+    expect(described.surface.params.map((param) => [param.name, param.kind, param.binding])).toEqual([
+      ['pool', 'int', 'pool'],
+      ['cp_per_validation', 'int', 'config'],
+      ['required_validations', 'int', 'config'],
+      ['source_challenge', 'challenge', 'source'],
+      ['reviewer_qualification', 'role', 'config'],
+    ]);
+    const state = logic.initialState(create);
+    expect(logic.validate!(state, create)).toBe('Pick the source challenge this template works on.');
+    expect(logic.validate!({ ...state, sourceChallengeId: 'src' }, create)).toBe('cp_per_validation is required');
+  });
+
+  it('sends the typed flow_config and the source at creation, only the rules on edit', () => {
+    const filled = { sourceChallengeId: 'src', values: { cp_per_validation: 10, required_validations: 3, reviewer_qualification: 'medical_pro' } };
+    expect(logic.validate!(filled, create)).toBeNull();
+    expect(logic.body(filled, create)).toEqual({
+      type: 'db-check',
+      flow_config: { cp_per_validation: 10, required_validations: 3, reviewer_qualification: 'medical_pro' },
+      reward_rules: null,
+      compute_enabled: false,
+      source_challenge_id: 'src',
+    });
+    const ctx = edit({ type: 'db-check', flow_config: filled.values });
+    expect(logic.initialState(ctx).values).toEqual(filled.values);
+    expect(logic.body(logic.initialState(ctx), ctx)).toEqual({ reward_rules: null });
+    expect(logic.covers('db-check')).toBe(true);
+  });
+
+  it('keeps a structured param as JSON text until it is sent', () => {
+    const annotation = templateFormLogic({ key: 'db-annotation', name: 'A', latest: { version: '1.0.0', descriptor: dataAnnotationTemplate.descriptor, surface: dataAnnotationTemplate.surface } });
+    const state = annotation.initialState(create);
+    expect(typeof state.values.label_schema).toBe('string');
+    expect(annotation.validate!({ ...state, values: { ...state.values, label_schema: '{oops' } }, create)).toBe('label_schema is not valid JSON');
   });
 });

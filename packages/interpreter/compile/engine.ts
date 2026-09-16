@@ -45,6 +45,8 @@ export interface CompiledTemplate {
   counterWrites: readonly { node: string; counter: string; add: ExprSource }[];
   /** Par type de ressource tirée : ce qu'il faut rejouer d'un claim livré. */
   replays: ReadonlyMap<string, ReplaySpec>;
+  /** La version publiée d'un template en base ; `null` pour un template système. */
+  version: string | null;
   /** Le type et le titre de la contribution qui porte les lignes du ledger. */
   contribution: { type: string; title: string };
   /** Les aggregates qui reçoivent des entrées d'un claim posé sur une autre ressource (un case, émis vers un target). */

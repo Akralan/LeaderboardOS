@@ -79,9 +79,27 @@ export interface SurfaceResource {
   aggregates: string[];
 }
 
+/**
+ * Un paramètre, tel qu'un formulaire d'instanciation le génère : pas le schéma
+ * zod (il ne traverse pas HTTP et `z.toJSONSchema` perd les checks nommés),
+ * mais la déclaration. Le serveur revalide avec le vrai schéma à la création.
+ */
+export interface SurfaceParam {
+  name: string;
+  /** Ce que le contrôle saisit : un nombre, un texte, une énumération, une qualification, une structure (JSON)… */
+  kind: "int" | "number" | "bool" | "string" | "url" | "enum" | "role" | "challenge" | "grid" | "json";
+  values?: readonly string[];
+  default?: unknown;
+  /** Où va la valeur : le pool du challenge, son challenge source, sa configuration figée, ses règles éditables. */
+  binding: "pool" | "source" | "config" | "rules";
+  /** Les noms des checks nommés : les messages que le serveur renverra. */
+  checks: string[];
+}
+
 export interface TemplateSurface {
   lanes: SurfaceLane[];
   resources: SurfaceResource[];
+  params: SurfaceParam[];
 }
 
 export function descriptorOf(shell: DocumentShell): FlowDescriptor {
@@ -178,5 +196,23 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
     fields: Object.entries(decl.fields).map(([name, field]) => ({ name, kind: kindOf(types.resources.get(type)?.[name], field.type) })),
     aggregates: model.aggregates.filter((aggregate) => aggregate.decl.over === type).map((aggregate) => aggregate.decl.id),
   }));
-  return { lanes, resources };
+  const poolParam = poolParamOf(model);
+  const params = Object.entries(model.shell.params).map(([name, decl]): SurfaceParam => {
+    const type = types.params[name];
+    const kind: SurfaceParam["kind"] =
+      type?.kind === "int" || type?.kind === "number" || type?.kind === "bool" || type?.kind === "url" || type?.kind === "enum" || type?.kind === "role" || type?.kind === "challenge" || type?.kind === "grid"
+        ? type.kind
+        : type?.kind === "string"
+          ? "string"
+          : "json";
+    return {
+      name,
+      kind,
+      ...(type?.kind === "enum" && type.values ? { values: type.values } : {}),
+      ...(decl.default !== undefined ? { default: decl.default } : {}),
+      binding: name === poolParam ? "pool" : kind === "challenge" ? "source" : decl.mutable ? "rules" : "config",
+      checks: Object.keys(decl.checks ?? {}),
+    };
+  });
+  return { lanes, resources, params };
 }

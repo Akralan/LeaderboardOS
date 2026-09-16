@@ -50,5 +50,7 @@ export { EventDeliveryRepository } from "./eventDelivery.repo.js";
 export type { EventDelivery } from "./eventDelivery.repo.js";
 export { ResourceRepository, ResourceDrawTransaction } from "./resource.repo.js";
 export { BlobRepository } from "./blob.repo.js";
+export { TemplateRepository, TemplateStoreError, checksumOf } from "./template.repo.js";
+export type { PublishedTemplateVersion, TemplateRecord, TemplateVersionRecord } from "./template.repo.js";
 export type { BlobRecord, StoredBlob } from "./blob.repo.js";
 export type { ResourceInstance, ResourceClaim, ConsumedClaim } from "./resource.repo.js";

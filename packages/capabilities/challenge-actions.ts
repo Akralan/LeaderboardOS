@@ -32,6 +32,11 @@ export interface ActionDispatchDeps {
   isManager(userId: string, challenge: Challenge): Promise<boolean>;
   isMember(userId: string, challengeId: string): Promise<boolean>;
   holds(userId: string, qualification: string): Promise<boolean>;
+  /**
+   * Le rattrapage d'un challenge servi par une version de template publiée
+   * après le démarrage de cette instance. Absent : le registre tel quel.
+   */
+  ensureFlowFor?(challenge: Challenge): Promise<{ unservable: string } | unknown>;
 }
 
 export interface ActionDispatchInput {
@@ -58,6 +63,7 @@ function databaseDeps(): ActionDispatchDeps {
     isManager: async (userId, challenge) => (await projectRepo.findById(challenge.project_id))?.manager_id === userId,
     isMember: async (userId, challengeId) => !!(await challengeTeamRepo.findByChallengeAndUser(challengeId, userId)),
     holds: (userId, qualification) => hasQualification(userId, qualification),
+    ensureFlowFor: async (challenge) => (await import("./templates.js")).templates().ensureFlowFor(challenge),
   };
   return defaultDeps;
 }
@@ -106,7 +112,7 @@ async function isAllowed(access: ActionAccess, challenge: Challenge, user: Actio
 }
 
 function declarationsFor(challenge: Challenge, scope: ActionScope): readonly ChallengeActionDeclaration[] | string {
-  const flow = PlatformRegistry.flow(challenge.type);
+  const flow = PlatformRegistry.flowFor(challenge);
   if (!flow) return `No flow installed for challenge type "${challenge.type}"`;
   if (scope.kind === "flow") return flow.actions ?? [];
 
@@ -121,6 +127,14 @@ export async function dispatchChallengeAction(
 ): Promise<Response> {
   const challenge = await deps.findChallenge(input.challengeId);
   if (!challenge) return jsonError(404, "Challenge not found");
+
+  // Une version publiée ailleurs se charge ici ; une version qui ne compile plus répond 503, jamais un autre flow.
+  if (challenge.template_version && deps.ensureFlowFor) {
+    const ensured = await deps.ensureFlowFor(challenge);
+    if (ensured && typeof ensured === "object" && "unservable" in ensured) {
+      return jsonError(503, `Template ${challenge.type}@${challenge.template_version} cannot be served: ${(ensured as { unservable: string }).unservable}`);
+    }
+  }
 
   const declarations = declarationsFor(challenge, input.scope);
   if (typeof declarations === "string") return jsonError(404, declarations);
