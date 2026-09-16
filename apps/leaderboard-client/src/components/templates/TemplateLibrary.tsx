@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Loader2, Plus, X } from 'lucide-react';
+import { Loader2, Plus, Sparkles, X } from 'lucide-react';
+import { stashReport } from './editor/AuthorPanel';
 import { useToast } from '@/components/ui/Toast';
 import { FlowIcon } from '@/components/ui/FlowIcon';
 import { blankTemplate, bump, setAt } from './editor/mutations';
@@ -60,6 +61,7 @@ export function TemplateLibrary() {
   const toast = useToast();
   const [data, setData] = useState<{ system: SystemEntry[]; templates: LibraryEntry[] } | null>(null);
   const [creating, setCreating] = useState(false);
+  const [describing, setDescribing] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   useEffect(() => {
@@ -100,9 +102,14 @@ export function TemplateLibrary() {
           <h1 className="text-3xl font-semibold tracking-tight text-white">Templates</h1>
           <p className="max-w-[520px] text-sm leading-relaxed text-white/50">Graph documents the engine executes. You don’t code the platform, you draw the program.</p>
         </div>
-        <button type="button" onClick={() => setCreating(true)} className="flex items-center gap-1.5 rounded-xl bg-brandCP px-4 py-2 text-sm font-semibold text-black hover:opacity-90">
-          <Plus className="h-4 w-4" /> New template
-        </button>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setDescribing(true)} className="flex items-center gap-1.5 rounded-xl border border-brandCP/40 px-4 py-2 text-sm font-semibold text-brandCP hover:bg-brandCP/10">
+            <Sparkles className="h-4 w-4" /> Describe a flow
+          </button>
+          <button type="button" onClick={() => setCreating(true)} className="flex items-center gap-1.5 rounded-xl bg-brandCP px-4 py-2 text-sm font-semibold text-black hover:opacity-90">
+            <Plus className="h-4 w-4" /> New template
+          </button>
+        </div>
       </div>
 
       {!data ? (
@@ -193,6 +200,7 @@ export function TemplateLibrary() {
       )}
 
       {creating && <NewTemplateModal seeds={seeds} onClose={() => setCreating(false)} />}
+      {describing && <DescribeFlowModal onClose={() => setDescribing(false)} />}
     </div>
   );
 }
@@ -310,6 +318,94 @@ export function DuplicateTemplateModal({ seedKey, seedName, onClose }: { seedKey
         >
           {busy && <Loader2 className="h-4 w-4 animate-spin" />}
           Duplicate and open
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/**
+ * « Describe a flow » (note template-author §3, A3) : une description → l'agent
+ * écrit, valide et répare un brouillon, enregistré même rouge → l'éditeur
+ * s'ouvre dessus, avec le rapport de l'agent.
+ */
+function DescribeFlowModal({ onClose }: { onClose: () => void }) {
+  const router = useRouter();
+  const [description, setDescription] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch('/api/templates/author', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: description.trim(), ...(name.trim() ? { name: name.trim() } : {}) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(body.error ?? `The agent failed (${res.status})`);
+        setBusy(false);
+        return;
+      }
+      stashReport(body.key, {
+        kind: 'author',
+        prompt: description.trim(),
+        choices: body.choices,
+        openQuestions: body.openQuestions,
+        rounds: body.rounds,
+        validAfterFirstRound: body.validAfterFirstRound,
+        diagnostics: body.diagnostics,
+      });
+      router.push(`/admin/templates/${encodeURIComponent(body.key)}`);
+    } catch {
+      setError('The agent could not be reached — try again');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ModalShell title="Describe a flow" onClose={busy ? () => {} : onClose}>
+      <p className="-mt-2 text-xs leading-relaxed text-white/50">
+        Describe the contribution program in plain words: who takes part, what they submit, how it is judged, what gets paid. The agent writes a draft, validates and repairs it, and opens it — it never publishes.
+      </p>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-xs font-semibold text-white/70">Description</span>
+        <textarea
+          autoFocus
+          rows={6}
+          className={`${fieldClass} resize-y leading-relaxed`}
+          value={description}
+          disabled={busy}
+          placeholder="Radiologists label chest X-rays as normal, anomaly or unsure; each image needs 3 agreeing labels; hidden gold images weight pay by accuracy…"
+          onChange={(event) => setDescription(event.target.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-xs font-semibold text-white/70">Name <span className="font-normal text-white/35">— optional</span></span>
+        <input className={fieldClass} value={name} disabled={busy} placeholder="Chest X-ray triage" onChange={(event) => setName(event.target.value)} />
+      </label>
+      {busy && (
+        <span className="flex items-center gap-2 text-xs text-white/50">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Drawing, validating, repairing… this can take a minute.
+        </span>
+      )}
+      {error && <span className="text-xs text-red-400">{error}</span>}
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={onClose} disabled={busy} className="rounded-xl border border-white/10 px-4 py-2 text-sm text-white/70 hover:bg-foreground/[0.04] disabled:opacity-40">
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={busy || description.trim().length < 10}
+          onClick={submit}
+          className="flex items-center gap-2 rounded-xl bg-brandCP px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-40"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Draft it
         </button>
       </div>
     </ModalShell>

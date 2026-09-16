@@ -27,7 +27,7 @@ export async function GET() {
 
 const createSchema = z
   .object({
-    key: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a template key is kebab-case, without dots').max(50),
+    key: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a template key is kebab-case, without dots').max(50).refine((key) => key !== 'author', 'author is reserved'),
     name: z.string().trim().min(1).max(255),
     yaml: z.string().max(1_000_000).optional(),
     // Dupliquer : un template système, ou une version publiée (la dernière sans `version`).

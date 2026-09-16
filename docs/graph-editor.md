@@ -33,3 +33,20 @@ With nothing selected, the right panel shows the declarations: **Params** (type,
 - **Publish** is enabled when the draft has no error and is saved. The modal recaps the validation passes and picks the version (patch / minor / major of the last published one, or the draft's version the first time); the version is written into the YAML, saved, then `POST /api/templates/:key/publish`. The editor then shows the published version read-only.
 - **New version** (canvas or library) starts a draft from the latest published text with its patch version bumped. Published versions are immutable.
 - A published template becomes a challenge from **Challenges → New challenge**, whose configuration section is generated from the template's params.
+
+## The template author agent
+
+An agent that drafts and edits templates from natural language, live on the admin's screen (design note: `docs/input/template-author-design-note.md`). It is an admin of the editor API with no extra privilege: it writes drafts through the `templates` capability, **never publishes**.
+
+- **Describe a flow** (library): a description (and an optional name) → `POST /api/templates/author` → a new template whose draft the editor opens, with the agent's report in the **Author** panel.
+- **Author panel** (canvas, drafts only): an instruction → `POST /api/templates/:key/author/refine` → the draft is changed, saved, and adopted by the editor as one undoable step. The canvas takes no gesture while the agent works.
+- **Report**: validity and rounds, **Choices made** (every assumption the description did not state), **Open questions** (what was ambiguous, or a platform object that does not exist — click one to answer it).
+
+How it works (`packages/template-author`):
+
+- **Context** (`context.ts`): a condensed grammar of `leaderboardos/1`, the capability catalog restricted to what v1 executes, the live registries (qualification keys — declared by the distribution in `mytwin.templates.ts` or held by a user — and evaluation grids), and the whole corpus: the installed templates and the canonical conformance templates, each annotated with what v1 cannot execute. The corpus is generated into `corpus.source.ts` by `npm run templates:build`.
+- **Loop** (`author.ts`): generate → `diagnose` (the list a publication would be refused with) → feed the path-addressed diagnostics back → repair, at most 3 repairs. Still red after that, the draft is saved anyway with its diagnostics.
+- **Edits** (`edits.ts`): to change a document the model sends `set` / `insert` / `delete` edits addressed by path rather than a new text; an edit that does not apply comes back as a diagnostic. The text is rewritten with `yaml-text.ts`, which copies every unchanged subtree byte for byte (comments, folded scalars) — the canvas uses the same writer.
+- **Model** (`service.ts`): OpenAI through the evaluator's client (key from the OpenAI connection or `OPENAI_API_KEY`), `TEMPLATE_AUTHOR_MODEL` (default `gpt-5.6-luna`), JSON output. Synchronous route, `maxDuration` 300 s.
+
+**Bench**: `npm run templates:author-bench [name…]` runs one-sentence descriptions of the twelve reference flows (`bench.ts`) against the real model, plus refine cases checked for collateral changes. It writes nothing to the database. Last run (Sept. 2026, `gpt-5.6-luna`): 5/12 valid at the first round, 12/12 after repair, refines valid.

@@ -12,3 +12,10 @@ export const systemTemplateSources: readonly { key: string; yaml: string }[] = [
   { key: 'data-annotation', yaml: dataAnnotationSource },
   { key: 'endpoint-check', yaml: endpointCheckSource },
 ];
+
+/**
+ * Les qualifications que la distribution déclare (`MEDICAL_PRO` dans
+ * mytwin.platform.ts) : l'agent auteur les propose même quand personne ne les
+ * détient encore. Données pures, sans charger la plateforme.
+ */
+export const declaredQualifications: readonly string[] = ['medical_pro'];

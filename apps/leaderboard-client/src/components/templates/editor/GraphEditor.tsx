@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, ChevronsLeft, ChevronsRight, Code2, Copy, Eye, Loader2, Redo2, Undo2 } from 'lucide-react';
+import { ArrowLeft, ChevronsLeft, ChevronsRight, Code2, Copy, Eye, Loader2, Redo2, Sparkles, Undo2 } from 'lucide-react';
+import { AuthorPanel, takeStashedReport, type AuthorReport } from './AuthorPanel';
 import { useToast } from '@/components/ui/Toast';
 import { Canvas, LockedPaletteItem, PaletteItem } from './Canvas';
 import { Declarations } from './Declarations';
@@ -144,7 +145,20 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<DeclarationTab>('params');
   const [paletteOpen, setPaletteOpen] = useState(true);
-  const [panel, setPanel] = useState<'preview' | 'source' | null>(null);
+  const [panel, setPanel] = useState<'preview' | 'source' | 'author' | null>(null);
+  const [authorReports, setAuthorReports] = useState<AuthorReport[]>([]);
+  const [authorBusy, setAuthorBusy] = useState(false);
+  const [authorError, setAuthorError] = useState('');
+
+  // Un brouillon que l'agent vient de créer depuis la bibliothèque s'ouvre sur son rapport.
+  useEffect(() => {
+    if (loaded.mode !== 'draft') return;
+    const report = takeStashedReport(templateKey);
+    if (report) {
+      setAuthorReports([report]);
+      setPanel('author');
+    }
+  }, [loaded.mode, templateKey]);
   const [drawerOpen, setDrawerOpen] = useState(loaded.mode === 'draft');
   const [publishOpen, setPublishOpen] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
@@ -332,7 +346,8 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
     templateKey,
     source,
     model,
-    readOnly,
+    // Pendant que l'agent écrit, le canevas ne prend pas de geste : sa réponse remplacerait le texte.
+    readOnly: readOnly || authorBusy,
     apply,
     selected: selection,
     select: setSelected,
@@ -389,6 +404,32 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
     else onReload();
   };
 
+  const refine = async (instruction: string) => {
+    setAuthorBusy(true);
+    setAuthorError('');
+    try {
+      // L'agent part du brouillon enregistré : ce qui est à l'écran doit l'être.
+      await document.flush();
+      const res = await fetch(`/api/templates/${encodeURIComponent(templateKey)}/author/refine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAuthorError(body.error ?? `The agent failed (${res.status})`);
+        return;
+      }
+      document.adopt(body.yaml, body.diagnostics);
+      setAuthorReports((reports) => [...reports, { kind: 'refine', prompt: instruction, choices: body.choices, openQuestions: body.openQuestions, rounds: body.rounds, validAfterFirstRound: body.validAfterFirstRound, diagnostics: body.diagnostics }]);
+      if (body.diagnostics.some((diagnostic: Diagnostic) => diagnostic.severity === 'error')) setDrawerOpen(true);
+    } catch {
+      setAuthorError('The agent could not be reached — try again');
+    } finally {
+      setAuthorBusy(false);
+    }
+  };
+
   const saving = document.saveState === 'pending' || document.saveState === 'saving';
   const canPublish = !readOnly && errors.length === 0 && !saving && document.saveState !== 'error' && model.lanes.length > 0;
 
@@ -439,6 +480,9 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
             )}
             <TopButton active={panel === 'source'} onClick={() => setPanel(panel === 'source' ? null : 'source')} icon={<Code2 className="h-3.5 w-3.5" />} label="View source" />
             <TopButton active={panel === 'preview'} onClick={() => setPanel(panel === 'preview' ? null : 'preview')} icon={<Eye className="h-3.5 w-3.5" />} label="Preview" />
+            {loaded.mode === 'draft' && (
+              <TopButton active={panel === 'author'} onClick={() => setPanel(panel === 'author' ? null : 'author')} icon={<Sparkles className="h-3.5 w-3.5" />} label="Author" />
+            )}
             {loaded.mode === 'draft' && (
               <button
                 type="button"
@@ -528,6 +572,7 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
 
           {panel === 'source' && <SourcePanel onClose={() => setPanel(null)} />}
           {panel === 'preview' && <PreviewPanel onClose={() => setPanel(null)} />}
+          {panel === 'author' && <AuthorPanel reports={authorReports} busy={authorBusy} error={authorError} onRefine={refine} onClose={() => setPanel(null)} />}
 
           {/* ── Inspector / declarations ── */}
           <div id="graph-inspector" className={`flex shrink-0 flex-col overflow-auto border-l border-white/[0.08] ${panel ? 'w-[300px]' : 'w-[336px]'}`}>

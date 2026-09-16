@@ -1,4 +1,5 @@
 import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLSeq } from 'yaml';
+import { stringifyPreserving } from '../../../../../../packages/template-author/yaml-text';
 import type { Family } from './families';
 import { brokenReads, buildModel, pathKey, uniqueId, type EditorModel, type Path } from './model';
 
@@ -15,7 +16,8 @@ function edit(source: string, change: (doc: Document) => void): string {
   const doc = parseDocument(source);
   if (!isMap(doc.contents)) doc.contents = doc.createNode({}) as unknown as typeof doc.contents;
   change(doc);
-  return doc.toString();
+  // Ce que le geste n'a pas touché garde son texte d'origine, à l'octet près.
+  return stringifyPreserving(source, doc);
 }
 
 function seqAt(doc: Document, path: Path): YAMLSeq {

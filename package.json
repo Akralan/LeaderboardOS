@@ -28,6 +28,7 @@
     "db:studio": "drizzle-kit studio",
     "templates:check": "tsx scripts/templates-build.ts --check && tsx scripts/templates-check.ts",
     "templates:build": "tsx scripts/templates-build.ts",
+    "templates:author-bench": "tsx scripts/template-author-bench.ts",
     "prod": "bash ./scripts/prod.sh",
     "prod:full": "bash ./scripts/prod.sh",
     "prod:build": "cd apps/leaderboard-client && npm run build",

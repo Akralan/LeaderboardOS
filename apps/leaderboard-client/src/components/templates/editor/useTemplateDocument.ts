@@ -142,8 +142,30 @@ export function useTemplateDocument(templateKey: string, initial: { yaml: string
     setHistoryTick((tick) => tick + 1);
   }, []);
 
+  /**
+   * Un texte que le serveur vient d'enregistrer lui-même (l'agent auteur) :
+   * il entre dans l'historique — annulable —, sans repartir en sauvegarde.
+   */
+  const adopt = useCallback((yaml: string, nextDiagnostics: Diagnostic[]) => {
+    if (initial.readOnly) return;
+    if (timer.current) clearTimeout(timer.current);
+    if (yaml !== latest.current) {
+      past.current = [...past.current, latest.current].slice(-HISTORY_LIMIT);
+      future.current = [];
+    }
+    coalesce.current = null;
+    saved.current = yaml;
+    diagnosed.current = yaml;
+    latest.current = yaml;
+    setSource(yaml);
+    setDiagnostics(nextDiagnostics);
+    setSaveState('saved');
+    setHistoryTick((tick) => tick + 1);
+  }, [initial.readOnly]);
+
   return {
     source,
+    adopt,
     model,
     diagnostics,
     saveState,

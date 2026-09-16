@@ -17,7 +17,7 @@ Welcome to the technical documentation for the MyTwin Leaderboard monorepo.
 | [`project-structure.md`](./project-structure.md) | Annotated directory tree — where everything lives |
 | [`packages.md`](./packages.md) | What each package does, its role, and key files |
 | [`writing-a-flow.md`](./writing-a-flow.md) | Writing a challenge flow — in TypeScript, as a template file, or as a template published from the database — installed without touching the core |
-| [`graph-editor.md`](./graph-editor.md) | The graph editor — drawing a template on a canvas (lanes, palette, inspector, declarations), validation as you edit, participant preview, publish and new versions |
+| [`graph-editor.md`](./graph-editor.md) | The graph editor — drawing a template on a canvas (lanes, palette, inspector, declarations), validation as you edit, participant preview, publish and new versions, and the template author agent (describe a flow, refine a draft) |
 | [`database.md`](./database.md) | PostgreSQL schema, tables (resources, blobs, templates…), migrations, and seeding |
 | [`auth.md`](./auth.md) | Google OAuth login, JWT cookies, roles, and protected routes |
 | [`api.md`](./api.md) | High-level overview of all API routes, including the generated actions of template flows and the template editor API |
