@@ -34,7 +34,10 @@ params:
   ttl_hours:   {type: int, default: 48, check: "value >= 1 && value <= 720", mutable: false}
   label_schema:
     type: "{kind: enum(single_choice), options: list({key: string, label: string})}"
-    check: "size(value.options) >= 2 && size(value.options) <= 12"
+    checks:
+      between_2_and_12_options: "size(value.options) >= 2 && size(value.options) <= 12"
+      options_need_a_key_and_a_label: "value.options.all(o, size(o.key) > 0 && size(o.label) > 0)"
+      option_keys_must_be_unique: "value.options.all(o, size(value.options.filter(p, p.key == o.key)) == 1)"
     mutable: false
   sensitive_clearance:
     type: {min_seen: int, min_accuracy: ratio}
@@ -48,6 +51,10 @@ requires: {core: 1}
 
 presentation:
   icon: tag
+  long_label: Data annotation
+  join_caption: "Joining lets you label items one at a time; your pay follows your quality score."
+  brief_required: true
+  public: true
   contribution: {type: annotation, title: Annotations}
 
 resources:

@@ -3,23 +3,43 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Download, Loader2, Upload } from 'lucide-react';
 import { flowActionUrl } from '@/lib/challengeActions';
+import { parseCsv } from '@/lib/csv';
+import type { LabelOption } from '@/components/challenges/AnnotationWorkbench';
 
+/**
+ * Le contrat de données est celui que l'interpréteur génère pour le template
+ * data-annotation : `GET overview` pour l'avancement, les participants et ce
+ * qu'une lane admin attend ; `POST import/batch` pour les lots ;
+ * `POST resolve/decide` pour trancher un item contesté ; `GET export` pour le
+ * CSV. Les noms sont ceux du template — types de ressources, verdicts,
+ * compteurs, lanes.
+ */
+
+interface ResourceCount {
+  total: number;
+  open: number;
+  closed: number;
+  verdicts: Record<string, number>;
+}
+
+/** `GET overview`, généré. */
 interface Overview {
-  items: { total: number; open: number; labeled: number; contested: number };
-  golds: number;
-  k: number;
-  options: { key: string; label: string }[];
+  resources: Record<string, ResourceCount>;
   pool: { pool: number; distributed: number; remaining: number };
-  annotators: {
+  participants: {
     user_id: string;
-    name: string;
-    labels: number;
-    gold_seen: number;
-    gold_correct: number;
-    accuracy: number | null;
+    name: string | null;
+    delivered: number;
     cp: number;
+    counters: { gold_seen?: number; gold_correct?: number };
   }[];
-  contested: { resource_id: string; image_url: string | null; tally: Record<string, number> }[];
+  pending: {
+    resource_id: string;
+    type: string;
+    verdict: string;
+    fields: { image_url?: string | null };
+    inputs: Record<string, { value?: unknown }[]>;
+  }[];
 }
 
 function fgAt(opacity: number) {
@@ -28,11 +48,12 @@ function fgAt(opacity: number) {
 
 const CARD = 'space-y-3 rounded-[18px] border border-white/10 bg-white/[0.02] p-4';
 const HEADING = 'text-[10px] font-semibold uppercase tracking-widest';
+const EMPTY_COUNT: ResourceCount = { total: 0, open: 0, closed: 0, verdicts: {} };
 
 function ImportDropzone({
   challengeId, kind, title, columns, onImported,
 }: { challengeId: string; kind: 'items' | 'golds'; title: string; columns: string; onImported(): void }) {
-  const [status, setStatus] = useState<{ tone: 'ok' | 'error'; text: string; details?: string[] } | null>(null);
+  const [status, setStatus] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
 
@@ -41,17 +62,22 @@ function ImportDropzone({
     setBusy(true);
     setStatus(null);
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'batches'), {
+      // Le fichier devient des lignes ici ; l'action valide chaque ligne et refuse le lot entier au moindre écart.
+      const rows = parseCsv(await file.text());
+      const body = kind === 'items'
+        ? { kind, class: 'standard', file: rows.map(row => ({ image_url: row.image_url, class: row.class || 'standard' })) }
+        : { kind, file: rows.map(row => ({ image_url: row.image_url, expected: row.expected })) };
+      const res = await fetch(flowActionUrl(challengeId, 'import/batch'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, csv: await file.text() }),
+        body: JSON.stringify(body),
       });
-      const body = await res.json().catch(() => null);
       if (!res.ok) {
-        setStatus({ tone: 'error', text: body?.error ?? `Import failed (${res.status})`, details: body?.details });
+        const error = await res.json().catch(() => null);
+        setStatus({ tone: 'error', text: error?.error ?? `Import failed (${res.status})` });
         return;
       }
-      setStatus({ tone: 'ok', text: `${body.created} ${kind} imported from ${file.name}` });
+      setStatus({ tone: 'ok', text: `${rows.length} ${kind} imported from ${file.name}` });
       onImported();
     } finally {
       setBusy(false);
@@ -72,16 +98,25 @@ function ImportDropzone({
       <p className="mt-1 text-[11px]" style={{ color: fgAt(0.35) }}>CSV with columns {columns}</p>
       {status && (
         <div className={`mt-2 text-left text-[11px] ${status.tone === 'ok' ? 'text-emerald-300' : 'text-red-300'}`}>
-          <p>{status.text}</p>
-          {status.details?.map(detail => <p key={detail}>{detail}</p>)}
+          {status.text.split('; ').map(line => <p key={line}>{line}</p>)}
         </div>
       )}
     </label>
   );
 }
 
+/** Le décompte des labels d'un item contesté, depuis les entrées de son aggregate. */
+function tallyOf(inputs: { value?: unknown }[]): Record<string, number> {
+  const tally: Record<string, number> = {};
+  for (const input of inputs) {
+    const key = String(input.value ?? '');
+    tally[key] = (tally[key] ?? 0) + 1;
+  }
+  return tally;
+}
+
 /** La campagne côté admin et manager : import, avancement, qualité des annotateurs, contestés, export. */
-export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }) {
+export function AnnotationCampaignPanel({ challengeId, options }: { challengeId: string; options: LabelOption[] }) {
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState<string | null>(null);
@@ -97,10 +132,10 @@ export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }
   const resolve = async (resourceId: string, value: string) => {
     setResolving(resourceId);
     try {
-      await fetch(flowActionUrl(challengeId, `items/${resourceId}/resolve`), {
+      await fetch(flowActionUrl(challengeId, 'resolve/decide'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ item: resourceId, value }),
       });
       await load();
     } finally {
@@ -108,7 +143,10 @@ export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }
     }
   };
 
-  const labelOf = (key: string) => data?.options.find(o => o.key === key)?.label ?? key;
+  const labelOf = (key: string) => options.find(o => o.key === key)?.label ?? key;
+  const items = data?.resources.item ?? EMPTY_COUNT;
+  const golds = data?.resources.gold ?? EMPTY_COUNT;
+  const contested = data?.pending.filter(entry => entry.type === 'item' && entry.verdict === 'contested') ?? [];
 
   return (
     <div className="space-y-6">
@@ -137,17 +175,17 @@ export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }
               </a>
             </div>
             <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5" style={{ color: fgAt(0.7) }}>
-              <p><b>{data.items.labeled}</b> / {data.items.total} labeled</p>
-              <p><b>{data.items.open}</b> open</p>
-              <p><b>{data.items.contested}</b> contested</p>
-              <p><b>{data.golds}</b> hidden checks</p>
+              <p><b>{items.verdicts.labeled ?? 0}</b> / {items.total} labeled</p>
+              <p><b>{items.open}</b> open</p>
+              <p><b>{items.verdicts.contested ?? 0}</b> contested</p>
+              <p><b>{golds.total}</b> hidden checks</p>
               <p><b>{data.pool.remaining.toLocaleString()}</b> / {data.pool.pool.toLocaleString()} CP left</p>
             </div>
           </div>
 
           <div className={CARD}>
             <p className={HEADING} style={{ color: fgAt(0.3) }}>Annotators</p>
-            {data.annotators.length === 0 ? (
+            {data.participants.length === 0 ? (
               <p className="text-xs" style={{ color: fgAt(0.4) }}>No label yet.</p>
             ) : (
               <div className="overflow-x-auto">
@@ -162,15 +200,19 @@ export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }
                     </tr>
                   </thead>
                   <tbody>
-                    {data.annotators.map(a => (
-                      <tr key={a.user_id} className="border-t border-white/[0.06]">
-                        <td className="py-1.5">{a.name}</td>
-                        <td className="py-1.5">{a.labels}</td>
-                        <td className="py-1.5">{a.gold_correct} / {a.gold_seen}</td>
-                        <td className="py-1.5">{a.accuracy == null ? '—' : `${Math.round(a.accuracy * 100)}%`}</td>
-                        <td className="py-1.5">{a.cp}</td>
-                      </tr>
-                    ))}
+                    {data.participants.map(participant => {
+                      const seen = participant.counters.gold_seen ?? 0;
+                      const correct = participant.counters.gold_correct ?? 0;
+                      return (
+                        <tr key={participant.user_id} className="border-t border-white/[0.06]">
+                          <td className="py-1.5">{participant.name ?? 'Unknown'}</td>
+                          <td className="py-1.5">{participant.delivered}</td>
+                          <td className="py-1.5">{correct} / {seen}</td>
+                          <td className="py-1.5">{seen === 0 ? '—' : `${Math.round((correct / seen) * 100)}%`}</td>
+                          <td className="py-1.5">{participant.cp}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -179,22 +221,22 @@ export function AnnotationCampaignPanel({ challengeId }: { challengeId: string }
 
           <div className={CARD}>
             <p className={HEADING} style={{ color: fgAt(0.3) }}>Contested items</p>
-            {data.contested.length === 0 ? (
+            {contested.length === 0 ? (
               <p className="text-xs" style={{ color: fgAt(0.4) }}>Nothing to settle.</p>
             ) : (
               <div className="space-y-3">
-                {data.contested.map(item => (
+                {contested.map(item => (
                   <div key={item.resource_id} className="flex flex-col gap-3 rounded-xl border border-white/[0.06] p-3 sm:flex-row sm:items-center">
-                    {item.image_url && (
+                    {item.fields.image_url && (
                       // eslint-disable-next-line @next/next/no-img-element -- images hébergées ailleurs
-                      <img src={item.image_url} alt="Contested item" referrerPolicy="no-referrer" className="h-24 w-24 rounded-lg bg-black/40 object-contain" />
+                      <img src={item.fields.image_url} alt="Contested item" referrerPolicy="no-referrer" className="h-24 w-24 rounded-lg bg-black/40 object-contain" />
                     )}
                     <div className="flex-1 space-y-2">
                       <p className="text-[11px]" style={{ color: fgAt(0.45) }}>
-                        {Object.entries(item.tally).map(([key, count]) => `${labelOf(key)} × ${count}`).join(' · ')}
+                        {Object.entries(tallyOf(item.inputs.agreement ?? [])).map(([key, count]) => `${labelOf(key)} × ${count}`).join(' · ')}
                       </p>
                       <div className="flex flex-wrap gap-2">
-                        {data.options.map(option => (
+                        {options.map(option => (
                           <button
                             key={option.key}
                             type="button"

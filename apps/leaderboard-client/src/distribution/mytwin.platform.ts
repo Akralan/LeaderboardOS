@@ -3,7 +3,7 @@ import { codeFlow } from '../../../../content/flows/code';
 import { mlFlow } from '../../../../content/flows/ml';
 import { endpointValidationFlow } from '../../../../content/flows/endpoint-validation';
 import { journeyValidationFlow } from '../../../../content/flows/journey-validation';
-import { dataAnnotationFlow } from '../../../../content/flows/data-annotation';
+import { dataAnnotationTemplateFlow } from '../../../../content/templates/data-annotation';
 import { validationKit } from '../../../../content/kits/validation';
 import { slackSignalsExtension } from '../../../../content/extensions/slack-signals';
 import { computeExtension } from '../../../../content/extensions/compute';
@@ -29,7 +29,8 @@ export const platform: PlatformDefinitions = {
     // Les validations MyTwin sont jugées par des professionnels de santé.
     { ...endpointValidationFlow, configDefaults: { reviewer_qualification: MEDICAL_PRO } },
     { ...journeyValidationFlow, configDefaults: { expert_comment_qualification: MEDICAL_PRO } },
-    dataAnnotationFlow,
+    // Compilé depuis content/templates/data-annotation/template.yaml : le premier flow servi par l'interpréteur.
+    dataAnnotationTemplateFlow,
   ],
   kits: [validationKit],
   extensions: [slackSignalsExtension, computeExtension],

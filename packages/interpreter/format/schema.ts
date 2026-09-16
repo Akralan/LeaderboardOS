@@ -219,6 +219,8 @@ export const paramDecl = z.strictObject({
   type: typeSpec,
   mutable: z.boolean(),
   check: exprSource.optional(),
+  /** Des checks nommés : le nom d'un check qui échoue est le message qu'un formulaire affiche. */
+  checks: z.record(identifier, exprSource).optional(),
   default: z.unknown().optional(),
 });
 
@@ -247,6 +249,14 @@ export const documentShell = z.strictObject({
   presentation: z
     .strictObject({
       icon: z.string().optional(),
+      /** Le nom dans une phrase ; `template.name` à défaut. */
+      long_label: z.string().min(1).optional(),
+      /** Ce que rejoindre implique, affiché sous le brief. */
+      join_caption: z.string().min(1).optional(),
+      /** Un non-membre passe par le brief et le `Join` ; vrai par défaut. */
+      brief_required: z.boolean().optional(),
+      /** Un visiteur anonyme peut ouvrir un challenge public de ce flow ; faux par défaut. */
+      public: z.boolean().optional(),
       /** La contribution qui porte les lignes du ledger d'un participant. */
       contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
     })

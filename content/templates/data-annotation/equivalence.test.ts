@@ -340,6 +340,8 @@ async function play(first: Implementation, handoffs: readonly Handoff[] = []) {
     reads.itemsCsv = (await post(ADMIN, "export", null, "GET")).body.text;
     reads.goldsCsv = (await post(ADMIN, "export?type=gold", null, "GET")).body.text;
     reads.progressAsAnnotatorOfOverview = (await post(annotator("u1"), "overview", null, "GET")).status;
+    reads.summary = await PlatformRegistry.flow("data-annotation")!.rewards!.summarize({ challenge: { ...CHALLENGE }, entries: [], maxMetaNumber: async () => null } as never);
+    reads.progressU4 = (await post(annotator("u4"), "progress", null, "GET")).body;
   }
 
 
@@ -453,9 +455,15 @@ describe("data-annotation: the template replaces the hand-written flow", () => {
     const cp = data.ledger.filter((row) => row.user === "u1").reduce((sum, row) => sum + row.points, 0);
     expect(reads.progress.cp).toBe(cp);
     expect(Object.keys(reads.progress.counters)).toEqual(["gold_seen", "gold_correct"]);
+    // L'éligibilité par classe, tirée de la clearance du claim : u1 a gagné les items sensibles, u4 (qui rate les golds) non.
+    expect(reads.progress.eligible_classes).toEqual({ item: ["standard", "sensitive"] });
+    expect(reads.progressU4.eligible_classes).toEqual({ item: ["standard"] });
 
     // Le manager voit les compteurs sans décalage, le pool et les items qu'une lane admin attend.
     const overviewU1 = reads.overview.participants.find((row: { user_id: string }) => row.user_id === "u1");
+    expect(overviewU1.name).toBe("name of u1");
+    // Le hero lit le même avancement que l'overview.
+    expect(reads.summary).toEqual({ resources: reads.overview.resources });
     expect(overviewU1.counters.gold_seen).toBeGreaterThan(reads.progress.counters.gold_seen);
     expect(reads.overview.resources.item).toMatchObject({ total: 50 });
     expect(reads.overview.resources.gold).toMatchObject({ total: 12 });

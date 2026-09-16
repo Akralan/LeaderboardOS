@@ -55,7 +55,9 @@ Reads, validates and compiles `leaderboardos/1` challenge templates (milestones 
 
 `npm run templates:check` validates the corpus and `content/templates/*/template.yaml`.
 
-`content/templates/data-annotation/template.yaml` is the data-annotation flow as a template; `equivalence.test.ts` beside it plays one seeded scenario against the hand-written flow and the compiled template and requires the same draws, pay, resource states and ledger rows.
+`describe.ts` is the client-safe entry (a template's descriptor and its config and rules schemas, nothing executed). `npm run templates:build` writes each template's text into `template.source.ts` beside it, so the server, the client, vitest and tsx import it as a module; `templates:check` fails when that module is stale.
+
+`content/templates/data-annotation/template.yaml` is the data-annotation flow as a template, and the flow the MyTwin distribution installs (the hand-written `content/flows/data-annotation` stays as the reference of the equivalence tests); `equivalence.test.ts` beside it plays one seeded scenario against the hand-written flow and the compiled template and requires the same draws, pay, resource states and ledger rows.
 
 ### `packages/config`
 

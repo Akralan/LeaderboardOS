@@ -35,7 +35,7 @@ export function parseTypeSpec(spec: unknown): TypeNode {
 }
 
 function parseText(text: string): TypeNode {
-  const call = /^([a-z_]+)\((.*)\)$/s.exec(text);
+  const call = /^([a-z_]+)\(([\s\S]*)\)$/.exec(text);
   if (call) {
     const [, head, inner] = call;
     const body = inner.trim();

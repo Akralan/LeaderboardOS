@@ -202,6 +202,10 @@ export function memoryRuntime(options: {
       return runtime.challenges.filter((challenge) => challenge.type === flowKey);
     },
 
+    async names(userIds) {
+      return Object.fromEntries(userIds.map((userId) => [userId, `name of ${userId}`]));
+    },
+
     random: () => runtime.dice.shift() ?? 0.99,
     now: () => runtime.clock,
   };

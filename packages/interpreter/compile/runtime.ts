@@ -56,6 +56,8 @@ export interface TemplateRuntime {
   observe(capability: string, args: Record<string, Value>): Promise<Value>;
   /** Les challenges d'un flow, pour ses jobs. */
   challengesOf(flowKey: string): Promise<Challenge[]>;
+  /** Le nom affiché de chaque compte : l'identité du core, pour les lectures d'un manager. */
+  names(userIds: readonly string[]): Promise<Record<string, string>>;
   random(): number;
   now(): Date;
 }
@@ -133,6 +135,11 @@ export function defaultRuntime(
       const { ChallengeRepository } = await repositories();
       return (await new ChallengeRepository().findAll()).filter((challenge) => challenge.type === flowKey);
     }),
+    async names(userIds) {
+      const { UserRepository } = await repositories();
+      const users = await new UserRepository().findByIds([...userIds]);
+      return Object.fromEntries(users.map((user) => [user.uuid, user.full_name]));
+    },
     random: bindings.random ?? (() => Math.random()),
     now: bindings.now ?? (() => new Date()),
   };

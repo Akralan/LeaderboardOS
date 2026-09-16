@@ -1,6 +1,6 @@
 import type { Challenge } from "../../database-service/domain/entities.js";
 import { flowConfigOf } from "../../capabilities/flow-config.js";
-import { jsonError } from "../../capabilities/challenge-actions.js";
+import { jsonError } from "./responses.js";
 import type {
   ActionAccess,
   ActionContext,
@@ -14,12 +14,13 @@ import { EvalError, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
 import type { Type } from "../expr/types.js";
 import type { ExprSource, FieldDecl, RewardBody } from "../format/schema.js";
-import type { TemplateReport } from "../index.js";
+import type { TemplateReport } from "../check.js";
+import { descriptorOf } from "../describe.js";
 import type { LaneModel, NodeModel } from "../validate/format.js";
 import { Engine, Refusal, newState, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
-import { compileParams, zodOf, type CompiledParams } from "./params.js";
+import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
-import { generatedActions, generatedPathConflicts } from "./reads.js";
+import { generatedActions, generatedPathConflicts, resourceCounts } from "./reads.js";
 import { project, resourceValue } from "./values.js";
 
 /**
@@ -135,9 +136,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     if (effect.family === "reward") rewards.push({ body: effect.body, key: effect.body.rule_key ?? `${flowKey}.close.${effect.body.id ?? i}` });
   });
 
-  const pools = new Set(rewards.map((reward) => reward.body.pool).filter((pool): pool is ExprSource => pool !== undefined).map(String));
-  if (pools.size > 1) throw new CompileError(`[interpreter] ${flowKey}: v1 compiles a single pool, got ${[...pools].join(", ")}`);
-  const poolParam = pools.size === 1 ? /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec([...pools][0])?.[1] ?? null : null;
+  const poolParam = poolParamOf(model);
+  if (poolParam === undefined) throw new CompileError(`[interpreter] ${flowKey}: v1 compiles a single pool`);
 
   const ruleKeys: RuleKeyDeclaration[] = [];
   for (const { body, key } of rewards) {
@@ -209,18 +209,21 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
 
   return {
     descriptor: {
-      key: flowKey,
-      label: shell.template.name,
-      longLabel: shell.template.name,
-      icon: options.icon ?? shell.presentation?.icon ?? "sparkles",
-      briefRequired: true,
-      publiclyVisible: options.publiclyVisible ?? false,
+      ...descriptorOf(shell),
+      ...(options.icon ? { icon: options.icon } : {}),
+      ...(options.publiclyVisible !== undefined ? { publiclyVisible: options.publiclyVisible } : {}),
     },
     config: { version: 1, schema: params.configSchema },
     rules: { parse: (raw) => (params.rulesSchema.safeParse(raw ?? {}).success ? params.rulesSchema.parse(raw ?? {}) : null) },
     ruleKeys,
     contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
     uses: { board: false, groups: false },
+    rewards: {
+      // L'avancement du challenge, comme `overview.resources` : le hero le lit.
+      async summarize({ challenge }) {
+        return { resources: resourceCounts(shell, await runtime.resources.list({ challengeId: challenge.uuid })) };
+      },
+    },
     actions,
     jobs,
     hooks:

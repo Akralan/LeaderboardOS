@@ -316,6 +316,24 @@ export class Engine {
     state.drawn = { claimId: drawn.claimId, resourceId: drawn.resourceId, expiresAt: drawn.expiresAt };
   }
 
+  /**
+   * Les classes que l'appelant peut tirer, par type de ressource tirée : toutes
+   * les valeurs du champ `class` quand aucun filtre ne le retient, sinon la
+   * seule classe que le filtre laisse passer. La déclaration de clearance du
+   * claim, évaluée pour lui.
+   */
+  async eligibleClasses(state: RunState): Promise<Record<string, string[]>> {
+    const eligible: Record<string, string[]> = {};
+    for (const spec of new Set(this.t.replays.values())) {
+      const type = spec.claim.resource;
+      const field = this.t.resourceTypes.get(type)?.class;
+      if (!field || field.kind !== "enum" || !field.values) continue;
+      const only = spec.claim.where === undefined ? undefined : await this.classFilter(spec.claim.where, state);
+      eligible[type] = only === undefined ? [...field.values] : [only];
+    }
+    return eligible;
+  }
+
   /** `R.class == "x" || <condition>` : pas de filtre quand la condition tient, sinon la classe. */
   private async classFilter(where: ExprSource, state: RunState): Promise<string | undefined> {
     const ast = astOf(String(where));

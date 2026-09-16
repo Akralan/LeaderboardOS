@@ -196,6 +196,11 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       const { type } = expr(param.check, scope, ["params", name, "check"]);
       expectType(type, isBool, "a param check must be bool", ["params", name, "check"]);
     }
+    for (const [check, source] of Object.entries(param.checks ?? {})) {
+      const scope = paramsScope.with({ value: paramTypes[name] });
+      const { type } = expr(source, scope, ["params", name, "checks", check]);
+      expectType(type, isBool, "a param check must be bool", ["params", name, "checks", check]);
+    }
   }
 
   const counterTypes: Record<string, Type> = {};

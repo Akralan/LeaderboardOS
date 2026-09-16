@@ -1,6 +1,6 @@
 import type { ActionAccess, ActionContext, ChallengeActionDeclaration } from "../../registry/platform.js";
 import { flowConfigOf } from "../../capabilities/flow-config.js";
-import { jsonError } from "../../capabilities/challenge-actions.js";
+import { jsonError } from "./responses.js";
 import type { Value } from "../expr/evaluator.js";
 import type { LaneModel, NodeModel } from "../validate/format.js";
 import { Engine, newState, type CompiledTemplate } from "./engine.js";
@@ -17,10 +17,13 @@ import { project, resourceValue, type Viewer } from "./values.js";
  * - `POST <lane>/release` : l'abandon explicite d'un claim, sur toute lane qui
  *   tire (l'échéance couvre l'abandon silencieux) ;
  * - `GET progress` : ce que l'appelant a livré, gagné, ses compteurs tels
- *   qu'il a le droit de les voir (décalés), son claim actif ;
+ *   qu'il a le droit de les voir (décalés), les classes qu'il peut tirer, son
+ *   claim actif ;
  * - `GET overview` : l'avancement par type de ressource, le pool, chaque
- *   participant avec ses compteurs sans décalage, et les ressources qu'une
- *   lane admin attend de trancher ;
+ *   participant avec son nom et ses compteurs sans décalage, et les
+ *   ressources qu'une lane admin attend de trancher ;
+ * - `rewards.summarize` : l'avancement par type de ressource, sous le même nom
+ *   que dans `overview` — ce que le hero d'un challenge lit.
  * - `GET export?type=` : les instances fermées d'un type, en CSV, avec ce
  *   qu'un admin peut en lire, leur verdict, leur consensus et leurs entrées.
  */
@@ -73,6 +76,7 @@ export function generatedActions(t: CompiledTemplate, engine: Engine, params: Co
         delivered: delivered.length,
         cp: entries.filter((entry) => entry.user_id === user.id && ruleKeys.has(entry.rule_key)).reduce((sum, entry) => sum + entry.points, 0),
         counters: await engine.counters(newState(challenge, user.id, values)),
+        eligible_classes: await engine.eligibleClasses(newState(challenge, user.id, values)),
         active_claim: holding ? { claim_id: holding.claim.uuid, expires_at: holding.claim.expires_at } : null,
       };
     },
@@ -104,20 +108,14 @@ export function generatedActions(t: CompiledTemplate, engine: Engine, params: Co
         t.runtime.ledger.distributed(challenge.uuid),
       ]);
 
-      const resources: Record<string, { total: number; open: number; closed: number; verdicts: Record<string, number> }> = {};
-      for (const type of Object.keys(shell.resources)) resources[type] = { total: 0, open: 0, closed: 0, verdicts: {} };
-      for (const instance of instances) {
-        const row = resources[instance.resource_type];
-        if (!row) continue;
-        row.total++;
-        row[instance.state]++;
-        if (instance.verdict) row.verdicts[instance.verdict] = (row.verdicts[instance.verdict] ?? 0) + 1;
-      }
+      const resources = resourceCounts(shell, instances);
 
       const users = [...new Set(delivered.map((claim) => claim.user_id))];
+      const names = await t.runtime.names(users);
       const participants = await Promise.all(
         users.map(async (userId) => ({
           user_id: userId,
+          name: names[userId] ?? null,
           delivered: delivered.filter((claim) => claim.user_id === userId).length,
           cp: entries.filter((entry) => entry.user_id === userId && ruleKeys.has(entry.rule_key)).reduce((sum, entry) => sum + entry.points, 0),
           // Le manager voit tout : sans décalage.
@@ -192,6 +190,23 @@ export function generatedActions(t: CompiledTemplate, engine: Engine, params: Co
   });
 
   return actions;
+}
+
+/** L'avancement par type de ressource : `{ item: { total, open, closed, verdicts: { labeled: n } } }`. */
+export function resourceCounts(
+  shell: CompiledTemplate["model"]["shell"],
+  instances: readonly { resource_type: string; state: "open" | "closed"; verdict: string | null }[]
+): Record<string, { total: number; open: number; closed: number; verdicts: Record<string, number> }> {
+  const resources: Record<string, { total: number; open: number; closed: number; verdicts: Record<string, number> }> = {};
+  for (const type of Object.keys(shell.resources)) resources[type] = { total: 0, open: 0, closed: 0, verdicts: {} };
+  for (const instance of instances) {
+    const row = resources[instance.resource_type];
+    if (!row) continue;
+    row.total++;
+    row[instance.state]++;
+    if (instance.verdict) row.verdicts[instance.verdict] = (row.verdicts[instance.verdict] ?? 0) + 1;
+  }
+  return resources;
 }
 
 /** Les chemins générés ne doivent croiser aucun geste du template. */

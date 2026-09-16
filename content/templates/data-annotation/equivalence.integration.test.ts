@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import type { Challenge } from "../../../packages/database-service/domain/entities.js";
 import { runAnnotationAudit } from "../../flows/data-annotation/audit.js";
+import { dataAnnotationFlow } from "../../flows/data-annotation/index.js";
 import { db } from "../../../packages/database-service/db/drizzle.js";
 import { ChallengeRepository, RewardEntryRepository } from "../../../packages/database-service/repositories/index.js";
 import { integrationScope } from "../../../packages/database-service/testing/integration.js";
@@ -87,14 +88,14 @@ let dice: () => number = Math.random;
 
 /** Installe la distribution MyTwin, avec le flow écrit à la main ou le template compilé à sa place. */
 function install(implementation: Implementation) {
-  const flows =
+  // La distribution installe désormais le template : chaque démarrage remplace explicitement le flow data-annotation.
+  const replacement =
     implementation === "hand-written"
-      ? platform.flows
-      : platform.flows!.map((flow) =>
-          flow.descriptor.key === "data-annotation"
-            ? compileTemplate(checkTemplateSource(TEMPLATE, "data-annotation"), { runtime: defaultRuntime({ random: () => dice(), challengesOf: ourChallenges }) })
-            : flow
-        );
+      ? dataAnnotationFlow
+      : compileTemplate(checkTemplateSource(TEMPLATE, "data-annotation"), {
+          runtime: defaultRuntime({ random: () => dice(), challengesOf: ourChallenges }),
+        });
+  const flows = platform.flows!.map((flow) => (flow.descriptor.key === "data-annotation" ? replacement : flow));
   PlatformRegistry.reset();
   PlatformRegistry.install({ ...platform, flows } as PlatformDefinitions);
 }

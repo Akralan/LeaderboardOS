@@ -1,12 +1,23 @@
-import { dataAnnotationFlowDescriptor } from '../../../../../content/flows/data-annotation/descriptor';
-import {
-  DEFAULT_ANNOTATION_RULES,
-  annotationConfigSchema,
-  parseAnnotationRules,
-  type AnnotationRules,
-} from '../../../../../content/flows/data-annotation/config';
+import { dataAnnotationTemplate } from '../../../../../content/templates/data-annotation/descriptor';
 import type { FlowFormLogic } from '@/lib/flowFormSlots';
 import { flowConfigRecord } from './shared';
+
+const { descriptor: dataAnnotationFlowDescriptor, configSchema, rulesSchema } = dataAnnotationTemplate;
+
+/** Les règles de paie : les paramètres `mutable: true` du template. */
+export interface AnnotationRules {
+  per_unit_cp: number;
+  gold_rate: number;
+  audit_rate: number;
+}
+
+/** Ce que propose un nouveau challenge ; le schéma du template complète ses défauts. */
+const DEFAULT_RULES: AnnotationRules = { per_unit_cp: 5, gold_rate: 0.1, audit_rate: 0.1 };
+
+function parseRules(raw: unknown): AnnotationRules | null {
+  const parsed = rulesSchema.safeParse(raw);
+  return parsed.success ? (parsed.data as unknown as AnnotationRules) : null;
+}
 
 export interface AnnotationOption {
   key: string;
@@ -66,14 +77,14 @@ export const annotationFormLogic: FlowFormLogic<AnnotationFormState> = {
         : [{ key: 'yes', label: 'Yes' }, { key: 'no', label: 'No' }],
       minSeen: numberOr(clearance.min_seen, 5),
       minAccuracy: numberOr(clearance.min_accuracy, 0.8),
-      rules: parseAnnotationRules(ctx.challenge?.reward_rules) ?? DEFAULT_ANNOTATION_RULES,
+      rules: parseRules(ctx.challenge?.reward_rules) ?? DEFAULT_RULES,
     };
   },
 
   validate(state, ctx) {
-    if (!parseAnnotationRules(state.rules)) return 'Check the annotation pay: CP per label ≥ 0, rates between 0 and 1.';
+    if (!parseRules(state.rules)) return 'Check the annotation pay: CP per label ≥ 0, rates between 0 and 1.';
     if (ctx.mode === 'edit') return null;
-    const parsed = annotationConfigSchema.safeParse(configOf(state));
+    const parsed = configSchema.safeParse(configOf(state));
     if (parsed.success) return null;
     const issue = parsed.error.issues[0];
     return `Annotation setup: ${issue.path.join('.') || 'config'} — ${issue.message}`;
