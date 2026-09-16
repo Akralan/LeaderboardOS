@@ -1410,10 +1410,44 @@ export const resource_claims = pgTable("resource_claims", {
   expires_at: timestamp("expires_at"),
   consumed_at: timestamp("consumed_at"),
   released_at: timestamp("released_at"),
+  /**
+   * Les dimensions d'un `unique_per` au-delà de la ressource et de la personne
+   * (`target=<uuid>`), triées. Vide pour un tirage : l'unicité reste alors
+   * celle d'avant, une réclamation vivante par personne et par ressource.
+   */
+  scope_key: varchar("scope_key", { length: 255 }).notNull().default(""),
+  /** L'unicité ne compte pas la personne : une seule réclamation vivante par (ressource, scope). */
+  scope_exclusive: boolean("scope_exclusive").notNull().default(false),
 }, (table) => ({
   resourceIdx: index("idx_resource_claims_resource_id").on(table.resource_id),
   userIdx: index("idx_resource_claims_challenge_user").on(table.challenge_id, table.user_id),
-  liveIdx: uniqueIndex("idx_resource_claims_live").on(table.resource_id, table.user_id).where(sql`released_at IS NULL`),
+  liveIdx: uniqueIndex("idx_resource_claims_live_scoped")
+    .on(table.resource_id, table.user_id, table.scope_key)
+    .where(sql`released_at IS NULL`),
+  scopeIdx: uniqueIndex("idx_resource_claims_scope")
+    .on(table.resource_id, table.scope_key)
+    .where(sql`released_at IS NULL AND scope_exclusive`),
+}));
+
+// --- CAPACITÉ BLOBS (challenge 021, J5) ---
+
+/**
+ * Des fichiers opaques, rangés hors des tables métier : ce qu'un flow référence
+ * par `uuid`. `bytes` passe à NULL à la purge, `purged_at` la date ; les
+ * métadonnées restent. La rétention se compte après la fermeture du challenge.
+ */
+export const blobs = pgTable("blobs", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  challenge_id: uuid("challenge_id").references(() => challenges.uuid, { onDelete: "cascade" }),
+  content_type: varchar("content_type", { length: 255 }).notNull(),
+  filename: varchar("filename", { length: 255 }),
+  size: integer("size").notNull(),
+  bytes: bytea("bytes"),
+  retention_days: integer("retention_days"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  purged_at: timestamp("purged_at"),
+}, (table) => ({
+  challengeIdx: index("idx_blobs_challenge_id").on(table.challenge_id),
 }));
 
 // --- DATABASE CLIENT ---

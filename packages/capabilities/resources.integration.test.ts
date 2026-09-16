@@ -99,6 +99,35 @@ describe("resources on Postgres, under concurrency", () => {
     expect(Object.keys(final.resolution ?? {}).sort()).toEqual(["audit", "by", "run"]);
   });
 
+  it("scoped and exclusive: one live claim per (case, target) for everyone, and the same case still serves another target", async () => {
+    const caseId = await oneItem("reference_case");
+    const claims = await Promise.all(
+      USERS.map((user) => res.claimScoped(challengeId, people[user], { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 }))
+    );
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    const winner = USERS[claims.findIndex(Boolean)];
+    await res.consume(claims.find(Boolean)!.claimId, people[winner], { verdict: "works" });
+
+    // Consommée, la claim reste vivante pour toujours sur (case, t1) — mais pas sur t2, ni pour son auteur.
+    expect(await res.claimScoped(challengeId, people.u1, { resourceId: caseId, scope: { target: "t1" }, exclusive: true })).toBeNull();
+    expect(await res.claimScoped(challengeId, people[winner], { resourceId: caseId, scope: { target: "t2" }, exclusive: true })).not.toBeNull();
+  });
+
+  it("scoped, not exclusive: the person stays in the uniqueness", async () => {
+    const stepId = await oneItem("journey_step");
+    const twice = await Promise.all([1, 2, 3].map(() => res.claimScoped(challengeId, people.u1, { resourceId: stepId, scope: { target: "t1" }, exclusive: false })));
+    expect(twice.filter(Boolean)).toHaveLength(1);
+    expect(await res.claimScoped(challengeId, people.u2, { resourceId: stepId, scope: { target: "t1" }, exclusive: false })).not.toBeNull();
+  });
+
+  it("scoped: an expired, unconsumed claim frees its combination", async () => {
+    const caseId = await oneItem("reference_case");
+    const first = await res.claimScoped(challengeId, people.u1, { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 });
+    expect(await res.claimScoped(challengeId, people.u2, { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 })).toBeNull();
+    await db.execute(sql`UPDATE resource_claims SET expires_at = now() - interval '1 minute' WHERE uuid = ${first!.claimId}`);
+    expect(await res.claimScoped(challengeId, people.u2, { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 })).not.toBeNull();
+  });
+
   it("draws in a stable order: never-claimed first, then creation order", async () => {
     for (const i of [1, 2, 3]) {
       await res.createMany(challengeId, "item", [{ payload: { image_url: `https://img.test/${i}.png` }, class: "standard" }]);

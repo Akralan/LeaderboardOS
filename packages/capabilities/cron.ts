@@ -137,7 +137,7 @@ export function isDue(schedule: CronSchedule | string, lastStartedAt: Date | nul
 /** Verrou par défaut : un job tombé en plein milieu redevient prenable au bout de 10 minutes. */
 export const DEFAULT_LOCK_SECONDS = 600;
 
-/** Les jobs du core : le nettoyage des sessions, et la distribution et la purge de l'outbox. */
+/** Les jobs du core : le nettoyage des sessions, la rétention des blobs, et la distribution et la purge de l'outbox. */
 export const coreJobs: Owned<JobDeclaration>[] = [
   {
     key: "core.refresh-tokens.cleanup",
@@ -145,6 +145,16 @@ export const coreJobs: Owned<JobDeclaration>[] = [
     schedule: "0 5 * * *",
     async run() {
       return { deleted: await new RefreshTokenRepository().cleanupExpired() };
+    },
+  },
+  {
+    // La rétention des blobs : les octets partent, les métadonnées restent.
+    key: "core.blobs.retention",
+    owner: "core",
+    schedule: "30 3 * * *",
+    async run() {
+      const { blobs } = await import("./blobs.js");
+      return { purged: await blobs().purgeExpired() };
     },
   },
   ...coreEventJobs,

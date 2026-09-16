@@ -88,6 +88,8 @@ export function memoryRuntime(options: {
           expires_at: expiresAt,
           consumed_at: null,
           released_at: null,
+          scope_key: "",
+          scope_exclusive: false,
         };
         runtime.claims.push(claim);
         return { claimId: claim.uuid, resourceId: chosen.uuid, payload: chosen.payload, expiresAt };

@@ -49,8 +49,29 @@ export type ResourceStore = Pick<
 
 export type DrawTransaction = Pick<
   ResourceDrawTransaction,
-  "releaseExpired" | "nextCandidate" | "countTowardK" | "insertClaim"
+  "releaseExpired" | "releaseExpiredOn" | "nextCandidate" | "countTowardK" | "insertClaim"
 >;
+
+/**
+ * Une réclamation sur une ressource désignée, dans un scope : `unique_per`
+ * au-delà de la personne. `scope` donne les autres dimensions
+ * (`{ target: "<uuid>" }`) ; `exclusive` dit si la personne sort de l'unicité
+ * — une seule réclamation vivante par (ressource, scope), tous confondus.
+ */
+export interface ScopedClaimOptions {
+  resourceId: string;
+  scope: Readonly<Record<string, string>>;
+  exclusive: boolean;
+  ttlHours?: number;
+}
+
+/** La clé d'un scope : ses dimensions triées, `target=<uuid>`. Stable, donc indexable. */
+export function scopeKeyOf(scope: Readonly<Record<string, string>>): string {
+  return Object.keys(scope)
+    .sort()
+    .map((dimension) => `${dimension}=${scope[dimension]}`)
+    .join("&");
+}
 
 export interface DrawOptions {
   type: string;
@@ -148,6 +169,34 @@ export function resources(store?: ResourceStore) {
           return { claimId: claim.uuid, resourceId: candidate.uuid, payload: candidate.payload, expiresAt: claim.expires_at };
         }
         return null;
+      });
+    },
+
+    /**
+     * Réclame une ressource désignée dans un scope, en une transaction :
+     * libérer les réclamations échues de la combinaison, puis insérer. `null`
+     * quand la ressource n'est pas ouverte dans ce challenge, ou quand la
+     * combinaison est déjà tenue — les index uniques partiels tranchent la course.
+     */
+    async claimScoped(challengeId: string, userId: string, options: ScopedClaimOptions): Promise<DrawnResource | null> {
+      const scopeKey = scopeKeyOf(options.scope);
+      if (!scopeKey) throw new Error("[resources] a scoped claim names at least one dimension");
+      const s = await storeOf();
+      const resource = await s.findResource(options.resourceId);
+      if (!resource || resource.challenge_id !== challengeId || resource.state !== "open") return null;
+
+      return s.inDrawTransaction(async (tx) => {
+        await tx.releaseExpiredOn(options.resourceId, scopeKey, options.exclusive ? null : userId);
+        const claim = await tx.insertClaim({
+          resourceId: options.resourceId,
+          challengeId,
+          userId,
+          ttlHours: options.ttlHours,
+          scopeKey,
+          scopeExclusive: options.exclusive,
+        });
+        if (!claim) return null;
+        return { claimId: claim.uuid, resourceId: options.resourceId, payload: resource.payload, expiresAt: claim.expires_at };
       });
     },
 

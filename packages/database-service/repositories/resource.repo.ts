@@ -27,6 +27,9 @@ export interface ResourceClaim {
   expires_at: Date | null;
   consumed_at: Date | null;
   released_at: Date | null;
+  /** Vide pour un tirage ; `target=<uuid>` pour une claim scopée. */
+  scope_key: string;
+  scope_exclusive: boolean;
 }
 
 /** Une réclamation consommée, avec ce que sa ressource en dit. */
@@ -55,6 +58,8 @@ export interface NewClaim {
   challengeId: string;
   userId: string;
   ttlHours?: number;
+  scopeKey?: string;
+  scopeExclusive?: boolean;
 }
 
 function toInstance(row: typeof resource_instances.$inferSelect): ResourceInstance {
@@ -160,7 +165,32 @@ export class ResourceDrawTransaction {
     return row?.total ?? 0;
   }
 
-  /** `null` quand l'appelant a déjà une réclamation vivante sur la ressource (index unique partiel). */
+  /**
+   * Libère les réclamations échues d'une combinaison scopée : la personne sur
+   * (ressource, scope), ou tout le monde quand le scope est exclusif. Même
+   * raison que `releaseExpired`, visée sur la seule combinaison demandée.
+   */
+  async releaseExpiredOn(resourceId: string, scopeKey: string, userId: string | null): Promise<void> {
+    await this.tx
+      .update(resource_claims)
+      .set({ released_at: sql`${resource_claims.expires_at}` })
+      .where(
+        and(
+          eq(resource_claims.resource_id, resourceId),
+          eq(resource_claims.scope_key, scopeKey),
+          ...(userId ? [eq(resource_claims.user_id, userId)] : []),
+          isNull(resource_claims.consumed_at),
+          isNull(resource_claims.released_at),
+          lt(resource_claims.expires_at, sql`now()`)
+        )
+      );
+  }
+
+  /**
+   * `null` quand la combinaison est déjà tenue (index uniques partiels). Sans
+   * cible de conflit : l'insertion tient avec l'ancien index comme avec les
+   * nouveaux, le temps que le postdeploy les pose.
+   */
   async insertClaim(claim: NewClaim): Promise<ResourceClaim | null> {
     const [row] = await this.tx
       .insert(resource_claims)
@@ -169,11 +199,10 @@ export class ResourceDrawTransaction {
         challenge_id: claim.challengeId,
         user_id: claim.userId,
         expires_at: claim.ttlHours !== undefined ? sql`now() + make_interval(hours => ${claim.ttlHours}::int)` : null,
+        scope_key: claim.scopeKey ?? "",
+        scope_exclusive: claim.scopeExclusive ?? false,
       })
-      .onConflictDoNothing({
-        target: [resource_claims.resource_id, resource_claims.user_id],
-        where: sql`released_at IS NULL`,
-      })
+      .onConflictDoNothing()
       .returning();
     return row ?? null;
   }

@@ -1184,9 +1184,53 @@ const STATEMENTS: Array<{ label: string; sql: string } | { label: string; run: (
     label: "resource_claims (challenge_id, user_id)",
     sql: `CREATE INDEX IF NOT EXISTS idx_resource_claims_challenge_user ON resource_claims (challenge_id, user_id)`,
   },
+  // --- Claims scopées (challenge 021, J5) ---
+  //
+  // L'unicité des claims vivantes gagne la dimension de scope. Additif et sans
+  // coupure : les colonnes arrivent avec leur défaut (un tirage garde un scope
+  // vide, donc son comportement), le nouvel index est construit en
+  // CONCURRENTLY avant que l'ancien ne parte. Le code tire avec un ON CONFLICT
+  // sans cible : il fonctionne avec l'un comme avec l'autre pendant le postdeploy.
   {
-    label: "resource_claims (resource_id, user_id) unique, vivantes",
-    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_claims_live ON resource_claims (resource_id, user_id) WHERE released_at IS NULL`,
+    label: "resource_claims.scope_key",
+    sql: `ALTER TABLE resource_claims ADD COLUMN IF NOT EXISTS scope_key varchar(255) NOT NULL DEFAULT ''`,
+  },
+  {
+    label: "resource_claims.scope_exclusive",
+    sql: `ALTER TABLE resource_claims ADD COLUMN IF NOT EXISTS scope_exclusive boolean NOT NULL DEFAULT false`,
+  },
+  {
+    label: "resource_claims (resource_id, user_id, scope_key) unique, vivantes",
+    sql: `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_resource_claims_live_scoped ON resource_claims (resource_id, user_id, scope_key) WHERE released_at IS NULL`,
+  },
+  {
+    label: "resource_claims : l'ancien index unique (resource_id, user_id)",
+    sql: `DROP INDEX CONCURRENTLY IF EXISTS idx_resource_claims_live`,
+  },
+  {
+    label: "resource_claims (resource_id, scope_key) unique, vivantes, exclusives",
+    sql: `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_resource_claims_scope ON resource_claims (resource_id, scope_key) WHERE released_at IS NULL AND scope_exclusive`,
+  },
+
+  // --- Capacité blobs (challenge 021, J5) ---
+  {
+    label: "blobs",
+    sql: `
+      CREATE TABLE IF NOT EXISTS blobs (
+        uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        challenge_id uuid REFERENCES challenges(uuid) ON DELETE CASCADE,
+        content_type varchar(255) NOT NULL,
+        filename varchar(255),
+        size integer NOT NULL,
+        bytes bytea,
+        retention_days integer,
+        created_at timestamp NOT NULL DEFAULT now(),
+        purged_at timestamp
+      )`,
+  },
+  {
+    label: "blobs.challenge_id (index)",
+    sql: `CREATE INDEX IF NOT EXISTS idx_blobs_challenge_id ON blobs (challenge_id)`,
   },
 
   // --- Slugs des URLs publiques (docs/superpowers/plans/2026-09-15-slug-urls.md) ---
