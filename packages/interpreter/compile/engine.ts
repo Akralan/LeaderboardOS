@@ -37,6 +37,8 @@ export interface CompiledTemplate {
   resourceTypes: ResourceTypes;
   /** La clé de ledger de chaque récompense. */
   ruleKeys: ReadonlyMap<RewardBody, string>;
+  /** Pour une récompense `reverse`, la clé de ledger qu'elle reprend. */
+  reversedKeys: ReadonlyMap<RewardBody, string>;
   /** Les métriques qui écrivent des compteurs : `(nœud, compteur, incrément)`. */
   counterWrites: readonly { node: string; counter: string; add: ExprSource }[];
 }
@@ -85,7 +87,7 @@ function astOf(source: string): Expr {
 }
 
 const TTL_UNITS: Record<string, number> = { m: 1 / 60, h: 1, d: 24 };
-const ttlHours = (ttl: string | undefined) => (ttl ? Number.parseInt(ttl, 10) * TTL_UNITS[ttl.slice(-1)] : undefined);
+const DURATION = /^[0-9]+[mhd]$/;
 
 export class Engine {
   constructor(private readonly t: CompiledTemplate) {}
@@ -124,11 +126,13 @@ export class Engine {
   private async counters(state: RunState): Promise<Record<string, Value>> {
     const counters: Record<string, Value> = Object.fromEntries(Object.keys(this.shell.counters).map((name) => [name, 0]));
     if (!state.userId) return counters;
+    // Les plus récents d'abord : un compteur à `lag` saute ses `lag` premiers.
     const claims = await this.t.runtime.resources.consumedBy({ challengeId: state.challenge.uuid, userId: state.userId });
-    for (const claim of claims) {
+    for (const [index, claim] of claims.entries()) {
       const metrics = (claim.result?.metrics ?? {}) as Record<string, Value>;
       for (const write of this.t.counterWrites) {
         if (!(write.node in metrics)) continue;
+        if (index < (this.shell.counters[write.counter]?.lag ?? 0)) continue;
         const added = await this.eval(write.add, { ...state, bindings: { params: state.bindings.params } }, { value: metrics[write.node] });
         counters[write.counter] = (counters[write.counter] as number) + (added as number);
       }
@@ -218,7 +222,10 @@ export class Engine {
     const options = async (type: string) => {
       const decl = this.shell.resources[type].claim!;
       const k = decl.mode === "exclusive" ? 1 : decl.mode === "k_bounded" && decl.k !== undefined ? await this.number(decl.k, state) : undefined;
-      return { type, k, ttlHours: ttlHours(decl.ttl) };
+      let ttlHours: number | undefined;
+      if (typeof decl.ttl === "string" && DURATION.test(decl.ttl)) ttlHours = Number.parseInt(decl.ttl, 10) * TTL_UNITS[decl.ttl.slice(-1)];
+      else if (decl.ttl !== undefined) ttlHours = await this.number(decl.ttl, state);
+      return { type, k, ttlHours };
     };
 
     let drawn = null;
@@ -291,10 +298,8 @@ export class Engine {
       rows.push(base);
     }
 
-    const items = rows.map((payload) => {
-      const { class: klass, ...rest } = payload;
-      return { payload: fields.includes("class") ? payload : rest, class: typeof klass === "string" ? klass : null };
-    });
+    // `class` vit dans sa colonne, que le tirage filtre ; jamais dans la charge.
+    const items = rows.map(({ class: klass, ...payload }) => ({ payload, class: typeof klass === "string" ? klass : null }));
     await this.t.runtime.resources.createMany(state.challenge.uuid, type, items, { createdBy: state.userId });
   }
 
@@ -392,6 +397,7 @@ export class Engine {
       .map((claim) => ({
         ...((claim.result.inputs as Record<string, Record<string, Value>>)[aggregateId] ?? {}),
         participation: { user: claim.user_id },
+        claim: claim.claim_id,
         author: claim.user_id,
       }));
   }
@@ -422,10 +428,12 @@ export class Engine {
 
   // ── Ledger ──────────────────────────────────────────────────────────────
 
-  /** Les destinataires d'une récompense : l'appelant, ou ce que `to` désigne. */
-  private async recipients(body: RewardBody, state: RunState): Promise<string[]> {
-    if (body.to === undefined) return state.userId ? [state.userId] : [];
+  /** Les destinataires d'une récompense : l'appelant, ou ce que `to` désigne, avec le claim de chacun s'il en porte un. */
+  private async recipients(body: RewardBody, state: RunState): Promise<{ user: string; claim: string | null }[]> {
+    if (body.to === undefined) return state.userId ? [{ user: state.userId, claim: state.claim?.claimId ?? null }] : [];
     const value = await this.eval(body.to, state);
+    const claimOf = (item: Value) =>
+      item && typeof item === "object" && !Array.isArray(item) && typeof item.claim === "string" ? item.claim : null;
     const userOf = (item: Value): string | null => {
       if (typeof item === "string") return item;
       if (item && typeof item === "object" && !Array.isArray(item)) {
@@ -437,12 +445,16 @@ export class Engine {
       }
       return null;
     };
-    return (Array.isArray(value) ? value : [value]).map(userOf).filter((user): user is string => user !== null);
+    return (Array.isArray(value) ? value : [value])
+      .map((item) => ({ user: userOf(item), claim: claimOf(item) }))
+      .filter((recipient): recipient is { user: string; claim: string | null } => recipient.user !== null);
   }
 
   async pay(body: RewardBody, state: RunState, meta: Record<string, Value>): Promise<void> {
-    if (typeof body.amount === "object") throw new Error("[interpreter] mapped rewards are not compiled in v1");
     const { runtime } = this.t;
+    if (typeof body.amount === "object" && "reverse" in body.amount) return this.reverse(body, state);
+    if (typeof body.amount === "object") throw new Error("[interpreter] mapped rewards are not compiled in v1");
+    const amount = body.amount;
     const ruleKey = this.t.ruleKeys.get(body)!;
     const recipients = await this.recipients(body, state);
     if (recipients.length === 0) return;
@@ -452,7 +464,7 @@ export class Engine {
     let distributed = await runtime.ledger.distributed(challengeId);
     const drafts: RewardEntryDraft[] = [];
 
-    for (const userId of recipients) {
+    for (const { user: userId } of recipients) {
       const entryMeta = { ...meta, template: this.t.flowKey };
       // Rejouer le geste ne paie pas deux fois : même clé, même méta, même personne.
       // Sans clé naturelle (ni claim ni ressource), chaque geste paie.
@@ -462,7 +474,7 @@ export class Engine {
       );
       if (duplicate) continue;
 
-      let points = Math.round(await this.number(body.amount, state));
+      let points = Math.round(await this.number(amount, state));
       if (body.clamp === "pool" && points > 0) {
         points = Math.min(points, Math.max(0, state.challenge.contribution_points_reward - distributed));
       }
@@ -472,6 +484,41 @@ export class Engine {
       drafts.push({ challenge_id: challengeId, user_id: userId, contribution_id: contributionId, rule_key: ruleKey, points, meta: entryMeta });
       if (body.pool !== undefined) distributed += points;
       if (userId === state.userId) state.awarded += points;
+    }
+    if (drafts.length > 0) await runtime.ledger.write(drafts);
+  }
+
+  /**
+   * L'exact négatif de ce que la récompense reprise a versé pour le claim de
+   * chaque destinataire, net des reprises déjà écrites : rejouer ne reprend
+   * rien de plus, un claim qui n'a rien rapporté n'est pas repris.
+   */
+  private async reverse(body: RewardBody, state: RunState): Promise<void> {
+    const { runtime } = this.t;
+    const ruleKey = this.t.ruleKeys.get(body)!;
+    const reversed = this.t.reversedKeys.get(body)!;
+    const recipients = await this.recipients(body, state);
+    if (recipients.length === 0) return;
+
+    const entries = await runtime.ledger.entries(state.challenge.uuid);
+    const drafts: RewardEntryDraft[] = [];
+    for (const { user, claim } of recipients) {
+      if (!claim) continue;
+      const own = entries.filter(
+        (entry) => (entry.rule_key === reversed || entry.rule_key === ruleKey) && entry.user_id === user && entry.meta?.claim_id === claim
+      );
+      const net = own.reduce((sum, entry) => sum + entry.points, 0);
+      if (net <= 0) continue;
+      const contributionId = own.find((entry) => entry.contribution_id)?.contribution_id
+        ?? (await runtime.ledger.contribution(state.challenge, user, this.t.contributionType));
+      drafts.push({
+        challenge_id: state.challenge.uuid,
+        user_id: user,
+        contribution_id: contributionId,
+        rule_key: ruleKey,
+        points: -net,
+        meta: { claim_id: claim, template: this.t.flowKey },
+      });
     }
     if (drafts.length > 0) await runtime.ledger.write(drafts);
   }

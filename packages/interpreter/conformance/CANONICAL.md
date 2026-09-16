@@ -46,3 +46,14 @@ The eleven templates of the conformance suite 0.2 (`docs/input/leaderboardos-con
 ## Expression library
 
 `size, count, exists, majority, mode, mean, min, max, has, age, int, double, string` and the list macros `map, filter, exists, all`. The syntax is CEL's; `majority`, `mode`, `mean` and `age` are not standard CEL.
+
+## Format additions from J3
+
+Reconciling `content/templates/data-annotation/template.yaml` with the hand-written flow needed four additions. Each one carries behaviour the flow already had in production.
+
+| Addition | Why |
+|---|---|
+| `counters: {name: {type, lag: N}}` | a counter ignores the N most recently delivered claims, so a score change never points at the gold that caused it |
+| `claim: {ttl: <expression>}` | a TTL can come from a param (`params.ttl_hours`), in hours |
+| `ttl` on `unique_per` claims | a gold is claimed once per annotator and still expires; only `unbounded` refuses a TTL |
+| `amount: {reverse: <rule_key or lane.node>}` | the exact negative of what a reward paid for each recipient's claim, net of earlier reversals (spec §3.5, clawback); aggregate inputs expose `claim` for it |

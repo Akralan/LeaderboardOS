@@ -36,7 +36,8 @@ const fields = z.record(identifier, fieldDecl);
 export const claimDecl = z.strictObject({
   mode: z.enum(["exclusive", "k_bounded", "unique_per", "unbounded"]),
   k: exprSource.optional(),
-  ttl: duration.optional(),
+  /** Une durée écrite (`48h`), ou une expression en heures (`params.ttl_hours`). */
+  ttl: exprSource.optional(),
   dimensions: z.array(identifier).optional(),
   where: exprSource.optional(),
 });
@@ -94,7 +95,8 @@ const rankMapping = z.strictObject({
 export const rewardBody = z.strictObject({
   id: identifier.optional(),
   to: exprSource.optional(),
-  amount: z.union([exprSource, tiersMapping, rankMapping]),
+  /** `reverse` : l'exact négatif de ce qu'une récompense a versé pour le claim de chaque destinataire (spec §3.5, clawback). */
+  amount: z.union([exprSource, tiersMapping, rankMapping, z.strictObject({ reverse: z.string().min(1) })]),
   pool: exprSource.optional(),
   clamp: z.literal("pool").optional(),
   order: z.literal("commit_time").optional(),
@@ -227,7 +229,16 @@ export const documentShell = z.strictObject({
   params: z.record(identifier, paramDecl).default({}),
   requires: z.strictObject({ core: z.number().int().min(1) }),
   resources: z.record(identifier, resourceDecl).default({}),
-  counters: z.record(identifier, z.strictObject({ type: z.enum(["int", "number", "ratio", "points"]) })).default({}),
+  counters: z
+    .record(
+      identifier,
+      z.strictObject({
+        type: z.enum(["int", "number", "ratio", "points"]),
+        /** Les `lag` claims livrés les plus récents ne comptent pas encore : un compteur qui ne trahit pas le geste qui l'a fait bouger. */
+        lag: z.number().int().min(0).optional(),
+      })
+    )
+    .default({}),
   lifecycle: z
     .strictObject({
       states: z

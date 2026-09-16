@@ -306,11 +306,14 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       } else if (claim.k !== undefined) {
         report("claim", [...claimPath, "k"], `k only applies to k_bounded, not ${claim.mode}`);
       }
-      if (claim.ttl !== undefined && claim.mode !== "exclusive" && claim.mode !== "k_bounded") {
-        report("claim", [...claimPath, "ttl"], `a TTL only applies to exclusive and k_bounded claims, not ${claim.mode}`);
+      if (claim.ttl !== undefined && claim.mode === "unbounded") {
+        report("claim", [...claimPath, "ttl"], "an unbounded claim holds nothing; it has no TTL");
       }
-      if (claim.ttl !== undefined && Number.parseInt(claim.ttl, 10) <= 0) {
-        report("claim", [...claimPath, "ttl"], "a TTL must be positive");
+      if (typeof claim.ttl === "string" && /^[0-9]+[mhd]$/.test(claim.ttl)) {
+        if (Number.parseInt(claim.ttl, 10) <= 0) report("claim", [...claimPath, "ttl"], "a TTL must be positive");
+      } else if (claim.ttl !== undefined) {
+        const { type } = expr(claim.ttl, base, [...claimPath, "ttl"]);
+        expectType(type, (t) => isNumeric(t), "a TTL is a duration (48h) or a number of hours", [...claimPath, "ttl"]);
       }
       if (claim.mode === "unique_per") {
         const dims = claim.dimensions ?? [];
@@ -424,12 +427,24 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   /** Sans émetteur valide, les entrées restent `dyn` : une seule erreur, sur l'`emit` cassé. */
   const inputType = (aggregate: string): Type => {
     const fields = inputFields.get(aggregate);
-    return fields ? T.record({ ...fields, participation: T.record({ user: T.user }), author: T.user }) : T.dyn;
+    return fields ? T.record({ ...fields, participation: T.record({ user: T.user }), author: T.user, claim: T.string }) : T.dyn;
   };
 
   // ── Aggregates ──────────────────────────────────────────────────────────
   const verdictTypes = new Map<string, Type>();
   const ruleKeys = new Map<string, TemplatePath>();
+  /** Ce qu'un `reverse` peut nommer : un `rule_key` écrit, ou `<lane>.<nœud>` d'une récompense de lane. */
+  const rewardKeys = new Set<string>();
+  for (const lane of model.lanes) {
+    for (const node of allNodes(lane.nodes)) {
+      if (node.family !== "reward") continue;
+      rewardKeys.add(`${lane.id}.${node.id}`);
+      if (node.body.rule_key) rewardKeys.add(node.body.rule_key);
+    }
+  }
+  for (const effect of [...model.aggregates.flatMap((aggregate) => aggregate.then), ...model.onClose]) {
+    if (effect.family === "reward" && effect.body.rule_key) rewardKeys.add(effect.body.rule_key);
+  }
 
   /** `aggregates.<id>` vu depuis une instance de `resource` : son verdict, ses entrées. */
   const aggregatesOver = (resource: string): Type => {
@@ -506,6 +521,9 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
           const { type } = expr(entry.over.where, scope, [...entryPath, "over", "where"]);
           expectType(type, isBool, "a cron selection must be bool", [...entryPath, "over", "where"]);
         }
+        if (entry.cursor === "engine" && !selectsClosed(entry.over.where, entry.over.resource)) {
+          gap("cursor over open resources", [...entryPath, "over", "where"], `the engine cursor marks closed resources only; select ${entry.over.resource}.closed first`);
+        }
         if (entry.over.sample !== undefined) {
           const { type } = expr(entry.over.sample, scope, [...entryPath, "over", "sample"]);
           expectType(type, isNumeric, "a sample rate must be a number", [...entryPath, "over", "sample"]);
@@ -553,6 +571,19 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const index = laneIndexes.get(lane)!;
     const segments: Segments = { interactive: 0, serverStep: false, claimed: false, gapped: false };
     walk(lane, lane.nodes, base.with(bindings), index, segments);
+  }
+
+  /** `R.closed`, ou une conjonction qui commence par lui. */
+  function selectsClosed(where: ExprSource | undefined, resource: string): boolean {
+    if (typeof where !== "string") return false;
+    let ast: Expr;
+    try {
+      ast = parseExpr(where);
+    } catch {
+      return false;
+    }
+    while (ast.k === "binary" && ast.op === "&&") ast = ast.left;
+    return ast.k === "member" && ast.name === "closed" && ast.object.k === "ident" && ast.object.name === resource;
   }
 
   function explainFor(ctx: NodeContext): Explain {
@@ -1021,7 +1052,22 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   ) {
     let negative = false;
 
-    if (typeof body.amount === "object") {
+    if (typeof body.amount === "object" && "reverse" in body.amount) {
+      const target = body.amount.reverse;
+      negative = true;
+      if (!rewardKeys.has(target)) {
+        report("reference", [...path, "amount", "reverse"], `reverse names no reward: use its rule_key or <lane>.<node>`, { node });
+      }
+      if (body.to === undefined) {
+        report("economy", [...path, "to"], "a reverse reward names whose payments it reverses: to", { node });
+      } else if (body.to !== "each_participation") {
+        const { type } = expr(body.to, scope, [...path, "to"], node);
+        const item = type.kind === "list" ? type.of : type;
+        if (item.kind !== "dyn" && !(item.kind === "record" && item.fields.claim)) {
+          report("type", [...path, "to"], `a reverse reward pays back per claim; its recipients carry a claim, got ${showType(type)}`, { node });
+        }
+      }
+    } else if (typeof body.amount === "object") {
       const mapping = body.amount;
       const at = [...path, "amount"];
       if (mapping.mapping === "tiers") {

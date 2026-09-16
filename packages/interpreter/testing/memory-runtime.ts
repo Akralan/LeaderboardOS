@@ -11,7 +11,8 @@ import type { EvaluateBinding, TemplateRuntime } from "../compile/runtime.js";
  * actives et consommées, une personne n'a qu'une réclamation vivante par
  * ressource, l'échéance est paresseuse, un tirage prend d'abord ce que
  * l'appelant n'a jamais réclamé puis l'ordre de création, `close` et
- * `stampResolution` sont premiers arrivés. Le hasard et l'horloge sont fixés
+ * `stampResolution` sont premiers arrivés ; `close` remplace `resolution`,
+ * `stampResolution` ne marque qu'une ressource fermée. Le hasard et l'horloge sont fixés
  * par le test.
  */
 
@@ -120,13 +121,14 @@ export function memoryRuntime(options: {
       async close(resourceId, verdict, resolution) {
         const instance = runtime.instances.find((candidate) => candidate.uuid === resourceId);
         if (!instance || instance.state !== "open") return null;
-        Object.assign(instance, { state: "closed", verdict, resolution: { ...(instance.resolution ?? {}), ...(resolution ?? {}) }, closed_at: runtime.clock });
+        Object.assign(instance, { state: "closed", verdict, resolution: resolution ?? null, closed_at: runtime.clock });
         return instance as never;
       },
 
       async stampResolution(resourceId, key, value) {
         const instance = runtime.instances.find((candidate) => candidate.uuid === resourceId);
-        if (!instance || (instance.resolution && key in instance.resolution)) return null;
+        // Comme le repository : une marque ne se pose que sur une ressource fermée.
+        if (!instance || instance.state !== "closed" || (instance.resolution && key in instance.resolution)) return null;
         instance.resolution = { ...(instance.resolution ?? {}), [key]: value };
         return instance as never;
       },

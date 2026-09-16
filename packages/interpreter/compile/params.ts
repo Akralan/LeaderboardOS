@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Challenge } from "../../database-service/domain/entities.js";
-import type { Value } from "../expr/evaluator.js";
+import { evaluate, type Value } from "../expr/evaluator.js";
+import { parseExpr } from "../expr/parser.js";
 import type { Type } from "../expr/types.js";
 import type { DocumentShell } from "../format/schema.js";
 
@@ -58,6 +59,18 @@ export function compileParams(shell: DocumentShell, types: Readonly<Record<strin
   for (const [name, param] of Object.entries(shell.params)) {
     if (name === poolParam) continue;
     let schema = zodOf(types[name]);
+    if (typeof param.check === "string") {
+      // Le `check` du template fait partie du schéma : une valeur qui l'échoue ne se stocke ni ne se lit.
+      const check = parseExpr(param.check);
+      const passes = (value: unknown) => {
+        try {
+          return evaluate(check, { value: value as Value }) === true;
+        } catch {
+          return false;
+        }
+      };
+      schema = schema.refine(passes, { message: `${name} fails its check` });
+    }
     if (param.default !== undefined) schema = schema.default(param.default);
     (param.mutable ? rules : config)[name] = schema;
   }

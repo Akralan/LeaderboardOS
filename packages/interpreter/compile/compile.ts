@@ -117,10 +117,10 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   const runtime = options.runtime ?? defaultRuntime();
 
   // ── Récompenses : clés de ledger, pool ──────────────────────────────────
-  const rewards: { body: RewardBody; key: string }[] = [];
+  const rewards: { body: RewardBody; key: string; ref?: string }[] = [];
   const collectRewards = (nodes: readonly NodeModel[], owner: string) => {
     for (const node of nodes) {
-      if (node.family === "reward") rewards.push({ body: node.body, key: node.body.rule_key ?? `${flowKey}.${owner}.${node.id}` });
+      if (node.family === "reward") rewards.push({ body: node.body, key: node.body.rule_key ?? `${flowKey}.${owner}.${node.id}`, ref: `${owner}.${node.id}` });
       if (node.family === "gate") for (const branch of node.branches ?? []) collectRewards(branch.nodes, owner);
     }
   };
@@ -156,6 +156,14 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     runtime,
     resourceTypes: types.resources,
     ruleKeys: new Map(rewards.map((reward) => [reward.body, reward.key])),
+    reversedKeys: new Map(
+      rewards.flatMap(({ body }) => {
+        if (typeof body.amount !== "object" || !("reverse" in body.amount)) return [];
+        const target = body.amount.reverse;
+        const reversed = rewards.find((reward) => reward.body.rule_key === target || reward.ref === target)!;
+        return [[body, reversed.key] as const];
+      })
+    ),
     counterWrites: model.lanes.flatMap((lane) => counterWritesOf(lane.nodes)),
   };
   const engine = new Engine(compiled);

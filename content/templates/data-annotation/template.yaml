@@ -1,0 +1,162 @@
+# The data-annotation flow as a template (interpreter J3).
+#
+# Reconciled with the hand-written flow (content/flows/data-annotation), which
+# wins wherever the conformance suite §6 diverged:
+# - params carry the flow's names and split: k, ttl_hours, label_schema and
+#   sensitive_clearance are fixed at creation; per_unit_cp, gold_rate and
+#   audit_rate are the editable reward rules;
+# - an item without a strict plurality closes as `contested`;
+# - accuracy lags the ten most recent labels, so a score change never points
+#   at the gold that caused it;
+# - golds are claimed once per annotator, with the same TTL as items;
+# - the audit visits each labeled item once and reverses exactly what a
+#   disagreeing label was paid, net of earlier clawbacks;
+# - the ledger keys are `annotation` and `annotation_clawback`.
+#
+# Out of the template for now: release, progress, overview, export and the
+# manual resolution of a contested item (reads and a reopening transition v1
+# does not compile).
+
+format: leaderboardos/1
+
+template:
+  id: data-annotation
+  version: 1.0.0
+  name: Annotation
+  summary: >
+    Annotators label items under k-redundancy; hidden gold cases maintain a
+    lagged accuracy that weights pay and gates sensitive items; items resolve
+    by strict plurality; payment is fast, audited by sampled clawback.
+
+params:
+  pool:        {type: points, mutable: false}
+  k:           {type: int, default: 3, check: "value >= 1 && value <= 15 && value % 2 == 1", mutable: false}
+  ttl_hours:   {type: int, default: 48, check: "value >= 1 && value <= 720", mutable: false}
+  label_schema:
+    type: "{kind: enum(single_choice), options: list({key: string, label: string})}"
+    check: "size(value.options) >= 2 && size(value.options) <= 12"
+    mutable: false
+  sensitive_clearance:
+    type: {min_seen: int, min_accuracy: ratio}
+    default: {min_seen: 5, min_accuracy: 0.8}
+    mutable: false
+  per_unit_cp: {type: points, check: "value >= 0", mutable: true}
+  gold_rate:   {type: ratio, default: 0.1, check: "value >= 0.0 && value <= 1.0", mutable: true}
+  audit_rate:  {type: ratio, default: 0.1, check: "value >= 0.0 && value <= 1.0", mutable: true}
+
+requires: {core: 1}
+
+resources:
+  item:
+    fields:
+      image_url: {type: url, visibility: [claimant, admin]}
+      class:     {type: "enum(standard, sensitive)", visibility: [admin]}
+    created_by: [import.explode_items]
+    claim: {mode: k_bounded, k: params.k, ttl: params.ttl_hours}
+    closure: {by: aggregate, verdict: [labeled, contested]}
+  gold:
+    fields:
+      image_url: {type: url, visibility: [claimant, admin]}
+      expected:  {type: string, visibility: []}
+    created_by: [import.explode_golds]
+    claim: {mode: unique_per, dimensions: [self, participation], ttl: params.ttl_hours}
+
+counters:
+  gold_seen:    {type: int, lag: 10}
+  gold_correct: {type: int, lag: 10}
+
+lifecycle:
+  aggregates:
+    - id: agreement
+      over: item
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) >= params.k"
+        verdict: "mode(inputs.map(i, i.value))"
+        then:
+          - transition: {resource: item, to: closed, verdict: 'verdict == null ? "contested" : "labeled"'}
+
+lanes:
+  - id: import
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: batch
+          fields:
+            file:  {type: file}
+            kind:  {type: "enum(items, golds)"}
+            class: {type: "enum(standard, sensitive)", when: 'kind == "items"'}
+      - gate:
+          id: kind
+          branch:
+            - when: 'batch.kind == "golds"'
+              nodes:
+                - act: {id: explode_golds, create: gold, many: {from_file: batch.file}}
+            - else:
+                nodes:
+                  - act: {id: explode_items, create: item, many: {from_file: batch.file}, set: {class: batch.class}}
+
+  - id: annotator
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - gate: {id: open, all: ['challenge.state == "open"']}
+      - act:
+          id: draw
+          claim:
+            resource: item
+            where: >
+              item.class == "standard"
+              || (counters.gold_seen >= params.sensitive_clearance.min_seen
+                  && (counters.gold_seen > 0 ? counters.gold_correct * 1.0 / counters.gold_seen : 0.0)
+                     >= params.sensitive_clearance.min_accuracy)
+            substitute: {resource: gold, rate: params.gold_rate}
+      - collect:
+          id: label
+          fields:
+            value: {type: string, check: "params.label_schema.options.exists(o, o.key == value)"}
+      - gate:
+          id: kind
+          branch:
+            - when: "draw.substituted"
+              nodes:
+                - assess:
+                    id: check
+                    kind: metric
+                    value: "label.value == draw.gold.expected"
+                    counters:
+                      gold_seen:    {add: "1"}
+                      gold_correct: {add: "value ? 1 : 0"}
+            - else:
+                nodes:
+                  - assess:
+                      id: submit
+                      kind: human
+                      from: label
+                      emit: {to: lifecycle.agreement, scope: draw.item}
+      - reward:
+          id: pay
+          rule_key: annotation
+          amount: >
+            params.per_unit_cp
+            * (counters.gold_seen == 0 ? 1.0
+               : counters.gold_correct * 1.0 / counters.gold_seen)
+          pool: params.pool
+          clamp: pool
+
+  - id: audit
+    entry:
+      trigger: cron
+      schedule: "0 4 * * 1"
+      over: {resource: item, where: 'item.closed && item.verdict == "labeled"', sample: params.audit_rate}
+      cursor: engine
+    nodes:
+      - assess:
+          id: recheck
+          kind: metric
+          value: "aggregates.agreement.inputs.filter(i, i.value != aggregates.agreement.verdict)"
+      - reward:
+          id: clawback
+          to: recheck.value
+          amount: {reverse: annotation}
+          rule_key: annotation_clawback
+          pool: params.pool
