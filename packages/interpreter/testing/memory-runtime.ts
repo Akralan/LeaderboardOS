@@ -3,6 +3,8 @@ import { ClaimNotConsumableError, claimState, type ResourceClaim, type ResourceI
 import { outOfPoolRuleKeys } from "../../capabilities/pool.js";
 import type { Value } from "../expr/evaluator.js";
 import type { EvaluateBinding, TemplateRuntime } from "../compile/runtime.js";
+import { scopeKeyOf } from "../../capabilities/resources.js";
+import type { StoredBlob } from "../../capabilities/blobs.js";
 
 /**
  * Un runtime en mémoire, pour les tests
@@ -19,6 +21,10 @@ import type { EvaluateBinding, TemplateRuntime } from "../compile/runtime.js";
 export interface MemoryRuntime extends TemplateRuntime {
   instances: ResourceInstance[];
   claims: ResourceClaim[];
+  grants: { resource_id: string; field: string; participation: string; granted_by: string }[];
+  /** Les contributions des challenges sources : `challenge` est le challenge source, `capabilities` ce qu'elles livrent. */
+  contributionRows: { id: string; author: string; url: string | null; kind: string; challenge: string; capabilities: string[] }[];
+  blobRows: StoredBlob[];
   ledgerRows: RewardEntry[];
   challenges: Challenge[];
   clock: Date;
@@ -29,7 +35,7 @@ export interface MemoryRuntime extends TemplateRuntime {
 
 export function memoryRuntime(options: {
   evaluate?: (request: EvaluateBinding) => Promise<number>;
-  observe?: (capability: string, args: Record<string, Value>) => Promise<Value>;
+  observe?: (capability: string, args: Record<string, Value>, runtime: MemoryRuntime) => Promise<Value>;
 } = {}): MemoryRuntime {
   let sequence = 0;
   const id = (prefix: string) => `${prefix}-${++sequence}`;
@@ -37,6 +43,9 @@ export function memoryRuntime(options: {
   const runtime: MemoryRuntime = {
     instances: [],
     claims: [],
+    grants: [],
+    contributionRows: [],
+    blobRows: [],
     ledgerRows: [],
     challenges: [],
     clock: new Date("2026-09-16T12:00:00Z"),
@@ -90,9 +99,75 @@ export function memoryRuntime(options: {
           released_at: null,
           scope_key: "",
           scope_exclusive: false,
+          context: null,
         };
         runtime.claims.push(claim);
         return { claimId: claim.uuid, resourceId: chosen.uuid, payload: chosen.payload, expiresAt };
+      },
+
+      async claimScoped(challengeId, userId, options) {
+        const scopeKey = scopeKeyOf(options.scope);
+        const instance = runtime.instances.find((candidate) => candidate.uuid === options.resourceId);
+        if (!instance || instance.challenge_id !== challengeId || instance.state !== "open") return null;
+        const now = runtime.clock;
+        // L'échéance libère la combinaison, comme `releaseExpiredOn`.
+        for (const claim of runtime.claims) {
+          if (claim.resource_id === options.resourceId && claim.scope_key === scopeKey && (options.exclusive || claim.user_id === userId)
+            && !claim.consumed_at && !claim.released_at && claim.expires_at && claim.expires_at.getTime() < now.getTime()) {
+            claim.released_at = claim.expires_at;
+          }
+        }
+        const live = runtime.claims.filter((claim) => claim.resource_id === options.resourceId && !claim.released_at);
+        if (live.some((claim) => claim.user_id === userId && claim.scope_key === scopeKey)) return null;
+        if (options.exclusive && live.some((claim) => claim.scope_exclusive && claim.scope_key === scopeKey)) return null;
+        const expiresAt = options.ttlHours ? new Date(now.getTime() + options.ttlHours * 3_600_000) : null;
+        const claim: ResourceClaim = {
+          uuid: id("claim"),
+          resource_id: options.resourceId,
+          challenge_id: challengeId,
+          user_id: userId,
+          result: null,
+          claimed_at: now,
+          expires_at: expiresAt,
+          consumed_at: null,
+          released_at: null,
+          scope_key: scopeKey,
+          scope_exclusive: options.exclusive,
+          context: null,
+        };
+        runtime.claims.push(claim);
+        return { claimId: claim.uuid, resourceId: instance.uuid, payload: instance.payload, expiresAt };
+      },
+
+      async heldInScope(resourceIds, scope, userId) {
+        const scopeKey = scopeKeyOf(scope);
+        const held = runtime.claims.filter(
+          (claim) => resourceIds.includes(claim.resource_id) && claim.scope_key === scopeKey && !claim.released_at
+            && (claim.consumed_at || claimState(claim, runtime.clock) === "active")
+            && (claim.scope_exclusive || claim.user_id === userId)
+        );
+        return new Set(held.map((claim) => claim.resource_id));
+      },
+
+      async updateContext(claimId, userId, patch) {
+        const claim = runtime.claims.find((candidate) => candidate.uuid === claimId && candidate.user_id === userId);
+        if (!claim || claimState(claim, runtime.clock) !== "active") return false;
+        claim.context = { ...(claim.context ?? {}), ...JSON.parse(JSON.stringify(patch)) };
+        return true;
+      },
+
+      async grant(resourceId, field, participation, grantedBy) {
+        if (runtime.grants.some((row) => row.resource_id === resourceId && row.field === field && row.participation === participation)) return false;
+        runtime.grants.push({ resource_id: resourceId, field, participation, granted_by: grantedBy });
+        return true;
+      },
+
+      async grantsFor(resourceIds, participation) {
+        const grants: Record<string, string[]> = {};
+        for (const row of runtime.grants) {
+          if (row.participation === participation && resourceIds.includes(row.resource_id)) (grants[row.resource_id] ??= []).push(row.field);
+        }
+        return grants;
       },
 
       async activeClaim(challengeId, userId) {
@@ -171,6 +246,39 @@ export function memoryRuntime(options: {
       },
     },
 
+    blobs: {
+      async store(input) {
+        const row: StoredBlob = {
+          uuid: id("blob"),
+          challenge_id: input.challengeId,
+          content_type: input.contentType,
+          filename: input.filename ?? null,
+          size: input.bytes.length,
+          bytes: input.bytes,
+          retention_days: input.retentionDays ?? null,
+          created_at: runtime.clock,
+          purged_at: null,
+        };
+        runtime.blobRows.push(row);
+        return { blob_id: row.uuid, content_type: row.content_type, filename: row.filename, size: row.size };
+      },
+      async get(blobId) {
+        return runtime.blobRows.find((row) => row.uuid === blobId) ?? null;
+      },
+    },
+
+    contributions: {
+      async find(contributionId) {
+        const row = runtime.contributionRows.find((candidate) => candidate.id === contributionId);
+        return row ? { id: row.id, author: row.author, url: row.url, kind: row.kind } : null;
+      },
+      async eligible(challenge, capability) {
+        return runtime.contributionRows
+          .filter((row) => row.challenge === challenge.source_challenge_id && row.capabilities.includes(capability))
+          .map((row) => ({ id: row.id, author: row.author, url: row.url, kind: row.kind }));
+      },
+    },
+
     ledger: {
       async distributed(challengeId) {
         const outOfPool = new Set(outOfPoolRuleKeys());
@@ -195,9 +303,9 @@ export function memoryRuntime(options: {
       return options.evaluate(request);
     },
 
-    async observe(capability, args) {
+    async observe(capability, args, _context) {
       if (!options.observe) throw new Error(`no binding for ${capability} in this test`);
-      return options.observe(capability, args);
+      return options.observe(capability, args, runtime);
     },
 
     async challengesOf(flowKey) {
@@ -225,6 +333,7 @@ export function memoryRuntime(options: {
           payload: instance.payload,
           result: claim.result ?? {},
           consumed_at: claim.consumed_at!,
+          context: claim.context,
         };
       })
       .sort((a, b) => b.consumed_at.getTime() - a.consumed_at.getTime());

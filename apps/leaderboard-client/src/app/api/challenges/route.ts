@@ -13,6 +13,7 @@ import {
   prepareFlowConfig,
 } from '../../../../../../packages/capabilities/flow-config';
 import { flowsValidating, requiresDeliverable } from '../../../../../../packages/capabilities/deliverables';
+import { PlatformRegistry } from '../../../../../../packages/registry/platform';
 
 /**
  * Compatibilité : un tiroir chargé avant le lot L4c du challenge 020 envoie
@@ -111,6 +112,10 @@ export async function POST(request: NextRequest) {
     // livrables du challenge source (un endpoint, une application déployée).
     // Un flow explicite reste accepté s'il sait éprouver ce source. Le quorum
     // et le forfait sont vérifiés par le schéma du flow retenu.
+    // Un flow retiré sert ses challenges, il n'en reçoit plus de nouveaux.
+    if (PlatformRegistry.flow(validated.type)?.retired) {
+      return NextResponse.json({ error: `Flow ${validated.type} no longer accepts new challenges` }, { status: 400 });
+    }
     let flowKey = validated.type;
     if (validated.type === FORM_VALIDATION_TYPE || requiresDeliverable(validated.type)) {
       if (!validated.source_challenge_id) {

@@ -16,11 +16,12 @@ import type { Type } from "../expr/types.js";
 import type { ExprSource, FieldDecl, RewardBody } from "../format/schema.js";
 import type { TemplateReport } from "../check.js";
 import { descriptorOf } from "../describe.js";
-import type { LaneModel, NodeModel } from "../validate/format.js";
+import type { LaneModel, NodeModel, TemplateModel } from "../validate/format.js";
 import { Engine, Refusal, newState, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
 import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
 import { generatedActions, generatedPathConflicts, resourceCounts } from "./reads.js";
+import { gestureFields, isGesture, segmentsOf, type Segment } from "./segments.js";
 import { project, resourceValue } from "./values.js";
 
 /**
@@ -53,42 +54,6 @@ export interface CompileOptions {
 }
 
 const SCHEDULES: Record<string, string> = { hourly: "0 * * * *", daily: "0 3 * * *", weekly: "0 4 * * 1" };
-
-const gestureFields = (node: NodeModel): Record<string, FieldDecl> =>
-  node.family === "collect" || node.family === "assess" ? node.body.fields ?? {} : {};
-
-const isGesture = (node: NodeModel) =>
-  node.family === "collect" || (node.family === "assess" && node.body.kind === "human" && Boolean(node.body.fields));
-
-/** Un segment : ce qu'un seul appel exécute, du geste (s'il y en a un) au prochain. */
-interface Segment {
-  nodes: NodeModel[];
-  gestures: NodeModel[];
-  path: string;
-  final: boolean;
-}
-
-function segmentsOf(lane: LaneModel): Segment[] {
-  const segments: { nodes: NodeModel[]; serverStep: boolean }[] = [];
-  for (const node of lane.nodes) {
-    const current = segments[segments.length - 1];
-    if (!current || (isGesture(node) && current.serverStep)) {
-      segments.push({ nodes: [node], serverStep: !isGesture(node) && node.family !== "gate" });
-      continue;
-    }
-    current.nodes.push(node);
-    if (!isGesture(node) && node.family !== "gate") current.serverStep = true;
-  }
-  return segments.map((segment, index) => {
-    const first = segment.nodes[0];
-    return {
-      nodes: segment.nodes,
-      gestures: segment.nodes.filter(isGesture),
-      path: isGesture(first) ? `${lane.id}/${first.id}` : lane.id,
-      final: index === segments.length - 1,
-    };
-  });
-}
 
 /** Toutes les chaînes d'un nœud qui se lisent comme une expression. */
 function expressionsOf(value: unknown): ReturnType<typeof parseExpr>[] {
@@ -165,7 +130,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       })
     ),
     counterWrites: model.lanes.flatMap((lane) => counterWritesOf(lane.nodes)),
-    replays: replaysOf(flowKey, model.lanes),
+    replays: replaysOf(flowKey, model.lanes, types.nodeFields),
+    crossEmits: crossEmitsOf(model, types.nodeFields),
     contribution: shell.presentation?.contribution ?? { type: flowKey, title: shell.template.name },
   };
   const engine = new Engine(compiled);
@@ -180,8 +146,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       continue;
     }
     const segments = segmentsOf(lane);
-    checkSegments(flowKey, lane, segments);
-    const claimAct = lane.nodes.find((node) => node.family === "act" && node.body.claim);
+    const persisted = checkSegments(flowKey, lane, segments);
+    const claimAct = lane.nodes.find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }> | undefined;
 
     segments.forEach((segment, index) => {
       const afterClaim = Boolean(claimAct && segments.slice(0, index).some((earlier) => earlier.nodes.includes(claimAct)));
@@ -190,7 +156,20 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
         method: "POST",
         access: accessOf(lane, params),
         handle: (ctx) =>
-          runSegment({ ctx, lane, segment, claimAct: afterClaim ? (claimAct as Extract<NodeModel, { family: "act" }>) : null }, compiled, engine, params, types.nodeFields),
+          runSegment(
+            {
+              ctx,
+              lane,
+              segment,
+              claimAct: afterClaim ? claimAct! : null,
+              persist: persisted[index],
+              earlier: segments.slice(0, index).flatMap((previous, i) => persisted[i].filter((id) => previous.gestures.some((gesture) => gesture.id === id))),
+            },
+            compiled,
+            engine,
+            params,
+            types.nodeFields
+          ),
       });
     });
   }
@@ -200,7 +179,7 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   if (conflicts.length > 0) {
     throw new CompileError(`[interpreter] ${flowKey}: ${conflicts.join(", ")} would shadow a generated read or release`);
   }
-  actions.push(...generatedActions(compiled, engine, params));
+  actions.push(...generatedActions(compiled, engine, params, types, (lane) => accessOf(lane, params)));
 
   // ── Aggregates résolus à la clôture ─────────────────────────────────────
   const lifecycleAggregates = model.aggregates.filter(
@@ -218,6 +197,7 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     ruleKeys,
     contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
     uses: { board: false, groups: false },
+    ...(deliverableOf(shell) ? { requires: { deliverableCapability: deliverableOf(shell)! } } : {}),
     rewards: {
       // L'avancement du challenge, comme `overview.resources` : le hero le lit.
       async summarize({ challenge }) {
@@ -250,8 +230,16 @@ function counterWritesOf(nodes: readonly NodeModel[]): { node: string; counter: 
   });
 }
 
-/** Un segment ne lit d'un segment passé que le claim : rien d'autre ne survit entre deux appels. */
-function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]) {
+/**
+ * Ce qui traverse un geste. Un segment ne relit d'un segment passé que ce qui
+ * est gardé sur le claim : les champs collectés après le tirage, et les sorties
+ * que l'analyse de portée voit lues plus loin. La persistance dérive donc de la
+ * lecture, jamais d'une déclaration. Sans claim pour la porter, une lecture à
+ * travers un geste est refusée. Rend, par segment, les nœuds à garder.
+ */
+function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]): string[][] {
+  const claimSegment = segments.findIndex((segment) => segment.nodes.some((node) => node.family === "act" && node.body.claim));
+  const persisted: string[][] = segments.map(() => []);
   const all = (nodes: readonly NodeModel[]): NodeModel[] =>
     nodes.flatMap((node) => [node, ...(node.family === "gate" ? (node.branches ?? []).flatMap((b) => all(b.nodes)) : [])]);
   segments.forEach((segment, index) => {
@@ -264,14 +252,17 @@ function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]) {
         names.add(field);
       }
     }
-    const earlier = segments.slice(0, index).flatMap((previous) => all(previous.nodes));
-    const later = segments.slice(index).flatMap((next) => all(next.nodes));
-    for (const node of earlier) {
-      const carried = node.family === "act" && node.body.claim;
-      if (carried) continue;
-      if (later.some((reader) => expressionsOf(reader.body).some((ast) => readsRoot(ast, node.id)))) {
-        throw new CompileError(`[interpreter] ${flowKey}: lane ${lane.id} reads '${node.id}' across a gesture; only a claim survives between calls`);
+    const later = segments.slice(index + 1).flatMap((next) => all(next.nodes));
+    for (const node of all(segment.nodes)) {
+      const observed = node.family === "act" && node.body.kind === "observer";
+      if (node.family === "act" && node.body.claim && !observed) continue;
+      const readLater = later.some((reader) => expressionsOf(reader.body).some((ast) => readsRoot(ast, node.id)));
+      const heldHere = claimSegment >= 0 && index >= claimSegment && !segment.final;
+      if (readLater && !heldHere) {
+        throw new CompileError(`[interpreter] ${flowKey}: lane ${lane.id} reads '${node.id}' across a gesture, with no claim to keep it`);
       }
+      // Ce qui a été collecté ou observé une fois le claim tenu reste sur le claim, lu ou non : c'est la trace du travail.
+      if (heldHere && (readLater || isGesture(node) || observed)) persisted[index].push(node.id);
     }
     for (const node of all(segment.nodes)) {
       if (node.family === "act" && node.body.create && later.some((reader) => reader !== node && expressionsOf(reader.body).some((ast) => readsRoot(ast, node.id)))) {
@@ -279,6 +270,7 @@ function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]) {
       }
     }
   });
+  return persisted;
 }
 
 function accessOf(lane: LaneModel, params: CompiledParams): ActionAccess {
@@ -286,8 +278,8 @@ function accessOf(lane: LaneModel, params: CompiledParams): ActionAccess {
   const access = lane.entry.access!;
   if (access.mode === "role") {
     const param = /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec(String(access.role))?.[1];
+    // La qualification seule : un admin ou un manager ne relit ni ne vote à la place d'un qualifié.
     return {
-      roles: ["admin"],
       qualification: (challenge: Challenge) => {
         const value = param ? params.valuesOf(challenge, flowConfigOf(challenge))?.[param] : null;
         return typeof value === "string" ? value : null;
@@ -303,6 +295,10 @@ interface SegmentCall {
   segment: Segment;
   /** L'Act de claim d'un segment précédent, dont `claim_id` reprend la réclamation. */
   claimAct: Extract<NodeModel, { family: "act" }> | null;
+  /** Ce que ce segment garde sur le claim pour les segments suivants. */
+  persist: readonly string[];
+  /** Les gestes des segments précédents, gardés sur le claim : leur absence dit qu'une étape manque. */
+  earlier: readonly string[];
 }
 
 async function runSegment(
@@ -316,16 +312,26 @@ async function runSegment(
   const values = params.valuesOf(ctx.challenge, flowConfigOf(ctx.challenge));
   if (!values) return jsonError(409, "This challenge has no readable configuration or rules");
 
-  const body = (await ctx.request.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!body || typeof body !== "object" || Array.isArray(body)) return jsonError(400, "The body is a JSON object");
+  const body = await readBody(ctx.request);
+  if (!body) return jsonError(400, "The body is a JSON object or a multipart form");
   const state = newState(ctx.challenge, ctx.user.id, values);
+  let kept: Record<string, Value> = {};
 
   try {
     if (claimAct) {
       const claimId = typeof body.claim_id === "string" ? body.claim_id : null;
       const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
       if (!claim || claim.user_id !== ctx.user.id || claim.challenge_id !== ctx.challenge.uuid) return jsonError(404, "Claim not found");
-      await engine.hold(claimAct.id, claimAct.body.claim!, claim.uuid, claim.resource_id, state);
+      // L'ordre de la lane, tenu par le claim : chaque geste une fois, et jamais avant le précédent.
+      const kept = claim.context ?? {};
+      if (call.earlier.some((id) => !(id in kept))) return jsonError(400, "An earlier step of this lane is missing");
+      if (segment.gestures.some((gesture) => gesture.id in kept)) return jsonError(409, "This step is already recorded");
+      if (engine.isDraw(claimAct.body.claim!)) {
+        await engine.hold(claimAct.id, claimAct.body.claim!, claim.uuid, claim.resource_id, state);
+        await engine.restore(claim.context, state);
+      } else {
+        await engine.holdDesignated(claimAct.id, claim.uuid, claim.resource_id, claim.context, state);
+      }
     }
 
     for (const gesture of segment.gestures) {
@@ -337,6 +343,7 @@ async function runSegment(
 
     await engine.run(segment.nodes, state);
     if (segment.final) await engine.deliver(state);
+    else kept = await engine.persist(call.persist, state);
   } catch (error) {
     if (error instanceof Refusal) return jsonError(error.status, error.message);
     if (error instanceof GestureError) return jsonError(400, error.message);
@@ -347,17 +354,19 @@ async function runSegment(
   if (state.drawn && !state.claim?.consumed) {
     const instance = await t.runtime.resources.resource(state.drawn.resourceId);
     const decl = instance ? t.model.shell.resources[instance.resource_type] : null;
-    const value = instance ? await resourceValue(instance, t.runtime.resources, t.resourceTypes) : null;
+    const value = instance ? await resourceValue(instance, t.runtime, t.resourceTypes) : null;
+    const granted = instance ? (await t.runtime.resources.grantsFor([instance.uuid], ctx.user.id))[instance.uuid] : undefined;
     return {
       claim: {
         claim_id: state.drawn.claimId,
         expires_at: state.drawn.expiresAt,
         // L'opacité des substitutions : jamais le type, seulement ce que le claimant peut lire.
-        resource: value && decl ? await project(value, decl, viewerOf(ctx, values, true)) : null,
+        resource: value && decl ? await project(value, decl, { ...viewerOf(ctx, values, true), granted }) : null,
+        ...(Object.keys(kept).length > 0 ? { context: kept } : {}),
       },
     };
   }
-  return { ok: true, cp_awarded: state.awarded };
+  return { ok: true, cp_awarded: state.awarded, ...(Object.keys(kept).length > 0 ? { context: kept } : {}) };
 }
 
 function viewerOf(ctx: ActionContext, values: Record<string, Value>, claimant: boolean) {
@@ -392,16 +401,29 @@ async function readGesture(
       continue;
     }
     if (raw === undefined || raw === null) throw new GestureError(`${name} is required`);
+    if (type.kind === "file") {
+      // Un fichier entre par un formulaire multipart (ou en base64 dans un JSON) et ressort en référence de blob.
+      bound[name] = await storeGestureFile(name, raw, decl, state, t);
+      continue;
+    }
     const parsed = zodOf(type).safeParse(raw);
     if (!parsed.success) throw new GestureError(`${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     let value = parsed.data as Value;
 
+    if (type.kind === "contribution") {
+      // Un `link` : une contribution du challenge source qui porte le livrable exigé.
+      const capability = decl.deliverable ?? deliverableOf(t.model.shell);
+      const eligible = capability ? await t.runtime.contributions.eligible(state.challenge, capability) : [];
+      const found = eligible.find((contribution) => contribution.id === String(value));
+      if (!found) throw new GestureError(`${name}: not an eligible submission of the source challenge`);
+      value = found;
+    }
     if (type.kind === "resource") {
       const instance = await t.runtime.resources.resource(String(value));
       if (!instance || instance.challenge_id !== state.challenge.uuid || instance.resource_type !== type.name) {
         throw new GestureError(`${name}: no such ${type.name}`);
       }
-      value = await resourceValue(instance, t.runtime.resources, t.resourceTypes);
+      value = await resourceValue(instance, t.runtime, t.resourceTypes);
       if (decl.where !== undefined && (await engine.eval(decl.where, state, { [name]: value })) !== true) {
         throw new GestureError(`${name}: this ${type.name} is not eligible`);
       }
@@ -412,6 +434,63 @@ async function readGesture(
     bound[name] = value;
   }
   return bound;
+}
+
+/** Le corps d'un geste : un JSON, ou un formulaire multipart dont les champs texte se lisent en JSON quand ils le sont. */
+async function readBody(request: Request): Promise<Record<string, unknown> | null> {
+  if ((request.headers.get("content-type") ?? "").includes("multipart/form-data")) {
+    const form = await request.formData().catch(() => null);
+    if (!form) return null;
+    const body: Record<string, unknown> = {};
+    for (const [key, entry] of form.entries()) {
+      if (typeof entry !== "string") {
+        body[key] = entry;
+        continue;
+      }
+      try {
+        body[key] = JSON.parse(entry);
+      } catch {
+        body[key] = entry;
+      }
+    }
+    return body;
+  }
+  const body = await request.json().catch(() => ({}));
+  return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+}
+
+async function storeGestureFile(name: string, raw: unknown, decl: FieldDecl, state: RunState, t: CompiledTemplate): Promise<Value> {
+  let bytes: Buffer;
+  let contentType: string;
+  let filename: string | null;
+  if (typeof raw === "object" && raw !== null && "arrayBuffer" in raw && typeof (raw as Blob).arrayBuffer === "function") {
+    const file = raw as File;
+    bytes = Buffer.from(await file.arrayBuffer());
+    contentType = file.type || "application/octet-stream";
+    filename = file.name || null;
+  } else if (typeof raw === "object" && raw !== null && typeof (raw as { content_base64?: unknown }).content_base64 === "string") {
+    const encoded = raw as { content_base64: string; content_type?: string; filename?: string };
+    bytes = Buffer.from(encoded.content_base64, "base64");
+    contentType = encoded.content_type ?? "application/octet-stream";
+    filename = encoded.filename ?? null;
+  } else {
+    throw new GestureError(`${name} is a file`);
+  }
+  if (bytes.length === 0) throw new GestureError(`${name} is empty`);
+  try {
+    const ref = await t.runtime.blobs.store({
+      challengeId: state.challenge.uuid,
+      bytes,
+      contentType,
+      filename,
+      retentionDays: decl.retention?.days_after_close ?? null,
+    });
+    return ref as unknown as Value;
+  } catch (error) {
+    const { BlobTooLargeError } = await import("../../capabilities/blobs.js");
+    if (error instanceof BlobTooLargeError) throw new Refusal(413, `${name} is too large`);
+    throw error;
+  }
 }
 
 function cronJob(lane: LaneModel, t: CompiledTemplate, engine: Engine, params: CompiledParams): JobDeclaration {
@@ -443,7 +522,7 @@ function cronJob(lane: LaneModel, t: CompiledTemplate, engine: Engine, params: C
         });
         for (const instance of instances) {
           const state = newState(challenge, null, values);
-          state.bindings[over.resource] = await resourceValue(instance, t.runtime.resources, t.resourceTypes);
+          state.bindings[over.resource] = await resourceValue(instance, t.runtime, t.resourceTypes);
           state.bindings.aggregates = await aggregatesOf(over.resource, instance.uuid, instance.resolution, t, engine, values);
           if (over.where !== undefined && (await engine.eval(over.where, state)) !== true) continue;
           summary.instances++;
@@ -480,7 +559,49 @@ async function runCronNodes(nodes: readonly NodeModel[], state: RunState, engine
  * tirage. Un nœud rejoué ne lit que les paramètres, le claim, les gestes du
  * segment et ce que le rejeu a déjà produit — sinon le rejeu ne serait pas pur.
  */
-function replaysOf(flowKey: string, lanes: readonly LaneModel[]): Map<string, ReplaySpec> {
+/** Le livrable qu'exige un champ `link` du template, s'il y en a un : le `requires` du flow. */
+export function deliverableOf(shell: TemplateModel["shell"]): string | null {
+  for (const resource of Object.values(shell.resources)) {
+    for (const field of Object.values(resource.fields)) if (field.deliverable) return field.deliverable;
+  }
+  return null;
+}
+
+/** Le type de ressource d'un claim : le nom d'un tirage, ou le type du champ `ref` qu'un claim désigné lit (`pick.case`). */
+function claimedTypesOf(flowKey: string, claimAct: Extract<NodeModel, { family: "act" }>, lane: LaneModel, nodeFields: ReadonlyMap<NodeModel, Record<string, Type>>): string[] {
+  const claim = claimAct.body.claim!;
+  if (/^[a-z][a-z0-9_]*$/.test(claim.resource)) return [claim.resource, claim.substitute?.resource].filter((type): type is string => Boolean(type));
+  const match = /^\s*([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)\s*$/.exec(claim.resource);
+  const all = (nodes: readonly NodeModel[]): NodeModel[] =>
+    nodes.flatMap((node) => [node, ...(node.family === "gate" ? (node.branches ?? []).flatMap((b) => all(b.nodes)) : [])]);
+  const gesture = match ? all(lane.nodes).find((node) => node.id === match[1]) : undefined;
+  const type = gesture ? nodeFields.get(gesture)?.[match![2]] : undefined;
+  if (!type || type.kind !== "resource") {
+    throw new CompileError(`[interpreter] ${flowKey}: a designated claim reads a collected ref field (<collect>.<field>), got '${claim.resource}'`);
+  }
+  return [type.name];
+}
+
+/** Les aggregates qu'une lane alimente depuis un claim posé sur une autre ressource que celle de l'aggregate. */
+function crossEmitsOf(model: TemplateModel, nodeFields: ReadonlyMap<NodeModel, Record<string, Type>>): Set<string> {
+  const cross = new Set<string>();
+  const all = (nodes: readonly NodeModel[]): NodeModel[] =>
+    nodes.flatMap((node) => [node, ...(node.family === "gate" ? (node.branches ?? []).flatMap((b) => all(b.nodes)) : [])]);
+  for (const lane of model.lanes) {
+    const claimAct = all(lane.nodes).find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }> | undefined;
+    if (!claimAct) continue;
+    const claimed = claimedTypesOf(model.shell.template.id, claimAct, lane, nodeFields);
+    for (const node of all(lane.nodes)) {
+      if (node.family !== "assess" || !node.body.emit) continue;
+      const aggregateId = node.body.emit.to.replace(/^lifecycle\./, "");
+      const over = model.aggregates.find((aggregate) => aggregate.decl.id === aggregateId)?.decl.over;
+      if (over && !claimed.includes(over)) cross.add(aggregateId);
+    }
+  }
+  return cross;
+}
+
+function replaysOf(flowKey: string, lanes: readonly LaneModel[], nodeFields: ReadonlyMap<NodeModel, Record<string, Type>>): Map<string, ReplaySpec> {
   const replays = new Map<string, ReplaySpec>();
   const all = (nodes: readonly NodeModel[]): NodeModel[] =>
     nodes.flatMap((node) => [node, ...(node.family === "gate" ? (node.branches ?? []).flatMap((b) => all(b.nodes)) : [])]);
@@ -491,9 +612,14 @@ function replaysOf(flowKey: string, lanes: readonly LaneModel[]): Map<string, Re
     const index = segments.findIndex((segment) => segment.nodes.some((node) => node.family === "act" && node.body.claim));
     if (index < 0) continue;
     const claimAct = segments[index].nodes.find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }>;
-    const delivery = segments[index + 1] ?? { nodes: [], gestures: [] };
-    const gestures = delivery.gestures.map((gesture) => ({ id: gesture.id, fields: Object.keys(gestureFields(gesture)) }));
-    const spec: ReplaySpec = { claimActId: claimAct.id, claim: claimAct.body.claim!, gestures, nodes: delivery.nodes };
+    // Tout ce qui suit le tirage : un segment de livraison pour l'annotation, deux (observation, verdict) pour la validation.
+    const after = segments.slice(index + 1);
+    const deliveryNodes = after.flatMap((segment) => segment.nodes);
+    const gestures = after.flatMap((segment) =>
+      segment.gestures.map((gesture) => ({ id: gesture.id, fields: Object.keys(gestureFields(gesture)), final: segment.final }))
+    );
+    const spec: ReplaySpec = { claimActId: claimAct.id, claim: claimAct.body.claim!, gestures, nodes: deliveryNodes };
+    const delivery = { nodes: deliveryNodes };
 
     const replayed = all(delivery.nodes).filter((node) => node.family === "gate" || (node.family === "assess" && (node.body.counters || node.body.emit)));
     const allowed = new Set(["params", "value", claimAct.id, ...gestures.map((gesture) => gesture.id), ...replayed.map((node) => node.id)]);
@@ -511,7 +637,7 @@ function replaysOf(flowKey: string, lanes: readonly LaneModel[]): Map<string, Re
       }
     }
 
-    for (const type of [claimAct.body.claim!.resource, claimAct.body.claim!.substitute?.resource].filter((t): t is string => Boolean(t))) {
+    for (const type of claimedTypesOf(flowKey, claimAct, lane, nodeFields)) {
       if (replays.has(type)) throw new CompileError(`[interpreter] ${flowKey}: ${type} is drawn by two lanes; v1 replays one`);
       replays.set(type, spec);
     }

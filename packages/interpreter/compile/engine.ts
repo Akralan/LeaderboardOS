@@ -5,9 +5,10 @@ import { evaluate, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
 import type { AggregateDecl, ClaimUse, ExprSource, RewardBody, TransitionBody } from "../format/schema.js";
 import type { EffectModel, NodeModel, TemplateModel } from "../validate/format.js";
-import type { TemplateRuntime } from "./runtime.js";
+import { ObserverRefusal, type TemplateRuntime } from "./runtime.js";
+import { parseCsv } from "./csv.js";
 import { zodOf } from "./params.js";
-import { resourceValue, type ResourceTypes } from "./values.js";
+import { deserializeValue, resourceValue, serializeValue, type ResourceTypes } from "./values.js";
 
 /**
  * Le moteur d'un template compilé
@@ -46,13 +47,16 @@ export interface CompiledTemplate {
   replays: ReadonlyMap<string, ReplaySpec>;
   /** Le type et le titre de la contribution qui porte les lignes du ledger. */
   contribution: { type: string; title: string };
+  /** Les aggregates qui reçoivent des entrées d'un claim posé sur une autre ressource (un case, émis vers un target). */
+  crossEmits: ReadonlySet<string>;
 }
 
 /** Le segment qui livre le travail d'un claim : l'Act qui l'a tiré, les gestes qui l'ont rempli, les nœuds à rejouer. */
 export interface ReplaySpec {
   claimActId: string;
   claim: ClaimUse;
-  gestures: readonly { id: string; fields: readonly string[] }[];
+  /** Les gestes après le claim : ceux du dernier segment se relisent du résultat, les autres du contexte. */
+  gestures: readonly { id: string; fields: readonly string[]; final: boolean }[];
   nodes: readonly NodeModel[];
 }
 
@@ -130,7 +134,7 @@ export class Engine {
     for (const name of Object.keys(this.shell.resources)) {
       if (!(name in bindings) && readsRoot(ast, name)) {
         const instances = await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type: name });
-        bindings[name] = await Promise.all(instances.map((instance) => resourceValue(instance, this.t.runtime.resources, this.t.resourceTypes)));
+        bindings[name] = await Promise.all(instances.map((instance) => resourceValue(instance, this.t.runtime, this.t.resourceTypes)));
       }
     }
     return evaluate(ast, bindings, { now: this.t.runtime.now() });
@@ -179,8 +183,10 @@ export class Engine {
     drawn[claim.resource_type] = { ...(claim.payload as Record<string, Value>), id: claim.resource_id };
     const bindings: Record<string, Value> = { params, [spec.claimActId]: drawn };
     const result = (claim.result ?? {}) as Record<string, Value>;
+    const stored = (claim.context ?? {}) as Record<string, Value>;
     for (const gesture of spec.gestures) {
-      bindings[gesture.id] = Object.fromEntries(gesture.fields.map((field) => [field, result[field] ?? null]));
+      const source = gesture.final ? result : ((stored[gesture.id] ?? {}) as Record<string, Value>);
+      bindings[gesture.id] = Object.fromEntries(gesture.fields.map((field) => [field, source[field] ?? null]));
     }
     const context = { now: this.t.runtime.now() };
     const run = (source: ExprSource) => (typeof source === "string" ? evaluate(astOf(source), bindings, context) : source);
@@ -231,7 +237,7 @@ export class Engine {
       case "gate":
         if (node.body.all) {
           for (const condition of node.body.all) {
-            if ((await this.eval(condition, state)) !== true) throw new Refusal(422, `Refused by ${node.id}`);
+            if ((await this.eval(condition, state)) !== true) throw new Refusal(node.body.refuse ?? 422, `Refused by ${node.id}`);
           }
           return;
         }
@@ -251,9 +257,15 @@ export class Engine {
     }
   }
 
+  /** Un tirage (`resource: item`, le moteur choisit) ou une instance désignée (`resource: pick.case`). */
+  isDraw(claim: ClaimUse): boolean {
+    return /^[a-z][a-z0-9_]*$/.test(claim.resource) && claim.resource in this.shell.resources;
+  }
+
   private async act(node: Extract<NodeModel, { family: "act" }>, state: RunState): Promise<void> {
     const { body } = node;
-    if (body.claim) await this.draw(node.id, body.claim, state);
+    const designated = body.claim !== undefined && !this.isDraw(body.claim);
+    if (body.claim && !designated) await this.draw(node.id, body.claim, state);
 
     if (body.capability !== undefined) {
       const args: Record<string, Value> = {};
@@ -261,8 +273,23 @@ export class Engine {
         if (["id", "kind", "capability", "store", "claim"].includes(key)) continue;
         args[key] = await this.eval(value as ExprSource, state);
       }
-      const output = await this.t.runtime.observe(body.capability, args);
+      let output: Value;
+      try {
+        output = await this.t.runtime.observe(body.capability, args, { challenge: state.challenge, userId: state.userId });
+      } catch (error) {
+        if (error instanceof ObserverRefusal) throw new Refusal(error.status, error.message);
+        throw error;
+      }
       state.bindings[node.id] = body.store ? { [body.store]: output } : output;
+    }
+
+    // L'observation d'abord, la réclamation ensuite : un endpoint injoignable ne
+    // laisse aucune réclamation, et une course perdue a seulement observé.
+    if (designated) await this.claimDesignated(node.id, body.claim!, state);
+    if (body.capability !== undefined) return;
+
+    if (body.grant) {
+      await this.grant(node.id, body.grant.field, state);
       return;
     }
 
@@ -296,10 +323,7 @@ export class Engine {
     const options = async (type: string) => {
       const decl = this.shell.resources[type].claim!;
       const k = decl.mode === "exclusive" ? 1 : decl.mode === "k_bounded" && decl.k !== undefined ? await this.number(decl.k, state) : undefined;
-      let ttlHours: number | undefined;
-      if (typeof decl.ttl === "string" && DURATION.test(decl.ttl)) ttlHours = Number.parseInt(decl.ttl, 10) * TTL_UNITS[decl.ttl.slice(-1)];
-      else if (decl.ttl !== undefined) ttlHours = await this.number(decl.ttl, state);
-      return { type, k, ttlHours };
+      return { type, k, ttlHours: await this.ttlHours(type, state) };
     };
 
     let drawn = null;
@@ -347,11 +371,85 @@ export class Engine {
     return literal;
   }
 
+  private async ttlHours(type: string, state: RunState): Promise<number | undefined> {
+    const decl = this.shell.resources[type].claim;
+    if (!decl || decl.ttl === undefined) return undefined;
+    if (typeof decl.ttl === "string" && DURATION.test(decl.ttl)) return Number.parseInt(decl.ttl, 10) * TTL_UNITS[decl.ttl.slice(-1)];
+    return this.number(decl.ttl, state);
+  }
+
+  /**
+   * Réclame une instance désignée dans son scope (`unique_per`) : la personne
+   * sort de l'unicité quand les dimensions ne la nomment pas. Une combinaison
+   * déjà tenue est un refus (409), jamais une seconde réclamation.
+   */
+  private async claimDesignated(actId: string, claim: ClaimUse, state: RunState): Promise<void> {
+    const target = await this.eval(claim.resource, state);
+    const resourceId = target && typeof target === "object" && !Array.isArray(target) ? target.id : null;
+    if (typeof resourceId !== "string") throw new Refusal(404, "Nothing to claim");
+    const instance = await this.t.runtime.resources.resource(resourceId);
+    const decl = instance ? this.shell.resources[instance.resource_type]?.claim : undefined;
+    if (!instance || !decl) throw new Refusal(404, "Nothing to claim");
+
+    const scope: Record<string, string> = {};
+    for (const [dimension, source] of Object.entries(claim.scope ?? {})) {
+      const value = await this.eval(source, state);
+      scope[dimension] = value && typeof value === "object" && !Array.isArray(value) ? String(value.id) : String(value);
+    }
+    const claimed = await this.t.runtime.resources.claimScoped(state.challenge.uuid, state.userId!, {
+      resourceId,
+      scope,
+      exclusive: !(decl.dimensions ?? []).includes("participation"),
+      ttlHours: await this.ttlHours(instance.resource_type, state),
+    });
+    if (!claimed) throw new Refusal(409, "This combination is already claimed");
+    if (!(actId in state.bindings)) state.bindings[actId] = {};
+    state.claim = { actId, claimId: claimed.claimId, resourceId, consumed: false };
+    state.drawn = { claimId: claimed.claimId, resourceId, expiresAt: claimed.expiresAt };
+  }
+
+  /** Le reveal : le champ désigné devient lisible à l'appelant. */
+  private async grant(nodeId: string, field: ExprSource, state: RunState): Promise<void> {
+    const ast = astOf(String(field));
+    if (ast.k !== "member") throw new Error(`[interpreter] grant ${nodeId} does not name a resource field`);
+    const owner = evaluate(ast.object, state.bindings, { now: this.t.runtime.now() });
+    const resourceId = owner && typeof owner === "object" && !Array.isArray(owner) ? owner.id : null;
+    if (typeof resourceId !== "string") throw new Error(`[interpreter] grant ${nodeId} does not name a resource`);
+    await this.t.runtime.resources.grant(resourceId, ast.name, state.userId!, nodeId);
+  }
+
+  /** Reprend un claim désigné d'un segment précédent : la réclamation, et ce que la lane en a gardé. */
+  async holdDesignated(actId: string, claimId: string, resourceId: string, context: Record<string, unknown> | null, state: RunState): Promise<void> {
+    state.claim = { actId, claimId, resourceId, consumed: false };
+    state.bindings[actId] = {};
+    await this.restore(context, state);
+  }
+
+  /** Remet dans le contexte d'exécution ce qu'un segment précédent a gardé sur le claim. */
+  async restore(context: Record<string, unknown> | null, state: RunState): Promise<void> {
+    for (const [key, value] of Object.entries(context ?? {})) {
+      if (key.startsWith("$")) continue;
+      state.bindings[key] = await deserializeValue(value as Value, this.t.runtime, this.t.resourceTypes);
+    }
+  }
+
+  /** Garde sur le claim ce que les segments suivants liront. Les ressources n'y entrent que par leur référence. */
+  async persist(ids: readonly string[], state: RunState): Promise<Record<string, Value>> {
+    const hold = state.claim;
+    const patch: Record<string, Value> = {};
+    for (const id of ids) if (id in state.bindings) patch[id] = serializeValue(state.bindings[id]);
+    if (!hold || hold.consumed || !state.userId || Object.keys(patch).length === 0) return patch;
+    if (!(await this.t.runtime.resources.updateContext(hold.claimId, state.userId, patch))) {
+      throw new Refusal(410, "This claim expired or was released; claim again");
+    }
+    return patch;
+  }
+
   /** Lie la sortie d'un Act de claim : l'instance sous son type, l'autre à `null`, `substituted`. */
   async hold(actId: string, claim: ClaimUse, claimId: string, resourceId: string, state: RunState): Promise<void> {
     const instance = await this.t.runtime.resources.resource(resourceId);
     if (!instance) throw new Refusal(404, "Claimed resource not found");
-    const value = await resourceValue(instance, this.t.runtime.resources, this.t.resourceTypes);
+    const value = await resourceValue(instance, this.t.runtime, this.t.resourceTypes);
     const output: Record<string, Value> = { [claim.resource]: null };
     if (claim.substitute) {
       output[claim.substitute.resource] = null;
@@ -375,10 +473,14 @@ export class Engine {
       const value = await this.eval(source, state);
       base[name] = value && typeof value === "object" && !Array.isArray(value) && "id" in value ? value.id : value;
     }
+    // Une ressource ou une contribution référencée se range par son id, jamais hydratée.
+    for (const [name, value] of Object.entries(base)) {
+      if (value && typeof value === "object" && !Array.isArray(value) && "id" in value && !("blob_id" in value)) base[name] = (value as { id: unknown }).id;
+    }
 
     const rows: Record<string, unknown>[] = [];
     if (body.many) {
-      const file = await this.eval(body.many.from_file, state);
+      const file = await this.rowsOf(await this.eval(body.many.from_file, state));
       if (!Array.isArray(file)) throw new Refusal(400, "A batch is a list of rows");
       if (file.length === 0) throw new Refusal(400, "The batch has no rows");
       for (const row of file) {
@@ -414,9 +516,45 @@ export class Engine {
     }
     if (errors.length > 0) throw new Refusal(400, errors.slice(0, 50).join("; "));
 
+    // `unique: true` : une valeur ne sert qu'une instance (un target par soumission).
+    const uniqueFields = Object.entries(this.shell.resources[type].fields).filter(([, field]) => field.unique).map(([name]) => name);
+    if (uniqueFields.length > 0) {
+      const existing = await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type });
+      for (const name of uniqueFields) {
+        const idOf = (value: unknown) => (value && typeof value === "object" && "id" in value ? String((value as { id: unknown }).id) : JSON.stringify(value));
+        const taken = new Set(existing.map((instance) => idOf(instance.payload[name])));
+        for (const row of rows) {
+          if (taken.has(idOf(row[name]))) throw new Refusal(409, `This ${name} is already a ${type}`);
+          taken.add(idOf(row[name]));
+        }
+      }
+    }
+
+    // `cardinality: {exactly: N}` : au plus N instances ; au-delà, un refus (le quota de cas d'une validation).
+    const cardinality = this.shell.resources[type].cardinality;
+    if (cardinality) {
+      const limit = await this.number(cardinality.exactly, state);
+      const existing = (await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type })).length;
+      if (existing + rows.length > limit) throw new Refusal(409, `At most ${limit} ${type} for this challenge`);
+    }
+
     // `class` vit dans sa colonne, que le tirage filtre ; jamais dans la charge.
     const items = rows.map(({ class: klass, ...payload }) => ({ payload, class: typeof klass === "string" ? klass : null }));
     await this.t.runtime.resources.createMany(state.challenge.uuid, type, items, { createdBy: state.userId });
+  }
+
+  /** Les lignes d'un lot : déjà des lignes, ou un fichier (un blob JSON, sinon CSV) lu côté serveur. */
+  private async rowsOf(file: Value): Promise<Value> {
+    const ref = file && typeof file === "object" && !Array.isArray(file) && typeof file.blob_id === "string" ? file.blob_id : null;
+    if (!ref) return file;
+    const blob = await this.t.runtime.blobs.get(ref);
+    if (!blob?.bytes) throw new Refusal(410, "The batch file is no longer available");
+    const text = blob.bytes.toString("utf8");
+    try {
+      return JSON.parse(text) as Value;
+    } catch {
+      return parseCsv(text) as Value;
+    }
   }
 
   /** Le `check` d'un champ : la valeur et les paramètres, rien d'autre ; une erreur d'évaluation échoue le check. */
@@ -494,8 +632,29 @@ export class Engine {
       const resourceId = target && typeof target === "object" && !Array.isArray(target) ? target.id : null;
       if (typeof resourceId !== "string") throw new Error(`[interpreter] emit scope is not a resource`);
       if (state.claim?.consumed) throw new Error(`[interpreter] ${node.id} emits after the work was delivered`);
+      if (state.claim && state.claim.resourceId !== resourceId) await this.emitElsewhere(aggregateId, resourceId, state);
       await this.deliver(state);
       await this.resolve(aggregateId, resourceId, state.challenge, state.bindings.params as Record<string, Value>);
+    }
+  }
+
+  /**
+   * Une entrée vers une autre ressource que celle réclamée (le verdict d'un case
+   * vise son target) : `per_participation` est vérifié ici, et la cible est
+   * gardée sur le claim (`$emits`) pour que les entrées de l'aggregate la retrouvent.
+   */
+  private async emitElsewhere(aggregateId: string, resourceId: string, state: RunState): Promise<void> {
+    const hold = state.claim!;
+    const { decl } = this.aggregate(aggregateId);
+    if (decl.per_participation !== undefined) {
+      const inputs = await this.inputs(aggregateId, resourceId, state.bindings.params as Record<string, Value>);
+      const mine = inputs.filter((input) => input && typeof input === "object" && !Array.isArray(input) && input.author === state.userId);
+      if (mine.length >= decl.per_participation) throw new Refusal(409, "Already recorded for this resource");
+    }
+    const current = await this.t.runtime.resources.claim(hold.claimId);
+    const emits = { ...((current?.context?.$emits as Record<string, string> | undefined) ?? {}), [aggregateId]: resourceId };
+    if (!(await this.t.runtime.resources.updateContext(hold.claimId, state.userId!, { $emits: emits }))) {
+      throw new Refusal(410, "This claim expired or was released; claim again");
     }
   }
 
@@ -525,9 +684,18 @@ export class Engine {
 
   /** Les entrées d'un aggregate sur une instance, dans l'ordre de livraison. */
   async inputs(aggregateId: string, resourceId: string, params: Record<string, Value>): Promise<Value[]> {
-    const claims = [...(await this.t.runtime.resources.consumedClaims(resourceId))].sort(
-      (a, b) => a.consumed_at.getTime() - b.consumed_at.getTime()
-    );
+    const own = await this.t.runtime.resources.consumedClaims(resourceId);
+    const elsewhere: ConsumedClaim[] = [];
+    if (this.t.crossEmits.has(aggregateId)) {
+      const instance = await this.t.runtime.resources.resource(resourceId);
+      if (instance) {
+        for (const claim of await this.t.runtime.resources.consumedBy({ challengeId: instance.challenge_id })) {
+          const emits = claim.context?.$emits as Record<string, unknown> | undefined;
+          if (claim.resource_id !== resourceId && emits?.[aggregateId] === resourceId) elsewhere.push(claim);
+        }
+      }
+    }
+    const claims = [...own, ...elsewhere].sort((a, b) => a.consumed_at.getTime() - b.consumed_at.getTime());
     const inputs: Value[] = [];
     for (const claim of claims) {
       const { inputs: emitted } = await this.replay(claim, params);
@@ -546,7 +714,7 @@ export class Engine {
     const state = newState(challenge, null, params);
     if (lifecycle) state.bindings.challenge = { state: "closed" };
     state.bindings.inputs = await this.inputs(aggregateId, resourceId, params);
-    state.bindings[decl.over] = await resourceValue(instance, this.t.runtime.resources, this.t.resourceTypes);
+    state.bindings[decl.over] = await resourceValue(instance, this.t.runtime, this.t.resourceTypes);
     if ((await this.eval(decl.resolve.when, state)) !== true) return;
 
     const verdict = decl.resolve.verdict !== undefined ? await this.eval(decl.resolve.verdict, state) : null;

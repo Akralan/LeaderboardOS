@@ -39,8 +39,11 @@ export const DEFAULT_CATALOG: CapabilityCatalog = {
     args: {
       to: { form: "expr", type: T.url, required: true },
       send: { form: "expr", type: T.file },
+      /** Conservation de la réponse, en jours après la fermeture du challenge. */
+      retention_days: { form: "expr", type: T.int },
     },
-    output: T.record({ status: T.int, ok: T.bool, body: T.dyn }),
+    // La réponse est un fichier : un blob, jamais des octets dans le contexte.
+    output: T.record({ status: T.int, ok: T.bool, content_type: T.string, response: T.file }),
     v1: true,
   },
   github_fetch: {

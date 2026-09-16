@@ -23,6 +23,12 @@ const typeSpec = z.union([z.string(), z.record(z.string(), z.unknown())]);
 
 export const fieldDecl = z.strictObject({
   type: typeSpec,
+  /** Pour un champ `link` : le livrable exigé du challenge source (`endpoint`). */
+  deliverable: identifier.optional(),
+  /** Deux instances ne portent jamais la même valeur de ce champ ; une seconde création est refusée (409). */
+  unique: z.boolean().optional(),
+  /** Pour un champ `file` : la conservation des octets, en jours après la fermeture du challenge. */
+  retention: z.strictObject({ days_after_close: z.number().int().min(1) }).optional(),
   from: exprSource.optional(),
   visibility: z.array(z.string()).optional(),
   where: exprSource.optional(),
@@ -148,6 +154,8 @@ export type AssessBody = z.infer<typeof assessBody>;
 export const gateBody = z.strictObject({
   id: identifier,
   all: z.array(exprSource).min(1).optional(),
+  /** Le statut d'un refus de `all` : 422 par défaut, 403 quand la règle dit « pas toi ». */
+  refuse: z.union([z.literal(403), z.literal(409), z.literal(422)]).optional(),
   branch: z.array(z.record(z.string(), z.unknown())).min(1).optional(),
 });
 export type GateBody = z.infer<typeof gateBody>;

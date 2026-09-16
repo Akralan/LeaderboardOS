@@ -136,6 +136,10 @@ export function evaluate(expr: Expr, bindings: Bindings, context: EvalContext = 
       case "method": {
         const object = run(node.object, scope);
         if (node.name === "size") return sizeOf(object, node.pos);
+        if (node.name === "trim") {
+          if (typeof object !== "string") throw new EvalError("trim expects a string", node.pos);
+          return object.trim();
+        }
         const list = listOf(object, node.object.pos);
         const [binder, body] = node.args;
         const each = (item: Value) => run(body, { ...scope, [(binder as { name: string }).name]: item });

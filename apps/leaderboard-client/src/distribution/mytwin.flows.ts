@@ -4,6 +4,7 @@ import { mlFlowDescriptor } from '../../../../content/flows/ml/descriptor';
 import { endpointValidationFlowDescriptor } from '../../../../content/flows/endpoint-validation/descriptor';
 import { journeyValidationFlowDescriptor } from '../../../../content/flows/journey-validation/descriptor';
 import { dataAnnotationFlowDescriptor } from '../../../../content/templates/data-annotation/descriptor';
+import { endpointCheckFlowDescriptor } from '../../../../content/templates/endpoint-check/descriptor';
 
 /**
  * Distribution MyTwin — catalogue des flows
@@ -21,6 +22,7 @@ export const flowCatalog = createFlowCatalog(
     endpointValidationFlowDescriptor,
     journeyValidationFlowDescriptor,
     dataAnnotationFlowDescriptor,
+    endpointCheckFlowDescriptor,
   ],
   { defaultKey: 'code' },
 );

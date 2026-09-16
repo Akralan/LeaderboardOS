@@ -77,16 +77,19 @@ describe("compiling data-annotation", () => {
     call = dispatcher(challenge);
   });
 
+  // Le corpus déclare un vrai fichier : le lot part encodé, le serveur le lit.
+  const asFile = (rows: unknown) => ({ content_base64: Buffer.from(JSON.stringify(rows)).toString("base64"), content_type: "application/json", filename: "batch.json" });
+
   const importBatches = async () => {
     const items = await call(ADMIN, "import/batch", {
       kind: "items",
       class: "standard",
-      file: [{ payload: { image_url: "https://img/1.png" } }, { payload: { image_url: "https://img/2.png" } }],
+      file: asFile([{ payload: { image_url: "https://img/1.png" } }, { payload: { image_url: "https://img/2.png" } }]),
     });
     const golds = await call(ADMIN, "import/batch", {
       kind: "golds",
       class: "standard",
-      file: [{ payload: { image_url: "https://img/g.png" }, expected: "mass" }],
+      file: asFile([{ payload: { image_url: "https://img/g.png" }, expected: "mass" }]),
     });
     return { items, golds };
   };
@@ -100,6 +103,9 @@ describe("compiling data-annotation", () => {
       "POST annotator/release",
       "GET progress",
       "GET overview",
+      "GET annotator/claim",
+      "GET annotator/file",
+      "GET file",
       "GET export",
     ]);
     expect(flow.jobs!.map((job) => [job.key, job.schedule])).toEqual([["data-annotation.audit", "0 4 * * 1"]]);
@@ -129,7 +135,7 @@ describe("compiling data-annotation", () => {
     runtime.dice.push(0.05); // sous gold_rate : un gold
     const drawn = await call(u1, "annotator", {});
     expect(drawn.status).toBe(200);
-    expect(drawn.body.claim.resource).toEqual({ id: "gold-3", payload: { image_url: "https://img/g.png" } });
+    expect(drawn.body.claim.resource).toEqual({ id: expect.stringMatching(/^gold-/), payload: { image_url: "https://img/g.png" } });
 
     // Tirer encore rend la même réclamation.
     expect((await call(u1, "annotator", {})).body.claim.claim_id).toBe(drawn.body.claim.claim_id);

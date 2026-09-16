@@ -413,6 +413,12 @@ export interface FlowDefinition extends Declarations {
   actions?: readonly ChallengeActionDeclaration[];
   /** La sandbox accepte des propositions pour ce flow. */
   proposable?: ProposableDeclaration;
+  /**
+   * Retiré par attrition : le flow reste installé et sert les challenges qui
+   * le portent, mais aucun challenge nouveau ne le prend. Il se désinstalle
+   * quand plus aucun challenge ne le référence.
+   */
+  retired?: boolean;
 }
 
 export interface ExtensionDefinition extends Declarations {

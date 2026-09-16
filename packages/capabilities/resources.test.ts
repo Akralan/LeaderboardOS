@@ -103,7 +103,7 @@ class MemoryStore {
           uuid: self.id("claim"), resource_id: claim.resourceId, challenge_id: claim.challengeId, user_id: claim.userId,
           result: null, claimed_at: self.now, consumed_at: null, released_at: null,
           expires_at: claim.ttlHours === undefined ? null : new Date(self.now.getTime() + claim.ttlHours * 3600_000),
-          scope_key: scopeKey, scope_exclusive: claim.scopeExclusive ?? false,
+          scope_key: scopeKey, scope_exclusive: claim.scopeExclusive ?? false, context: null,
         };
         self.claims.push(row);
         return row;
@@ -134,6 +134,11 @@ class MemoryStore {
       },
       async findClaim(claimId) {
         return self.claims.find((c) => c.uuid === claimId) ?? null;
+      },
+      async liveScopeClaims(resourceIds: readonly string[], scopeKey: string) {
+        return self.claims
+          .filter((c) => resourceIds.includes(c.resource_id) && c.scope_key === scopeKey && !c.released_at && (c.consumed_at !== null || self.isActive(c)))
+          .map((c) => ({ resource_id: c.resource_id, user_id: c.user_id, scope_exclusive: c.scope_exclusive }));
       },
       async findResource(resourceId) {
         return self.instances.find((r) => r.uuid === resourceId) ?? null;

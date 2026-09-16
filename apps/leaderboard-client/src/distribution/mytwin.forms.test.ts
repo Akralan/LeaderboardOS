@@ -47,6 +47,7 @@ describe('distribution MyTwin — challenge forms', () => {
       'validation',
       'validation',
       'data-annotation',
+      'validation',
     ]);
     expect(formLogics.map((logic) => logic.key)).toEqual(['code', 'ml', 'validation', 'data-annotation']);
   });
@@ -110,11 +111,11 @@ describe('validation form section', () => {
     expect(validationFormLogic.validate!(state, edit({ type: 'endpoint-validation' }))).toBeNull();
   });
 
-  it('sends the flow the source decides, with a quorum only for endpoint validation', () => {
+  it('sends the flow the source decides, with a quorum only for endpoint validation — the template, the hand-written flow being retired', () => {
     const state = { ...validationFormLogic.initialState(create), sourceChallengeId: 'src', cpPerValidation: 7, requiredValidations: 5 };
 
     expect(validationFormLogic.body({ ...state, sourceType: 'ml' }, create)).toMatchObject({
-      type: 'endpoint-validation',
+      type: 'endpoint-check',
       source_challenge_id: 'src',
       cp_per_validation: 7,
       required_validations: 5,

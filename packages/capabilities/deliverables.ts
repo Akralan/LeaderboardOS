@@ -34,12 +34,12 @@ export function eligibleDeliverableType(flowKey: string, sourceFlowKey: string |
   return deliverable?.contributionType ?? null;
 }
 
-/** Les flows installés qui peuvent éprouver les livrables d'un challenge de ce flow. */
+/** Les flows installés qui peuvent éprouver les livrables d'un challenge de ce flow, pour un challenge nouveau : un flow retiré n'en est pas. */
 export function flowsValidating(sourceFlowKey: string | null | undefined): string[] {
   const offered = new Set(
     (PlatformRegistry.flow(sourceFlowKey)?.deliverables ?? []).flatMap((deliverable) => deliverable.capabilities)
   );
   return PlatformRegistry.flows()
-    .filter((flow) => flow.requires && offered.has(flow.requires.deliverableCapability))
+    .filter((flow) => !flow.retired && flow.requires && offered.has(flow.requires.deliverableCapability))
     .map((flow) => flow.descriptor.key);
 }

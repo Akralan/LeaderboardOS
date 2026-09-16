@@ -1418,6 +1418,12 @@ export const resource_claims = pgTable("resource_claims", {
   scope_key: varchar("scope_key", { length: 255 }).notNull().default(""),
   /** L'unicité ne compte pas la personne : une seule réclamation vivante par (ressource, scope). */
   scope_exclusive: boolean("scope_exclusive").notNull().default(false),
+  /**
+   * Ce qu'une lane à plusieurs gestes garde entre deux appels : les champs
+   * collectés et les sorties que les segments suivants lisent. Scalaires et
+   * références seulement — jamais d'octets (un fichier est une référence de blob).
+   */
+  context: jsonb("context").$type<Record<string, unknown>>(),
 }, (table) => ({
   resourceIdx: index("idx_resource_claims_resource_id").on(table.resource_id),
   userIdx: index("idx_resource_claims_challenge_user").on(table.challenge_id, table.user_id),
@@ -1427,6 +1433,23 @@ export const resource_claims = pgTable("resource_claims", {
   scopeIdx: uniqueIndex("idx_resource_claims_scope")
     .on(table.resource_id, table.scope_key)
     .where(sql`released_at IS NULL AND scope_exclusive`),
+}));
+
+/**
+ * Un champ de ressource rendu lisible à une participation, par un nœud
+ * (`grant`) : le reveal. La projection d'un champ lit « sa politique, ou un
+ * grant pour ce lecteur ». `participation` est le compte en v1 ; le nom tient
+ * le jour où une participation de groupe s'en distingue.
+ */
+export const resource_field_grants = pgTable("resource_field_grants", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  resource_id: uuid("resource_id").references(() => resource_instances.uuid, { onDelete: "cascade" }).notNull(),
+  field: varchar("field", { length: 64 }).notNull(),
+  participation: uuid("participation").references(() => users.uuid, { onDelete: "cascade" }).notNull(),
+  granted_by: varchar("granted_by", { length: 128 }).notNull(),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueGrant: uniqueIndex("idx_resource_field_grants_unique").on(table.resource_id, table.field, table.participation),
 }));
 
 // --- CAPACITÉ BLOBS (challenge 021, J5) ---

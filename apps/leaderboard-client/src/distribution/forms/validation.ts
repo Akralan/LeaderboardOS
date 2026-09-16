@@ -2,6 +2,7 @@ import { codeFlowDescriptor } from '../../../../../content/flows/code/descriptor
 import { mlFlowDescriptor } from '../../../../../content/flows/ml/descriptor';
 import { ENDPOINT_VALIDATION_FLOW_KEY } from '../../../../../content/flows/endpoint-validation/descriptor';
 import { JOURNEY_VALIDATION_FLOW_KEY } from '../../../../../content/flows/journey-validation/descriptor';
+import { ENDPOINT_CHECK_FLOW_KEY } from '../../../../../content/templates/endpoint-check/descriptor';
 import type { FlowFormContext, FlowFormLogic } from '@/lib/flowFormSlots';
 import { flowConfigRecord } from './shared';
 
@@ -12,7 +13,8 @@ import { flowConfigRecord } from './shared';
  * deux disent la même chose. Le client n'a pas le registre : il lit cette table.
  */
 export const VALIDATION_FLOW_BY_SOURCE: Readonly<Record<string, string>> = {
-  [mlFlowDescriptor.key]: ENDPOINT_VALIDATION_FLOW_KEY,
+  // endpoint-validation est retiré : un challenge ML nouveau se valide par le template.
+  [mlFlowDescriptor.key]: ENDPOINT_CHECK_FLOW_KEY,
   [codeFlowDescriptor.key]: JOURNEY_VALIDATION_FLOW_KEY,
 };
 
@@ -42,7 +44,7 @@ export function isScenarioValidation(state: ValidationFormState, ctx: FlowFormCo
  */
 export const validationFormLogic: FlowFormLogic<ValidationFormState> = {
   key: 'validation',
-  covers: (flowKey) => flowKey === ENDPOINT_VALIDATION_FLOW_KEY || flowKey === JOURNEY_VALIDATION_FLOW_KEY,
+  covers: (flowKey) => flowKey === ENDPOINT_VALIDATION_FLOW_KEY || flowKey === ENDPOINT_CHECK_FLOW_KEY || flowKey === JOURNEY_VALIDATION_FLOW_KEY,
 
   initialState(ctx) {
     const config = flowConfigRecord(ctx.challenge);

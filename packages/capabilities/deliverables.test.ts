@@ -28,6 +28,7 @@ describe("deliverables", () => {
         }),
         flow("probe", { requires: { deliverableCapability: "endpoint" } }),
         flow("walk", { requires: { deliverableCapability: "deployed_app" } }),
+        flow("old-probe", { requires: { deliverableCapability: "endpoint" }, retired: true }),
       ],
     });
   });
@@ -51,5 +52,10 @@ describe("deliverables", () => {
     expect(flowsValidating("app")).toEqual(["walk"]);
     expect(flowsValidating("model")).toEqual(["probe", "walk"]);
     expect(flowsValidating("probe")).toEqual([]);
+  });
+
+  it("never offers a retired flow to a new challenge, yet keeps reading what it requires", () => {
+    expect(flowsValidating("model")).not.toContain("old-probe");
+    expect(eligibleDeliverableType("old-probe", "model")).toBe("api");
   });
 });

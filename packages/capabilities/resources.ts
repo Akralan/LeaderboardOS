@@ -43,6 +43,10 @@ export type ResourceStore = Pick<
   | "consumedClaims"
   | "listResources"
   | "counts"
+  | "mergeContext"
+  | "liveScopeClaims"
+  | "grantField"
+  | "grantsFor"
 > & {
   inDrawTransaction<T>(run: (tx: DrawTransaction) => Promise<T>): Promise<T>;
 };
@@ -214,6 +218,39 @@ export function resources(store?: ResourceStore) {
       const claim = await s.findClaim(claimId);
       if (!claim || claim.user_id !== userId) throw new ClaimNotConsumableError("not_found");
       throw new ClaimNotConsumableError(claimState(claim) === "consumed" ? "consumed" : "lapsed");
+    },
+
+    /**
+     * Garde `patch` dans le contexte d'une réclamation active : ce qu'une lane
+     * à plusieurs gestes relit d'un appel à l'autre. `false` si la réclamation
+     * n'est plus active ou n'est pas à l'appelant.
+     */
+    async updateContext(claimId: string, userId: string, patch: Record<string, unknown>): Promise<boolean> {
+      return (await (await storeOf()).mergeContext(claimId, userId, patch)) !== null;
+    },
+
+    /**
+     * Les ressources dont la combinaison (ressource, scope) est déjà tenue pour
+     * l'appelant : par n'importe qui quand le scope est exclusif, par lui sinon.
+     * Ce qu'un picker retire avant qu'un claim ne réponde 409.
+     */
+    async heldInScope(resourceIds: readonly string[], scope: Readonly<Record<string, string>>, userId: string): Promise<Set<string>> {
+      const rows = await (await storeOf()).liveScopeClaims(resourceIds, scopeKeyOf(scope));
+      return new Set(rows.filter((row) => row.scope_exclusive || row.user_id === userId).map((row) => row.resource_id));
+    },
+
+    /** Le reveal : rend `field` lisible à `participation` sur cette ressource. Idempotent. */
+    async grant(resourceId: string, field: string, participation: string, grantedBy: string): Promise<boolean> {
+      return (await storeOf()).grantField(resourceId, field, participation, grantedBy);
+    },
+
+    /** Les champs accordés à `participation`, par ressource : `{ "<uuid>": ["expected_output"] }`. */
+    async grantsFor(resourceIds: readonly string[], participation: string): Promise<Record<string, string[]>> {
+      const grants: Record<string, string[]> = {};
+      for (const row of await (await storeOf()).grantsFor(resourceIds, participation)) {
+        (grants[row.resource_id] ??= []).push(row.field);
+      }
+      return grants;
     },
 
     /** Abandon explicite. `false` si la réclamation n'était pas active ou pas à l'appelant. */

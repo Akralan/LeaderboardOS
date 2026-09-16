@@ -95,6 +95,8 @@ Screens never branch on the flow — they already ask the distribution for slots
 
 A distribution can always override a template's slots with hand-written ones — generated UI is the default, not a ceiling. That is the escape hatch that keeps v1's renderer set small.
 
+The generator reads the template's *surface* — `describeTemplate(...).surface`: lanes, their segments (one call each, with whether it opens or resumes a claim), typed gesture fields and the qualification a lane requires — and nothing else; every screen it builds talks only to generated paths (`<lane>/options`, `<lane>/claim`, `<lane>/file`, `progress`, `overview`, `export`). Its first consumer is `endpoint-check` (the endpoint-validation attrition, J5), which MyTwin serves with no hand-written component.
+
 ## 6. Milestones — and what v1 leaves out
 
 **J1 — parse and validate.** Canonicalize the eleven-template corpus into fixtures (§3), the format schema, the expression parser and type-checker, the six validation passes, the static half of the capability catalog, the mutated-corpus test suite. Deliverable: `npm run templates:check` green on the canonical corpus. *(Funding M1.)*

@@ -364,12 +364,19 @@ describe('POST /api/challenges', () => {
     });
 
     it('accepts the resolved flow the forms send, and still checks it against the source', async () => {
-      const accepted = await postChallenge(validationBody({ type: 'endpoint-validation' }), 'valid-token');
+      const accepted = await postChallenge(validationBody({ type: 'endpoint-check' }), 'valid-token');
       mockChallengeFindById.mockResolvedValue({ uuid: mlSourceId, type: 'code' });
-      const refused = await postChallenge(validationBody({ type: 'endpoint-validation' }), 'valid-token');
+      const refused = await postChallenge(validationBody({ type: 'endpoint-check' }), 'valid-token');
 
       expect(accepted.status).toBe(201);
       expect(refused.status).toBe(400);
+    });
+
+    it('refuses a new challenge on the retired hand-written endpoint-validation flow', async () => {
+      const res = await postChallenge(validationBody({ type: 'endpoint-validation' }), 'valid-token');
+
+      expect(res.status).toBe(400);
+      expect(mockChallengeCreate).not.toHaveBeenCalled();
     });
 
     it('creates the validation challenge on success, with no repos', async () => {
@@ -381,7 +388,7 @@ describe('POST /api/challenges', () => {
       expect(mockChallengeCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           source_challenge_id: mlSourceId,
-          type: 'endpoint-validation',
+          type: 'endpoint-check',
           flow_config: { cp_per_validation: 5, required_validations: 3, reviewer_qualification: 'medical_pro' },
         })
       );

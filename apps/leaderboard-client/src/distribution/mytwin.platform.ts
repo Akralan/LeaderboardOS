@@ -4,6 +4,7 @@ import { mlFlow } from '../../../../content/flows/ml';
 import { endpointValidationFlow } from '../../../../content/flows/endpoint-validation';
 import { journeyValidationFlow } from '../../../../content/flows/journey-validation';
 import { dataAnnotationTemplateFlow } from '../../../../content/templates/data-annotation';
+import { endpointCheckTemplateFlow } from '../../../../content/templates/endpoint-check';
 import { validationKit } from '../../../../content/kits/validation';
 import { slackSignalsExtension } from '../../../../content/extensions/slack-signals';
 import { computeExtension } from '../../../../content/extensions/compute';
@@ -27,10 +28,13 @@ export const platform: PlatformDefinitions = {
     codeFlow,
     mlFlow,
     // Les validations MyTwin sont jugées par des professionnels de santé.
-    { ...endpointValidationFlow, configDefaults: { reviewer_qualification: MEDICAL_PRO } },
+    // Retiré par attrition : il sert ses challenges existants, les nouveaux prennent endpoint-check.
+    { ...endpointValidationFlow, retired: true, configDefaults: { reviewer_qualification: MEDICAL_PRO } },
     { ...journeyValidationFlow, configDefaults: { expert_comment_qualification: MEDICAL_PRO } },
     // Compilé depuis content/templates/data-annotation/template.yaml : le premier flow servi par l'interpréteur.
     dataAnnotationTemplateFlow,
+    // Compilé depuis content/templates/endpoint-check/template.yaml : les validations d'endpoint nouvelles.
+    { ...endpointCheckTemplateFlow, configDefaults: { reviewer_qualification: MEDICAL_PRO } },
   ],
   kits: [validationKit],
   extensions: [slackSignalsExtension, computeExtension],

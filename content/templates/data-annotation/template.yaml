@@ -94,7 +94,7 @@ lanes:
       - collect:
           id: batch
           fields:
-            file:  {type: file}
+            file:  {type: json}
             kind:  {type: "enum(items, golds)"}
             class: {type: "enum(standard, sensitive)", when: 'kind == "items"'}
       - gate:

@@ -59,8 +59,10 @@ export interface CompiledParams {
 export function compileParams(shell: DocumentShell, types: Readonly<Record<string, Type>>, poolParam: string | null): CompiledParams {
   const config: Record<string, z.ZodType> = {};
   const rules: Record<string, z.ZodType> = {};
+  // Le challenge source n'est pas de la configuration : c'est la colonne `source_challenge_id`, que la création pose.
+  const sourceParam = Object.keys(shell.params).find((name) => types[name]?.kind === "challenge") ?? null;
   for (const [name, param] of Object.entries(shell.params)) {
-    if (name === poolParam) continue;
+    if (name === poolParam || name === sourceParam) continue;
     let schema = zodOf(types[name]);
     // Les checks du template font partie du schéma : une valeur qui en échoue un ne se stocke ni ne se lit.
     const checks = [
@@ -94,6 +96,7 @@ export function compileParams(shell: DocumentShell, types: Readonly<Record<strin
       if (!parsedConfig.success || !parsedRules.success) return null;
       const values = { ...parsedConfig.data, ...parsedRules.data } as Record<string, Value>;
       if (poolParam) values[poolParam] = challenge.contribution_points_reward;
+      if (sourceParam) values[sourceParam] = challenge.source_challenge_id ?? null;
       return values;
     },
   };

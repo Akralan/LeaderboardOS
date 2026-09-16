@@ -18,8 +18,8 @@ export type { BlobRecord, StoredBlob } from "../database-service/repositories/in
 
 export type BlobStore = Pick<BlobRepository, "create" | "find" | "delete" | "purgeExpired">;
 
-/** Au-delà, `store` refuse : un blob n'est pas une archive. */
-export const MAX_BLOB_BYTES = 10 * 1024 * 1024;
+/** Au-delà, `store` refuse : un blob n'est pas une archive. Les fichiers d'un cas de validation vont jusqu'à 25 Mo. */
+export const MAX_BLOB_BYTES = 25 * 1024 * 1024;
 
 export class BlobTooLargeError extends Error {
   constructor(readonly size: number) {

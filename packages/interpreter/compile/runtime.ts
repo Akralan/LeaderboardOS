@@ -1,5 +1,6 @@
 import type { Challenge, RewardEntry, RewardEntryDraft } from "../../database-service/domain/entities.js";
 import type { Resources } from "../../capabilities/resources.js";
+import type { Blobs } from "../../capabilities/blobs.js";
 import type { Value } from "../expr/evaluator.js";
 
 /**
@@ -18,6 +19,11 @@ export type RuntimeResources = Pick<
   Resources,
   | "createMany"
   | "draw"
+  | "claimScoped"
+  | "heldInScope"
+  | "updateContext"
+  | "grant"
+  | "grantsFor"
   | "activeClaim"
   | "consume"
   | "release"
@@ -47,13 +53,37 @@ export interface EvaluateBinding {
   inputs: Value[];
 }
 
+export type RuntimeBlobs = Pick<Blobs, "store" | "get">;
+
+/** Une contribution telle qu'un `link` la lit : son auteur, son URL, son type. */
+export interface LinkedContribution {
+  [key: string]: Value;
+  id: string;
+  author: string;
+  url: string | null;
+  kind: string;
+}
+
+export interface RuntimeContributions {
+  find(contributionId: string): Promise<LinkedContribution | null>;
+  /**
+   * Les contributions du challenge source que ce challenge peut prendre pour
+   * cible : du type qui porte le livrable exigé (`deliverables`).
+   */
+  eligible(challenge: Challenge, capability: string): Promise<LinkedContribution[]>;
+}
+
 export interface TemplateRuntime {
   resources: RuntimeResources;
+  /** Les fichiers : un champ `file` porte une référence, jamais des octets. */
+  blobs: RuntimeBlobs;
+  /** Les contributions d'un challenge source, pour les champs `link`. */
+  contributions: RuntimeContributions;
   ledger: RuntimeLedger;
   /** Le score global d'une évaluation par grille. */
   evaluate(request: EvaluateBinding): Promise<number>;
   /** Un observateur du catalogue (`http_proxy`, un connecteur…). */
-  observe(capability: string, args: Record<string, Value>): Promise<Value>;
+  observe(capability: string, args: Record<string, Value>, context: ObserveContext): Promise<Value>;
   /** Les challenges d'un flow, pour ses jobs. */
   challengesOf(flowKey: string): Promise<Challenge[]>;
   /** Le nom affiché de chaque compte : l'identité du core, pour les lectures d'un manager. */
@@ -63,6 +93,22 @@ export interface TemplateRuntime {
 }
 
 export class RuntimeBindingError extends Error {}
+
+/**
+ * Un observateur qui refuse : un modèle, pas une panne — un endpoint injoignable
+ * (502), un fichier purgé (410). Le moteur le rend tel quel, sans effet.
+ */
+export class ObserverRefusal extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Ce qu'un observateur sait de l'appel : le challenge, pour y ranger ce qu'il produit. */
+export interface ObserveContext {
+  challenge: Challenge;
+  userId: string | null;
+}
 
 /** Le port branché sur les capacités et les repositories du core. */
 export function defaultRuntime(
@@ -81,6 +127,11 @@ export function defaultRuntime(
     resources: {
       createMany: lazy("createMany"),
       draw: lazy("draw"),
+      claimScoped: lazy("claimScoped"),
+      heldInScope: lazy("heldInScope"),
+      updateContext: lazy("updateContext"),
+      grant: lazy("grant"),
+      grantsFor: lazy("grantsFor"),
       activeClaim: lazy("activeClaim"),
       consume: lazy("consume"),
       release: lazy("release"),
@@ -92,6 +143,33 @@ export function defaultRuntime(
       consumedClaims: lazy("consumedClaims"),
       consumedBy: lazy("consumedBy"),
       list: lazy("list"),
+    },
+    blobs: {
+      async store(input) {
+        const { blobs } = await import("../../capabilities/blobs.js");
+        return blobs().store(input);
+      },
+      async get(blobId) {
+        const { blobs } = await import("../../capabilities/blobs.js");
+        return blobs().get(blobId);
+      },
+    },
+    contributions: {
+      async find(contributionId) {
+        const { ContributionRepository } = await repositories();
+        const contribution = await new ContributionRepository().findById(contributionId);
+        return contribution ? linked(contribution) : null;
+      },
+      async eligible(challenge, capability) {
+        if (!challenge.source_challenge_id) return [];
+        const { ChallengeRepository, ContributionRepository } = await repositories();
+        const { PlatformRegistry } = await import("../../registry/platform.js");
+        const source = await new ChallengeRepository().findById(challenge.source_challenge_id);
+        const deliverable = PlatformRegistry.flow(source?.type)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
+        if (!source || !deliverable) return [];
+        const contributions = await new ContributionRepository().findByChallenge(source.uuid);
+        return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map(linked);
+      },
     },
     ledger: {
       async distributed(challengeId) {
@@ -128,7 +206,8 @@ export function defaultRuntime(
       }),
     observe:
       bindings.observe ??
-      (async (capability) => {
+      (async (capability, args, context) => {
+        if (capability === "http_proxy") return httpProxy(args, context);
         throw new RuntimeBindingError(`no binding installed for capability ${capability}`);
       }),
     challengesOf: bindings.challengesOf ?? (async (flowKey) => {
@@ -142,5 +221,51 @@ export function defaultRuntime(
     },
     random: bindings.random ?? (() => Math.random()),
     now: bindings.now ?? (() => new Date()),
+  };
+}
+
+/**
+ * `http_proxy` : envoie un fichier à un endpoint par le proxy du core (SSRF
+ * gardé, DNS épinglé, redirections refusées, 15 s, 10 Mo), et range la réponse
+ * en blob. Un endpoint injoignable est un refus (502), un fichier purgé aussi (410).
+ */
+async function httpProxy(args: Record<string, Value>, context: ObserveContext): Promise<Value> {
+  const { blobs } = await import("../../capabilities/blobs.js");
+  const { proxyFileToEndpoint, EndpointCallError } = await import("../../capabilities/http-proxy/endpoint-proxy.js");
+  const to = typeof args.to === "string" ? args.to : null;
+  if (!to) throw new ObserverRefusal(400, "http_proxy needs an endpoint URL");
+
+  const sent = args.send as { blob_id?: unknown } | null | undefined;
+  let file: { buffer: Buffer; filename: string; mimeType: string } = { buffer: Buffer.alloc(0), filename: "input", mimeType: "application/octet-stream" };
+  if (sent && typeof sent.blob_id === "string") {
+    const blob = await blobs().get(sent.blob_id);
+    if (!blob) throw new ObserverRefusal(404, "The file to send does not exist");
+    if (!blob.bytes) throw new ObserverRefusal(410, "The file to send has been purged");
+    file = { buffer: blob.bytes, filename: blob.filename ?? "input", mimeType: blob.content_type };
+  }
+
+  let result;
+  try {
+    result = await proxyFileToEndpoint(to, file);
+  } catch (error) {
+    if (error instanceof EndpointCallError) throw new ObserverRefusal(502, `The endpoint could not be reached: ${error.message}`);
+    throw error;
+  }
+  const response = await blobs().store({
+    challengeId: context.challenge.uuid,
+    bytes: result.body,
+    contentType: result.contentType,
+    filename: "response",
+    retentionDays: typeof args.retention_days === "number" ? args.retention_days : null,
+  });
+  return { status: result.status, ok: result.status >= 200 && result.status < 300, content_type: result.contentType, response: response as unknown as Value };
+}
+
+function linked(contribution: { uuid: string; user_id: string; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }): LinkedContribution {
+  return {
+    id: contribution.uuid,
+    author: contribution.user_id,
+    url: contribution.live_endpoint_url ?? contribution.artifact_url ?? null,
+    kind: contribution.type,
   };
 }

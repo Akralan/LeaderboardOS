@@ -250,6 +250,9 @@ export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type
           case "size":
             if (object.kind !== "list" && !isStringLike(object) && object.kind !== "dyn") fail("type", `size expects a list or a string, got ${showType(object)}`, node.pos);
             return T.int;
+          case "trim":
+            if (!isStringLike(object) && object.kind !== "dyn") fail("type", `trim expects a string, got ${showType(object)}`, node.pos);
+            return T.string;
           default:
             return fail("type", `unknown method '${node.name}'`, node.pos);
         }

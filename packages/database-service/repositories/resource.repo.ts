@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
-import { db, resource_claims, resource_instances, type DbTransaction } from "../db/drizzle.js";
+import { db, resource_claims, resource_field_grants, resource_instances, type DbTransaction } from "../db/drizzle.js";
 
 /** Une ressource (`resource_instances`). */
 export interface ResourceInstance {
@@ -30,6 +30,7 @@ export interface ResourceClaim {
   /** Vide pour un tirage ; `target=<uuid>` pour une claim scopée. */
   scope_key: string;
   scope_exclusive: boolean;
+  context: Record<string, unknown> | null;
 }
 
 /** Une réclamation consommée, avec ce que sa ressource en dit. */
@@ -41,6 +42,8 @@ export interface ConsumedClaim {
   payload: Record<string, unknown>;
   result: Record<string, unknown>;
   consumed_at: Date;
+  /** Ce que la lane a gardé entre ses gestes ; `$emits` quand l'entrée vise une autre ressource que celle réclamée. */
+  context: Record<string, unknown> | null;
 }
 
 export interface DrawCandidateQuery {
@@ -268,6 +271,44 @@ export class ResourceRepository {
   }
 
   /** Consomme une réclamation active de `userId`. `null` si elle ne l'est pas (ou plus). */
+  /** Fusionne `patch` dans le contexte d'une réclamation active de l'appelant ; `null` sinon. */
+  async mergeContext(claimId: string, userId: string, patch: Record<string, unknown>): Promise<ResourceClaim | null> {
+    const [row] = await db
+      .update(resource_claims)
+      .set({ context: sql`COALESCE(${resource_claims.context}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
+      .where(and(eq(resource_claims.uuid, claimId), eq(resource_claims.user_id, userId), isActive))
+      .returning();
+    return row ?? null;
+  }
+
+  /** Les réclamations vivantes (actives ou consommées) de ces ressources dans ce scope. */
+  async liveScopeClaims(resourceIds: readonly string[], scopeKey: string): Promise<{ resource_id: string; user_id: string; scope_exclusive: boolean }[]> {
+    if (resourceIds.length === 0) return [];
+    return db
+      .select({ resource_id: resource_claims.resource_id, user_id: resource_claims.user_id, scope_exclusive: resource_claims.scope_exclusive })
+      .from(resource_claims)
+      .where(and(inArray(resource_claims.resource_id, [...resourceIds]), eq(resource_claims.scope_key, scopeKey), countsTowardK));
+  }
+
+  /** Rend un champ lisible à une participation. Idempotent : `false` si le grant existait. */
+  async grantField(resourceId: string, field: string, participation: string, grantedBy: string): Promise<boolean> {
+    const inserted = await db
+      .insert(resource_field_grants)
+      .values({ resource_id: resourceId, field, participation, granted_by: grantedBy })
+      .onConflictDoNothing()
+      .returning({ uuid: resource_field_grants.uuid });
+    return inserted.length > 0;
+  }
+
+  /** Les champs accordés à une participation sur ces ressources. */
+  async grantsFor(resourceIds: readonly string[], participation: string): Promise<{ resource_id: string; field: string }[]> {
+    if (resourceIds.length === 0) return [];
+    return db
+      .select({ resource_id: resource_field_grants.resource_id, field: resource_field_grants.field })
+      .from(resource_field_grants)
+      .where(and(inArray(resource_field_grants.resource_id, [...resourceIds]), eq(resource_field_grants.participation, participation)));
+  }
+
   async consume(claimId: string, userId: string, result: Record<string, unknown>): Promise<ResourceClaim | null> {
     const [row] = await db
       .update(resource_claims)
@@ -368,6 +409,7 @@ export class ResourceRepository {
         payload: resource_instances.payload,
         result: resource_claims.result,
         consumed_at: resource_claims.consumed_at,
+        context: resource_claims.context,
       })
       .from(resource_claims)
       .innerJoin(resource_instances, eq(resource_instances.uuid, resource_claims.resource_id))

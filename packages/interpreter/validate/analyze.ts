@@ -336,10 +336,6 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         if (dims.length === 0) report("claim", claimPath, "unique_per needs dimensions");
         if (!dims.includes("self")) report("claim", [...claimPath, "dimensions"], "unique_per dimensions include `self`, the claimed resource");
         if (new Set(dims).size !== dims.length) report("claim", [...claimPath, "dimensions"], "duplicate dimension");
-        const scoped = dims.filter((dim) => dim !== "self" && dim !== "participation");
-        if (scoped.length > 0) {
-          gap("scoped unique_per", [...claimPath, "dimensions"], `unique_per over ${scoped.join(", ")} needs a scoped claim index the resources capability does not have`);
-        }
       } else if (claim.dimensions) {
         report("claim", [...claimPath, "dimensions"], `dimensions only apply to unique_per, not ${claim.mode}`);
       }
@@ -352,7 +348,6 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     if (resource.cardinality) {
       const { type } = expr(resource.cardinality.exactly, base, [...path, "cardinality", "exactly"]);
       expectType(type, (t) => t.kind === "int" || t.kind === "dyn", "a cardinality must be int", [...path, "cardinality", "exactly"]);
-      gap("resource cardinality", [...path, "cardinality"], "exact cardinality is not enforced by the resources capability");
     }
     if (resource.match_or_create) {
       const by = resource.match_or_create.by;
@@ -743,7 +738,6 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
     } else {
       // Une instance désignée par une expression.
-      gap("designated claim", [...path, "resource"], "v1 compiles draws only; claiming a designated instance needs scoped claims", node);
       const { type } = expr(claim.resource, scope, [...path, "resource"], node);
       if (type.kind === "resource") resource = type.name;
       else if (type.kind !== "dyn") report("type", [...path, "resource"], `a claim takes a resource, got ${showType(type)}`, { node });
@@ -904,7 +898,6 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       const source = body.grant.field;
       const { ast } = expr(source, scope, at, id);
       if (ast && ast.k !== "member") report("type", at, "a grant names a resource field", { node: id });
-      gap("dynamic visibility grant", [...path, "grant"], "grants (the reveal) are out of v1", id);
       return T.record(output);
     }
 

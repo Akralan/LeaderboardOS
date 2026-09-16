@@ -1212,6 +1212,28 @@ const STATEMENTS: Array<{ label: string; sql: string } | { label: string; run: (
     sql: `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_resource_claims_scope ON resource_claims (resource_id, scope_key) WHERE released_at IS NULL AND scope_exclusive`,
   },
 
+  // --- Contexte de claim et grants de champ (challenge 021, J5) ---
+  {
+    label: "resource_claims.context",
+    sql: `ALTER TABLE resource_claims ADD COLUMN IF NOT EXISTS context jsonb`,
+  },
+  {
+    label: "resource_field_grants",
+    sql: `
+      CREATE TABLE IF NOT EXISTS resource_field_grants (
+        uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        resource_id uuid NOT NULL REFERENCES resource_instances(uuid) ON DELETE CASCADE,
+        field varchar(64) NOT NULL,
+        participation uuid NOT NULL REFERENCES users(uuid) ON DELETE CASCADE,
+        granted_by varchar(128) NOT NULL,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+  },
+  {
+    label: "resource_field_grants (resource_id, field, participation) unique",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_field_grants_unique ON resource_field_grants (resource_id, field, participation)`,
+  },
+
   // --- Capacité blobs (challenge 021, J5) ---
   {
     label: "blobs",
