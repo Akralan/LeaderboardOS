@@ -1,0 +1,274 @@
+import type { Challenge, RewardEntry, RewardEntryDraft } from "../../database-service/domain/entities.js";
+import type { Resources } from "../../capabilities/resources.js";
+import type { Blobs } from "../../capabilities/blobs.js";
+import type { Value } from "../expr/evaluator.js";
+
+/**
+ * Le port d'exécution d'un template compilé
+ * -----------------------------------------
+ * Tout ce qu'un flow compilé touche hors de lui-même passe par ce port : les
+ * ressources et leurs claims, le ledger, l'évaluation par grille, les
+ * observateurs, le hasard et l'horloge. `defaultRuntime()` le branche sur les
+ * capacités du core ; un test lui substitue une mémoire.
+ *
+ * C'est la moitié exécutable du catalogue (note de conception §1) : une
+ * capacité qu'aucune liaison ne sert échoue à l'appel, jamais en silence.
+ */
+
+export type RuntimeResources = Pick<
+  Resources,
+  | "createMany"
+  | "draw"
+  | "claimScoped"
+  | "heldInScope"
+  | "updateContext"
+  | "grant"
+  | "grantsFor"
+  | "activeClaim"
+  | "consume"
+  | "release"
+  | "close"
+  | "reclose"
+  | "stampResolution"
+  | "resource"
+  | "claim"
+  | "consumedClaims"
+  | "consumedBy"
+  | "list"
+>;
+
+export interface RuntimeLedger {
+  /** Ce qui a déjà été pris sur le pool du challenge. */
+  distributed(challengeId: string): Promise<number>;
+  entries(challengeId: string): Promise<RewardEntry[]>;
+  /** La contribution qui porte les lignes d'un participant ; créée au premier paiement. */
+  contribution(challenge: Challenge, userId: string, contribution: { type: string; title: string }): Promise<string>;
+  write(drafts: RewardEntryDraft[]): Promise<void>;
+}
+
+export interface EvaluateBinding {
+  challenge: Challenge;
+  userId: string;
+  grid: string;
+  inputs: Value[];
+}
+
+export type RuntimeBlobs = Pick<Blobs, "store" | "get">;
+
+/** Une contribution telle qu'un `link` la lit : son auteur, son URL, son type. */
+export interface LinkedContribution {
+  [key: string]: Value;
+  id: string;
+  author: string;
+  /** Son titre : ce qu'un sélecteur en affiche. */
+  title: string | null;
+  url: string | null;
+  kind: string;
+}
+
+export interface RuntimeContributions {
+  find(contributionId: string): Promise<LinkedContribution | null>;
+  /**
+   * Les contributions du challenge source que ce challenge peut prendre pour
+   * cible : du type qui porte le livrable exigé (`deliverables`).
+   */
+  eligible(challenge: Challenge, capability: string): Promise<LinkedContribution[]>;
+}
+
+export interface TemplateRuntime {
+  resources: RuntimeResources;
+  /** Les fichiers : un champ `file` porte une référence, jamais des octets. */
+  blobs: RuntimeBlobs;
+  /** Les contributions d'un challenge source, pour les champs `link`. */
+  contributions: RuntimeContributions;
+  ledger: RuntimeLedger;
+  /** Le score global d'une évaluation par grille. */
+  evaluate(request: EvaluateBinding): Promise<number>;
+  /** Un observateur du catalogue (`http_proxy`, un connecteur…). */
+  observe(capability: string, args: Record<string, Value>, context: ObserveContext): Promise<Value>;
+  /** Les challenges d'un flow, pour ses jobs. */
+  challengesOf(flowKey: string): Promise<Challenge[]>;
+  /** Le nom affiché de chaque compte : l'identité du core, pour les lectures d'un manager. */
+  names(userIds: readonly string[]): Promise<Record<string, string>>;
+  random(): number;
+  now(): Date;
+}
+
+export class RuntimeBindingError extends Error {}
+
+/**
+ * Un observateur qui refuse : un modèle, pas une panne — un endpoint injoignable
+ * (502), un fichier purgé (410). Le moteur le rend tel quel, sans effet.
+ */
+export class ObserverRefusal extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Ce qu'un observateur sait de l'appel : le challenge, pour y ranger ce qu'il produit. */
+export interface ObserveContext {
+  challenge: Challenge;
+  userId: string | null;
+}
+
+/** Le port branché sur les capacités et les repositories du core. */
+export function defaultRuntime(
+  bindings: Partial<Pick<TemplateRuntime, "evaluate" | "observe" | "random" | "now" | "challengesOf">> = {}
+): TemplateRuntime {
+  const repositories = () => import("../../database-service/repositories/index.js");
+  let resourcesCapability: Resources | null = null;
+  const res = async () => {
+    if (!resourcesCapability) resourcesCapability = (await import("../../capabilities/resources.js")).resources();
+    return resourcesCapability;
+  };
+  const lazy = <K extends keyof RuntimeResources>(name: K) =>
+    (async (...args: unknown[]) => ((await res())[name] as (...a: unknown[]) => unknown)(...args)) as unknown as RuntimeResources[K];
+
+  return {
+    resources: {
+      createMany: lazy("createMany"),
+      draw: lazy("draw"),
+      claimScoped: lazy("claimScoped"),
+      heldInScope: lazy("heldInScope"),
+      updateContext: lazy("updateContext"),
+      grant: lazy("grant"),
+      grantsFor: lazy("grantsFor"),
+      activeClaim: lazy("activeClaim"),
+      consume: lazy("consume"),
+      release: lazy("release"),
+      close: lazy("close"),
+      reclose: lazy("reclose"),
+      stampResolution: lazy("stampResolution"),
+      resource: lazy("resource"),
+      claim: lazy("claim"),
+      consumedClaims: lazy("consumedClaims"),
+      consumedBy: lazy("consumedBy"),
+      list: lazy("list"),
+    },
+    blobs: {
+      async store(input) {
+        const { blobs } = await import("../../capabilities/blobs.js");
+        return blobs().store(input);
+      },
+      async get(blobId) {
+        const { blobs } = await import("../../capabilities/blobs.js");
+        return blobs().get(blobId);
+      },
+    },
+    contributions: {
+      async find(contributionId) {
+        const { ContributionRepository } = await repositories();
+        const contribution = await new ContributionRepository().findById(contributionId);
+        return contribution ? linked(contribution) : null;
+      },
+      async eligible(challenge, capability) {
+        if (!challenge.source_challenge_id) return [];
+        const { ChallengeRepository, ContributionRepository } = await repositories();
+        const { PlatformRegistry } = await import("../../registry/platform.js");
+        const source = await new ChallengeRepository().findById(challenge.source_challenge_id);
+        const deliverable = (source ? PlatformRegistry.flowFor(source) : undefined)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
+        if (!source || !deliverable) return [];
+        const contributions = await new ContributionRepository().findByChallenge(source.uuid);
+        return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map(linked);
+      },
+    },
+    ledger: {
+      async distributed(challengeId) {
+        const { RewardEntryRepository } = await repositories();
+        const { distributedFromPool } = await import("../../capabilities/pool.js");
+        return distributedFromPool(new RewardEntryRepository(), challengeId);
+      },
+      async entries(challengeId) {
+        const { RewardEntryRepository } = await repositories();
+        return new RewardEntryRepository().findByChallenge(challengeId);
+      },
+      async contribution(challenge, userId, { type, title }) {
+        const { ContributionRepository } = await repositories();
+        const { contribution } = await new ContributionRepository().createIfAbsent({
+          title,
+          type,
+          reward: 0,
+          user_id: userId,
+          challenge_id: challenge.uuid,
+          submitted_at: new Date(),
+          evaluation_status: "done",
+        });
+        return contribution.uuid;
+      },
+      async write(drafts) {
+        const { RewardEntryRepository } = await repositories();
+        await new RewardEntryRepository().createManyAndSyncRewards(drafts);
+      },
+    },
+    evaluate:
+      bindings.evaluate ??
+      (async ({ grid }) => {
+        throw new RuntimeBindingError(`no evaluation binding installed for grid ${grid}`);
+      }),
+    observe:
+      bindings.observe ??
+      (async (capability, args, context) => {
+        if (capability === "http_proxy") return httpProxy(args, context);
+        throw new RuntimeBindingError(`no binding installed for capability ${capability}`);
+      }),
+    challengesOf: bindings.challengesOf ?? (async (flowKey) => {
+      const { ChallengeRepository } = await repositories();
+      return (await new ChallengeRepository().findAll()).filter((challenge) => challenge.type === flowKey);
+    }),
+    async names(userIds) {
+      const { UserRepository } = await repositories();
+      const users = await new UserRepository().findByIds([...userIds]);
+      return Object.fromEntries(users.map((user) => [user.uuid, user.full_name]));
+    },
+    random: bindings.random ?? (() => Math.random()),
+    now: bindings.now ?? (() => new Date()),
+  };
+}
+
+/**
+ * `http_proxy` : envoie un fichier à un endpoint par le proxy du core (SSRF
+ * gardé, DNS épinglé, redirections refusées, 15 s, 10 Mo), et range la réponse
+ * en blob. Un endpoint injoignable est un refus (502), un fichier purgé aussi (410).
+ */
+async function httpProxy(args: Record<string, Value>, context: ObserveContext): Promise<Value> {
+  const { blobs } = await import("../../capabilities/blobs.js");
+  const { proxyFileToEndpoint, EndpointCallError } = await import("../../capabilities/http-proxy/endpoint-proxy.js");
+  const to = typeof args.to === "string" ? args.to : null;
+  if (!to) throw new ObserverRefusal(400, "http_proxy needs an endpoint URL");
+
+  const sent = args.send as { blob_id?: unknown } | null | undefined;
+  let file: { buffer: Buffer; filename: string; mimeType: string } = { buffer: Buffer.alloc(0), filename: "input", mimeType: "application/octet-stream" };
+  if (sent && typeof sent.blob_id === "string") {
+    const blob = await blobs().get(sent.blob_id);
+    if (!blob) throw new ObserverRefusal(404, "The file to send does not exist");
+    if (!blob.bytes) throw new ObserverRefusal(410, "The file to send has been purged");
+    file = { buffer: blob.bytes, filename: blob.filename ?? "input", mimeType: blob.content_type };
+  }
+
+  let result;
+  try {
+    result = await proxyFileToEndpoint(to, file);
+  } catch (error) {
+    if (error instanceof EndpointCallError) throw new ObserverRefusal(502, `The endpoint could not be reached: ${error.message}`);
+    throw error;
+  }
+  const response = await blobs().store({
+    challengeId: context.challenge.uuid,
+    bytes: result.body,
+    contentType: result.contentType,
+    filename: "response",
+    retentionDays: typeof args.retention_days === "number" ? args.retention_days : null,
+  });
+  return { status: result.status, ok: result.status >= 200 && result.status < 300, content_type: result.contentType, response: response as unknown as Value };
+}
+
+function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }): LinkedContribution {
+  return {
+    id: contribution.uuid,
+    author: contribution.user_id,
+    title: contribution.title ?? null,
+    url: contribution.live_endpoint_url ?? contribution.artifact_url ?? null,
+    kind: contribution.type,
+  };
+}

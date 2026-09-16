@@ -1,0 +1,133 @@
+format: leaderboardos/1
+
+template:
+  id: journey-validation
+  version: 1.0.0
+  name: Journey validation
+  summary: >
+    Qualified reviewers walk a deployed application through an ordered
+    user journey, one verdict per step; a journey verdict per reviewer
+    resolves under quorum, majority side paid.
+
+params:
+  pool:             {type: points, mutable: false}
+  cp_per_journey:   {type: points, mutable: false}
+  quorum:           {type: int, check: "value % 2 == 1", mutable: false}
+  source_challenge: {type: challenge_ref, mutable: false}
+  reviewer_role:    {type: role, mutable: false}
+
+requires: {core: 1}
+
+resources:
+  target:
+    fields:
+      contribution: {type: link, from: params.source_challenge}
+      app_url:      {type: url, visibility: [admin, "role(params.reviewer_role)"]}
+    created_by: [expose.create_target]
+    closure: {by: aggregate, verdict: [works, broken], permanent: true}
+
+  journey_step:
+    fields:
+      order:       {type: int}
+      instruction: {type: string}
+    created_by: [journey.create_step]
+    claim:
+      mode: unique_per
+      dimensions: [self, target, participation]
+
+  step_report:
+    fields:
+      target:  {type: "ref(target)"}
+      step:    {type: "ref(journey_step)"}
+      outcome: {type: "enum(passed, failed)", visibility: [author, admin]}
+      note:    {type: string, visibility: [author, admin]}
+    created_by: [reviewer.log]
+
+lifecycle:
+  states: standard
+  aggregates:
+    - id: journey
+      over: target
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) == params.quorum"
+        verdict: "majority(inputs.map(i, i.value))"
+        then:
+          - transition: {resource: target, to: closed}
+          - reward:
+              to:     "inputs.filter(i, i.value == verdict)"
+              amount: params.cp_per_journey
+              pool:   params.pool
+              order:  commit_time
+              clamp:  pool
+      state_visibility:
+        count: everyone
+        split: admin
+
+lanes:
+  - id: journey
+    entry: {trigger: admin}
+    nodes:
+      - collect: {id: define, fields: {order: {type: int}, instruction: {type: string}}}
+      - act: {id: create_step, create: journey_step, from: define}
+
+  - id: expose
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: expose_app
+          fields:
+            contribution: {type: link, from: params.source_challenge}
+            app_url:      {type: url}
+      - act: {id: create_target, create: target, from: expose_app}
+
+  - id: reviewer
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_role}
+    nodes:
+      - collect:
+          id: pick_target
+          fields:
+            target: {type: "ref(target)", where: "target.open"}
+      - gate:
+          id: not_own
+          all: ["pick_target.target.contribution.author != participation.user"]
+      - collect:
+          id: pick_step
+          fields:
+            step:
+              type: "ref(journey_step)"
+              where: >
+                step.order == 1
+                || exists(step_report, r,
+                     r.author == participation.user
+                     && r.target == pick_target.target
+                     && r.step.order == step.order - 1
+                     && r.outcome == "passed")
+      - assess:
+          id: judge
+          kind: human
+          claim: {resource: pick_step.step, scope: {target: pick_target.target}}
+          fields:
+            outcome: {type: "enum(passed, failed)"}
+            note:    {type: string}
+      - act: {id: log, create: step_report, from: [pick_target, pick_step, judge]}
+      - gate:
+          id: result
+          branch:
+            - when: 'judge.outcome == "failed"'
+              nodes:
+                - assess:
+                    id: cast_broken
+                    kind: metric
+                    value: '"broken"'
+                    emit: {to: lifecycle.journey, scope: pick_target.target}
+            - when: "!exists(journey_step, s, s.order > pick_step.step.order)"
+              nodes:
+                - assess:
+                    id: cast_works
+                    kind: metric
+                    value: '"works"'
+                    emit: {to: lifecycle.journey, scope: pick_target.target}
+            - else: {nodes: []}

@@ -413,6 +413,12 @@ export interface FlowDefinition extends Declarations {
   actions?: readonly ChallengeActionDeclaration[];
   /** La sandbox accepte des propositions pour ce flow. */
   proposable?: ProposableDeclaration;
+  /**
+   * Retiré par attrition : le flow reste installé et sert les challenges qui
+   * le portent, mais aucun challenge nouveau ne le prend. Il se désinstalle
+   * quand plus aucun challenge ne le référence.
+   */
+  retired?: boolean;
 }
 
 export interface ExtensionDefinition extends Declarations {
@@ -484,6 +490,24 @@ interface PlatformState {
   quests: Map<string, Owned<QuestDeclaration>>;
   /** Par clé de propriétaire (`code`, `sandbox`…), telle qu'inscrite dans `evaluation_runs.trigger_type`. */
   evaluationHandlers: Map<string, { owner: string; handlers: Map<string, EvaluationHandlerDeclaration> }>;
+  /** Les templates en base : clé → version publiée → flow compilé. */
+  templateVersions: Map<string, Map<string, FlowDefinition>>;
+  /** Les jobs d'un template en base, version par version : le job inscrit les exécute tous. */
+  templateJobs: Map<string, JobDeclaration[]>;
+}
+
+/** Ce qu'il faut d'un challenge pour trouver le flow qui le sert. */
+export interface FlowReference {
+  type?: string | null;
+  template_version?: string | null;
+}
+
+/** `1.10.0` après `1.9.0` : le semver se compare en entiers. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  return 0;
 }
 
 const STATE_KEY = "__leaderboardPlatformRegistry";
@@ -604,6 +628,13 @@ function checkActions(owner: string, actions: readonly ChallengeActionDeclaratio
   }
 }
 
+function latest(state: PlatformState, key: string): FlowDefinition | undefined {
+  const versions = state.templateVersions.get(key);
+  if (!versions || versions.size === 0) return undefined;
+  const newest = [...versions.keys()].sort(compareVersions).at(-1)!;
+  return versions.get(newest);
+}
+
 export class PlatformRegistry {
   /**
    * Installe une distribution. Tout est vérifié avant que rien ne soit visible :
@@ -627,6 +658,8 @@ export class PlatformRegistry {
       subscriptions: new Map(),
       quests: new Map(),
       evaluationHandlers: new Map(),
+      templateVersions: new Map(),
+      templateJobs: new Map(),
     };
 
     const owners: Array<{ key: string; owner: string; declarations: Declarations }> = [];
@@ -723,12 +756,115 @@ export class PlatformRegistry {
     delete holder()[STATE_KEY];
   }
 
+  /**
+   * Le flow d'une clé : le flow fichier, ou la dernière version publiée d'un
+   * template en base. Pour un appel qui part d'un challenge, `flowFor`.
+   */
   static flow(key: string | null | undefined): FlowDefinition | undefined {
-    return key ? current().flows.get(key) : undefined;
+    if (!key) return undefined;
+    const state = current();
+    return state.flows.get(key) ?? latest(state, key);
   }
 
+  /**
+   * Le flow qui sert ce challenge — la résolution canonique. Une version de
+   * template référencée désigne ce compilé-là, jamais un autre ; sans version,
+   * le flow fichier du type.
+   */
+  static flowFor(challenge: FlowReference): FlowDefinition | undefined {
+    if (!challenge.type) return undefined;
+    const state = current();
+    if (challenge.template_version) return state.templateVersions.get(challenge.type)?.get(challenge.template_version);
+    return state.flows.get(challenge.type);
+  }
+
+  /** Les flows fichiers, puis la dernière version publiée de chaque template en base. */
   static flows(): FlowDefinition[] {
-    return [...current().flows.values()];
+    const state = current();
+    return [...state.flows.values(), ...[...state.templateVersions.keys()].map((key) => latest(state, key)!)];
+  }
+
+  /** La version publiée d'un template en base, si cette instance l'a chargée. */
+  static templateVersion(key: string, version: string): FlowDefinition | undefined {
+    return current().templateVersions.get(key)?.get(version);
+  }
+
+  /** Les versions chargées d'un template en base, croissantes. */
+  static templateVersions(key: string): string[] {
+    return [...(current().templateVersions.get(key)?.keys() ?? [])].sort(compareVersions);
+  }
+
+  /** La dernière version publiée chargée d'un template en base. */
+  static latestTemplateVersion(key: string): string | undefined {
+    return PlatformRegistry.templateVersions(key).at(-1);
+  }
+
+  /**
+   * Installe une version publiée d'un template en base, compilée, à côté de la
+   * distribution. Idempotente pour une version déjà chargée. Refuse une clé
+   * déjà servie par un flow fichier, une clé de ledger, un type de
+   * contribution ou un job qu'un autre propriétaire déclare. Les versions d'un
+   * même template partagent leurs clés (préfixées par la clé du template, pas
+   * par la version) ; un job déclaré par plusieurs versions reste un job, qui
+   * les exécute toutes — chacune sur ses challenges.
+   */
+  /**
+   * Ce qui empêcherait d'installer cette version, sans rien installer : la
+   * publication le vérifie avant d'écrire la ligne immuable.
+   */
+  static templateVersionConflict(version: string, flow: FlowDefinition): string | null {
+    const state = current();
+    const key = flow.descriptor.key;
+    if (state.flows.has(key)) return `[PlatformRegistry] Template "${key}" is already served by an installed flow`;
+    const owner = `template:${key}`;
+    const shared = <T extends { key: string }>(target: Map<string, Owned<T>>, kind: string, declarations: readonly T[] | undefined, same: (a: T, b: T) => boolean) => {
+      for (const declaration of declarations ?? []) {
+        const existing = target.get(declaration.key);
+        if (existing && existing.owner !== owner) return `[PlatformRegistry] ${kind} "${declaration.key}" is declared by both ${existing.owner} and ${owner}`;
+        if (existing && !same(existing, declaration)) return `[PlatformRegistry] ${kind} "${declaration.key}" changes meaning between versions of ${owner}`;
+      }
+      return null;
+    };
+    const jobs = (flow.jobs ?? []).map((job) => state.jobs.get(job.key)).find((existing) => existing && existing.owner !== owner);
+    return (
+      shared(state.ruleKeys, "Rule key", flow.ruleKeys, (a, b) => a.consumesPool === b.consumesPool) ??
+      shared(state.contributionTypes, "Contribution type", flow.contributionTypes, () => true) ??
+      (jobs ? `[PlatformRegistry] Job "${jobs.key}" is declared by both ${jobs.owner} and ${owner}` : null) ??
+      (version ? null : "[PlatformRegistry] A template version is required")
+    );
+  }
+
+  static installTemplateVersion(version: string, flow: FlowDefinition): void {
+    const state = current();
+    const key = flow.descriptor.key;
+    if (state.templateVersions.get(key)?.has(version)) return;
+    const conflict = PlatformRegistry.templateVersionConflict(version, flow);
+    if (conflict) throw new Error(conflict);
+    checkConfigVersions(flow);
+    checkActions(`template:${key}@${version}`, flow.actions);
+    const owner = `template:${key}`;
+
+    // Tout est vérifié : rien n'est visible avant.
+    for (const declaration of flow.ruleKeys ?? []) if (!state.ruleKeys.has(declaration.key)) state.ruleKeys.set(declaration.key, { ...declaration, owner });
+    for (const declaration of flow.contributionTypes ?? []) {
+      if (!state.contributionTypes.has(declaration.key)) state.contributionTypes.set(declaration.key, { ...declaration, owner });
+    }
+    for (const job of flow.jobs ?? []) {
+      const runs = [...(state.templateJobs.get(job.key) ?? []), job];
+      state.templateJobs.set(job.key, runs);
+      state.jobs.set(job.key, {
+        ...job,
+        owner,
+        async run() {
+          const reports: unknown[] = [];
+          for (const each of runs) reports.push(await each.run());
+          return reports.length === 1 ? reports[0] : reports;
+        },
+      });
+    }
+    const versions = state.templateVersions.get(key) ?? new Map<string, FlowDefinition>();
+    versions.set(version, flow);
+    state.templateVersions.set(key, versions);
   }
 
   static extension(key: string): ExtensionDefinition | undefined {

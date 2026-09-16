@@ -29,8 +29,8 @@ export function flowUses(type: string | null | undefined, capability: keyof Flow
   return PlatformRegistry.flow(type)?.uses?.[capability] === true;
 }
 
-function hooksOf(challenge: Pick<Challenge, "type">): Array<{ owner: string; hooks: ChallengeHooks }> {
-  const flow = PlatformRegistry.flow(challenge.type);
+function hooksOf(challenge: Pick<Challenge, "type" | "template_version">): Array<{ owner: string; hooks: ChallengeHooks }> {
+  const flow = PlatformRegistry.flowFor(challenge);
   if (!flow) return [];
 
   const owners: Array<{ owner: string; hooks: ChallengeHooks }> = [];

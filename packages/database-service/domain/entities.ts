@@ -78,6 +78,8 @@ export interface Challenge {
   flow_config_version?: number;
   created_at: Date;
   closed_at?: Date | null; // Posée à la bascule vers 'completed' (jamais 'archived')
+  /** La version publiée du template en base qui sert ce challenge ; absente pour un flow fichier. */
+  template_version?: string | null;
 }
 
 /** Signal de contribution détectable dans un canal de discussion (Slack). */

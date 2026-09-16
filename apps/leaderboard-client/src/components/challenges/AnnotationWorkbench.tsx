@@ -4,18 +4,33 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2, SkipForward, Sparkles, Tag } from 'lucide-react';
 import { flowActionUrl } from '@/lib/challengeActions';
 
-interface AnnotationCard {
-  claim_id: string;
-  image_url: string | null;
-  options: { key: string; label: string }[];
-  expires_at: string | null;
+/**
+ * Le contrat de données est celui que l'interpréteur génère pour le template
+ * data-annotation (`content/templates/data-annotation/template.yaml`) :
+ * `POST annotator` tire, `POST annotator/label` livre, `POST annotator/release`
+ * abandonne, `GET progress` résume. Les noms suivent le template ; les
+ * réponses possibles viennent de sa configuration (`label_schema`).
+ */
+
+export interface LabelOption {
+  key: string;
+  label: string;
 }
 
-interface AnnotationProgress {
-  labeled: number;
-  cp_earned: number;
-  quality_score: number | null;
-  sensitive_cleared: boolean;
+/** `POST annotator` : le claim tiré et ce que l'annotateur peut lire de la ressource — jamais son type. */
+interface DrawnClaim {
+  claim_id: string;
+  expires_at: string | null;
+  resource: { id: string; image_url?: string | null } | null;
+}
+
+/** `GET progress`, généré. */
+interface Progress {
+  delivered: number;
+  cp: number;
+  counters: { gold_seen?: number; gold_correct?: number };
+  eligible_classes: Record<string, string[]>;
+  active_claim: { claim_id: string; expires_at: string | null } | null;
 }
 
 function fgAt(opacity: number) {
@@ -27,15 +42,23 @@ async function errorOf(res: Response): Promise<string> {
   return typeof body?.error === 'string' ? body.error : `Request failed (${res.status})`;
 }
 
+/** La précision décalée : les compteurs que `progress` expose à l'annotateur. */
+function qualityOf(progress: Progress | null): number | null {
+  const seen = progress?.counters.gold_seen ?? 0;
+  return seen > 0 ? (progress?.counters.gold_correct ?? 0) / seen : null;
+}
+
 /**
  * L'écran de l'annotateur : une image à la fois, les réponses en boutons, un
  * « passer ». Le serveur choisit l'image ; l'écran ne sait jamais s'il s'agit
  * d'un cas de contrôle.
  */
-export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: string; isMember: boolean }) {
-  const [card, setCard] = useState<AnnotationCard | null>(null);
+export function AnnotationWorkbench({
+  challengeId, isMember, options,
+}: { challengeId: string; isMember: boolean; options: LabelOption[] }) {
+  const [card, setCard] = useState<DrawnClaim | null>(null);
   const [empty, setEmpty] = useState(false);
-  const [progress, setProgress] = useState<AnnotationProgress | null>(null);
+  const [progress, setProgress] = useState<Progress | null>(null);
   const [session, setSession] = useState({ labels: 0, cp: 0 });
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(false);
@@ -50,14 +73,24 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'draw'), { method: 'POST' });
+      const res = await fetch(flowActionUrl(challengeId, 'annotator'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      // 409 : plus rien à tirer pour cet annotateur.
+      if (res.status === 409) {
+        setCard(null);
+        setEmpty(true);
+        return;
+      }
       if (!res.ok) {
         setError(await errorOf(res));
         return;
       }
-      const body = (await res.json()) as { claim: AnnotationCard | null };
+      const body = (await res.json()) as { claim: DrawnClaim };
       setCard(body.claim);
-      setEmpty(!body.claim);
+      setEmpty(false);
     } finally {
       setBusy(false);
     }
@@ -77,10 +110,10 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(flowActionUrl(challengeId, `claims/${card.claim_id}/label`), {
+      const res = await fetch(flowActionUrl(challengeId, 'annotator/label'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ claim_id: card.claim_id, value }),
       });
       if (!res.ok && res.status !== 409 && res.status !== 410) {
         setError(await errorOf(res));
@@ -101,7 +134,11 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
     if (!card) return;
     setBusy(true);
     try {
-      await fetch(flowActionUrl(challengeId, `claims/${card.claim_id}/release`), { method: 'POST' });
+      await fetch(flowActionUrl(challengeId, 'annotator/release'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claim_id: card.claim_id }),
+      });
     } finally {
       setBusy(false);
     }
@@ -116,20 +153,21 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
     );
   }
 
+  const quality = qualityOf(progress);
+  const imageUrl = card?.resource?.image_url ?? null;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-[18px] border border-white/10 bg-white/[0.02] px-4 py-3 text-xs" style={{ color: fgAt(0.5) }}>
         <span>
-          <b style={{ color: fgAt(0.85) }}>{progress?.labeled ?? 0}</b> labeled
+          <b style={{ color: fgAt(0.85) }}>{progress?.delivered ?? 0}</b> labeled
         </span>
         <span>
-          <b style={{ color: fgAt(0.85) }}>{progress?.cp_earned ?? 0}</b> CP earned
+          <b style={{ color: fgAt(0.85) }}>{progress?.cp ?? 0}</b> CP earned
         </span>
         <span title="Accuracy on hidden quality checks, updated with a delay">
           Quality score{' '}
-          <b style={{ color: fgAt(0.85) }}>
-            {progress?.quality_score == null ? '—' : `${Math.round(progress.quality_score * 100)}%`}
-          </b>
+          <b style={{ color: fgAt(0.85) }}>{quality == null ? '—' : `${Math.round(quality * 100)}%`}</b>
         </span>
         {started && (
           <span className="ml-auto">
@@ -166,10 +204,10 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
         </div>
       ) : (
         <div className="space-y-4 rounded-[18px] border border-white/10 bg-white/[0.02] p-4">
-          {card.image_url ? (
+          {imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- images hébergées ailleurs, tailles arbitraires
             <img
-              src={card.image_url}
+              src={imageUrl}
               alt="Item to label"
               referrerPolicy="no-referrer"
               className="mx-auto max-h-[60vh] w-auto rounded-xl bg-black/40 object-contain"
@@ -178,7 +216,7 @@ export function AnnotationWorkbench({ challengeId, isMember }: { challengeId: st
             <p className="py-10 text-center text-sm" style={{ color: fgAt(0.45) }}>This item has no image.</p>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            {card.options.map(option => (
+            {options.map(option => (
               <button
                 key={option.key}
                 type="button"

@@ -31,6 +31,8 @@ export interface SlotTeamMember {
 export interface SlotChallenge {
   uuid: string;
   type: string;
+  /** La version du template en base qui sert le challenge ; absente pour un flow fichier. */
+  template_version?: string | null;
   status: string;
   contribution_points_reward: number;
   flow_config?: unknown;
@@ -135,6 +137,7 @@ export interface ManageSlotContext {
 
 export interface RulesChallenge {
   type: string;
+  template_version?: string | null;
   contribution_points_reward: number;
   reward_rules?: unknown;
   flow_config?: unknown;

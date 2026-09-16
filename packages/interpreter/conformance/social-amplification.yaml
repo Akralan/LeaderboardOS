@@ -1,0 +1,83 @@
+format: leaderboardos/1
+
+template:
+  id: social-amplification
+  version: 1.0.0
+  name: Social amplification
+  summary: >
+    Contributors publish on shared brand accounts and declare their posts;
+    the engine verifies the account, waits out a maturation window,
+    measures engagement, and pays by tier.
+
+params:
+  pool:            {type: points, mutable: false}
+  platforms:       {type: "list(enum(instagram, x, linkedin))", mutable: false}
+  maturation_days: {type: int, mutable: true}
+  tiers:           {type: "list({min_engagement: number, points: points})", mutable: true}
+
+requires: {core: 1}
+
+resources:
+  account:
+    fields:
+      platform: {type: "enum(params.platforms)"}
+      handle:   {type: string}
+      notes:    {type: string, visibility: [admin]}
+    created_by: [accounts.create_account]
+    claim: {mode: unbounded}
+  post:
+    fields:
+      url:     {type: url}
+      account: {type: "ref(account)"}
+      metrics: {type: json, visibility: [author, admin]}
+    created_by: [contributor.register]
+    match_or_create: {by: url}
+    closure: {by: transition, verdict: [measured]}
+
+lanes:
+  - id: accounts
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: register_account
+          fields:
+            platform: {type: "enum(params.platforms)"}
+            handle:   {type: string}
+      - act: {id: create_account, create: account, from: register_account}
+
+  - id: contributor
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - collect: {id: declare, fields: {url: {type: url}}}
+      - act:
+          id: resolve
+          kind: observer
+          capability: social_metadata
+          url: declare.url
+          store: meta
+      - gate:
+          id: ours
+          all:
+            - "exists(account, a, a.platform == resolve.meta.platform && a.handle == resolve.meta.handle)"
+      - act:
+          id: register
+          create: post
+          from: declare
+          set:
+            account: "account.filter(a, a.platform == resolve.meta.platform && a.handle == resolve.meta.handle)[0]"
+
+  - id: measure
+    entry:
+      trigger: cron
+      schedule: daily
+      over: {resource: post, where: "post.open && age(post) >= params.maturation_days"}
+      cursor: engine
+    nodes:
+      - act: {id: fetch, kind: observer, capability: social_metadata, url: post.url, store: metrics}
+      - assess: {id: reach, kind: metric, value: fetch.metrics.engagement}
+      - reward:
+          id: tier_pay
+          to: post.author
+          amount: {mapping: tiers, tiers: params.tiers, key: min_engagement, match: at_least, input: reach.value}
+          pool: params.pool
+      - act: {id: settle, transition: {resource: post, to: closed, verdict: measured}}

@@ -1,0 +1,63 @@
+format: leaderboardos/1
+
+template:
+  id: graded-submission
+  version: 1.0.0
+  name: Graded submission challenge
+  summary: >
+    Typed artifacts, self-triggered AI evaluation, pool-draining rewards,
+    optional group participation.
+
+params:
+  pool:      {type: points, mutable: false}
+  rate:      {type: number, mutable: true}
+  min_score: {type: number, mutable: true}
+  kinds:
+    type: "list({kind: string, connector: capability, grid: grid_ref})"
+    mutable: false
+  group:
+    type: {max_size: int, multiplier: expr}
+    mutable: false
+
+requires: {core: 1}
+
+resources:
+  contribution:
+    fields:
+      kind:     {type: string}
+      url:      {type: url}
+      metadata: {type: json,   visibility: [author, admin]}
+      score:    {type: number, visibility: [author, admin]}
+    created_by: [contributor.register]
+
+lanes:
+  - id: contributor
+    entry:
+      trigger: user
+      access: {mode: open, group: params.group}
+    nodes:
+      - collect:
+          id: submit
+          fields:
+            kind: {type: "enum(params.kinds.map(k, k.kind))"}
+            url:  {type: url}
+      - act:
+          id: fetch
+          kind: observer
+          capability: "params.kinds.filter(k, k.kind == submit.kind)[0].connector"
+          url: submit.url
+          store: metadata
+      - act: {id: register, create: contribution, from: [submit, fetch]}
+      - assess:
+          id: grade
+          kind: ai_grid
+          grid: "params.kinds.filter(k, k.kind == submit.kind)[0].grid"
+          input: [submit.url, fetch.metadata]
+      - gate: {id: floor, all: ["grade.score >= params.min_score"]}
+      - reward:
+          id: pay
+          amount: >
+            params.rate * grade.score
+            * (1.0 + 0.3 * (size(group.members) - 1.0))
+          pool: params.pool
+          clamp: pool

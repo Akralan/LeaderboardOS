@@ -27,7 +27,7 @@ const HISTORICAL_RULE_KEYS = [
 ];
 
 /** Les clés des flows ajoutés depuis, installées elles aussi. */
-const ADDED_RULE_KEYS = ['annotation', 'annotation_clawback'];
+const ADDED_RULE_KEYS = ['annotation', 'annotation_clawback', 'endpoint_check'];
 
 describe('distribution MyTwin', () => {
   beforeEach(() => PlatformRegistry.reset());

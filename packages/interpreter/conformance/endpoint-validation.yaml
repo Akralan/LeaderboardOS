@@ -1,0 +1,118 @@
+format: leaderboardos/1
+
+template:
+  id: endpoint-validation
+  version: 1.0.0
+  name: Endpoint validation
+  summary: >
+    Qualified reviewers verify deployed submissions from a source challenge
+    against peer-authored ground-truth cases, under quorum.
+
+params:
+  pool:                 {type: points, mutable: false}
+  cp_per_validation:    {type: points, mutable: false}
+  required_validations: {type: int, check: "value % 2 == 1", mutable: false}
+  source_challenge:     {type: challenge_ref, mutable: false}
+  reviewer_role:        {type: role, mutable: false}
+
+requires: {core: 1}
+
+resources:
+  target:
+    fields:
+      contribution:  {type: link, from: params.source_challenge}
+      endpoint_url:  {type: url, visibility: [admin, "role(params.reviewer_role)"]}
+    created_by: [admin.create_target]
+    closure: {by: aggregate, verdict: [works, broken], permanent: true}
+
+  reference_case:
+    fields:
+      input:            {type: file, visibility: [author, admin]}
+      expected_output:  {type: file, visibility: []}
+    created_by: [author.create_case]
+    cardinality: {exactly: params.required_validations}
+    claim:
+      mode: unique_per
+      dimensions: [self, target]
+
+lifecycle:
+  states: standard
+  aggregates:
+    - id: quorum
+      over: target
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) == params.required_validations"
+        verdict: "majority(inputs.map(i, i.verdict))"
+        then:
+          - transition: {resource: target, to: closed}
+          - reward:
+              to:     "inputs.filter(i, i.verdict == verdict)"
+              amount: params.cp_per_validation
+              pool:   params.pool
+              order:  commit_time
+              clamp:  pool
+      state_visibility:
+        count: everyone
+        split: admin
+
+lanes:
+  - id: admin
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: expose
+          fields:
+            contribution: {type: link, from: params.source_challenge}
+            endpoint_url: {type: url}
+      - act: {id: create_target, create: target, from: expose}
+
+  - id: author
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_role}
+    nodes:
+      - collect:
+          id: submit_case
+          fields:
+            input:           {type: file}
+            expected_output: {type: file}
+      - act: {id: create_case, create: reference_case, from: submit_case}
+
+  - id: reviewer
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_role}
+    nodes:
+      - collect:
+          id: pick
+          fields:
+            target: {type: "ref(target)", where: "target.open"}
+            case:   {type: "ref(reference_case)"}
+      - gate:
+          id: eligibility
+          all:
+            - "pick.case.author != participation.user"
+            - "pick.target.contribution.author != participation.user"
+      - act:
+          id: probe
+          kind: observer
+          claim: {resource: pick.case, scope: {target: pick.target}}
+          capability: http_proxy
+          send:  pick.case.input
+          to:    pick.target.endpoint_url
+          store: response
+      - collect:
+          id: observation
+          fields: {text: {type: string}}
+      - act:
+          id: reveal
+          kind: grant
+          grant: {field: pick.case.expected_output, to: participation}
+      - assess:
+          id: verdict
+          kind: human
+          fields:
+            verdict:     {type: "enum(works, broken)"}
+            description: {type: string}
+          emit: {to: lifecycle.quorum, scope: pick.target}

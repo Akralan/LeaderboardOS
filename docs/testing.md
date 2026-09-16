@@ -27,6 +27,26 @@ npm run test:coverage   # generate coverage report
 
 Test files live alongside the code they test, typically as `*.test.ts` or `*.spec.ts`.
 
+## Integration tests on Postgres
+
+Files named `*.integration.test.ts` (under `packages/` and `content/`) run against the real database of `DATABASE_URL`, one file at a time, and are ignored by the runs above:
+
+```bash
+npm run test:integration      # vitest.integration.config.ts
+```
+
+They cover what an in-memory double cannot: the `resources` capability's concurrent invariants (`k` never exceeded, TTL, uniqueness, scoped claims), blobs, the data-annotation and endpoint-check equivalence campaigns against their hand-written flows, and templates in the database (immutability trigger, version order, composite FK, catch-up, unservable versions).
+
+**They never erase what they did not create.** The database is a real development database. Each test builds an `integrationScope()` (`packages/database-service/testing/integration.ts`): it creates its own users, project and challenges, and `cleanup()` deletes them — resources, claims, contributions, ledger rows and blobs follow by cascade. A template key taken with `scope.templateKey()` is deleted too, published versions included: `cleanup` disables the `template_versions_guard` trigger inside one transaction to do it — a gesture reserved to tests. A job that walks every challenge of a flow (an audit) is restricted to the test's own challenges. Apply the schema first (`npm run db:apply-schema`).
+
+## Templates
+
+```bash
+npm run templates:check       # validate the conformance corpus and content/templates/*/template.yaml,
+                              # and fail when a template.source.ts is stale
+npm run templates:build       # regenerate the template.source.ts modules
+```
+
 ---
 
 ## What to test when contributing
@@ -35,3 +55,4 @@ When adding a new feature or fixing a bug:
 
 1. **Add a Vitest test** for any logic that can be tested in isolation (utilities, transformations, validators).
 2. **Run `npx vitest run` from `apps/leaderboard-client`** before opening a PR, and `npx tsc --noEmit` there too — there is no working ESLint config in the repo, so those two are the gate.
+3. **Touching the database, claims, templates or a flow's data?** Run `npm run test:integration` as well, and `npm run templates:check` when a template changed.

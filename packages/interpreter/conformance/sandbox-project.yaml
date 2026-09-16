@@ -1,0 +1,98 @@
+format: leaderboardos/1
+
+template:
+  id: sandbox-project
+  version: 1.0.0
+  name: Sandbox project
+  summary: >
+    A contributor proposes and works on their own project. Admin-defined
+    star-tier milestones pay from the pool; self-evaluation is formative;
+    promotion spawns an official challenge and auto-joins the author.
+
+params:
+  pool:                {type: points, mutable: false}
+  promotion_templates: {type: "list(template_ref)", mutable: false}
+  self_grids:          {type: {code: grid_ref, ml: grid_ref}, mutable: false}
+
+requires: {core: 1}
+
+resources:
+  project:
+    fields:
+      title:       {type: string}
+      kind:        {type: "enum(code, ml)"}
+      description: {type: string}
+      repo_url:    {type: url}
+    created_by: [creator.open_project]
+    closure: {by: [admin_act, transition], verdict: [promoted, archived]}
+  milestone:
+    fields:
+      project:  {type: "ref(project)"}
+      tier:     {type: int}
+      criteria: {type: string}
+      points:   {type: points}
+    created_by: [milestones.create_tier]
+    closure: {by: admin_act, verdict: [reached]}
+
+lanes:
+  - id: creator
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - collect:
+          id: propose
+          fields:
+            title:       {type: string}
+            kind:        {type: "enum(code, ml)"}
+            description: {type: string}
+            repo_url:    {type: url}
+      - act: {id: open_project, create: project, from: propose}
+
+  - id: self_review
+    entry: {trigger: user, access: {mode: author_of, resource: project}}
+    nodes:
+      - assess:
+          id: formative
+          kind: self
+          grid: "params.self_grids[project.kind]"
+          gating: false
+
+  - id: milestones
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: define
+          fields:
+            project:  {type: "ref(project)"}
+            tier:     {type: int}
+            criteria: {type: string}
+            points:   {type: points}
+      - act: {id: create_tier, create: milestone, from: define}
+
+  - id: award
+    entry: {trigger: admin}
+    nodes:
+      - collect: {id: review, fields: {milestone: {type: "ref(milestone)", where: "milestone.open"}}}
+      - act: {id: settle, transition: {resource: review.milestone, to: closed, verdict: reached}}
+      - reward:
+          id: tier_pay
+          to: review.milestone.project.author
+          amount: review.milestone.points
+          pool: params.pool
+
+  - id: promote
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: pick
+          fields:
+            project:         {type: "ref(project)", where: "project.open"}
+            template:        {type: "enum(params.promotion_templates)"}
+            instance_params: {type: json}
+      - act:
+          id: spawn
+          kind: effector
+          capability: spawn_challenge
+          template: pick.template
+          params: pick.instance_params
+          auto_join: pick.project.author
+      - act: {id: close, transition: {resource: pick.project, to: closed, verdict: promoted}}

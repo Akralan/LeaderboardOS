@@ -1,0 +1,130 @@
+format: leaderboardos/1
+
+template:
+  id: data-annotation
+  version: 1.0.0
+  name: Data annotation with gold cases
+  summary: >
+    Annotators label items under k-redundancy; hidden gold cases maintain a
+    per-annotator accuracy record that weights pay and gates sensitive
+    work; items resolve by agreement; payment is fast, audited by sampled
+    clawback.
+
+params:
+  pool:       {type: points, mutable: false}
+  per_unit:   {type: points, mutable: true}
+  redundancy: {type: int, mutable: false}
+  gold_rate:  {type: ratio, mutable: true}
+  clearance:  {type: {min_seen: int, min_accuracy: ratio}, mutable: true}
+  audit_rate: {type: ratio, mutable: true}
+
+requires: {core: 1}
+
+resources:
+  item:
+    fields:
+      payload: {type: json, visibility: [claimant, admin]}
+      class:   {type: "enum(standard, sensitive)"}
+    created_by: [import.explode_items]
+    claim: {mode: k_bounded, k: params.redundancy, ttl: 48h}
+    closure: {by: aggregate, verdict: [labeled]}
+  gold:
+    fields:
+      payload:  {type: json, visibility: [claimant, admin]}
+      expected: {type: json, visibility: []}
+    created_by: [import.explode_golds]
+    claim: {mode: unique_per, dimensions: [self, participation]}
+
+counters:
+  gold_seen:    {type: int}
+  gold_correct: {type: int}
+
+lifecycle:
+  aggregates:
+    - id: agreement
+      over: item
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) == params.redundancy"
+        verdict: "mode(inputs.map(i, i.value))"
+        then:
+          - transition: {resource: item, to: closed, verdict: labeled}
+
+lanes:
+  - id: import
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: batch
+          fields:
+            file:  {type: file}
+            kind:  {type: "enum(items, golds)"}
+            class: {type: "enum(standard, sensitive)"}
+      - gate:
+          id: kind
+          branch:
+            - when: 'batch.kind == "golds"'
+              nodes:
+                - act: {id: explode_golds, create: gold, many: {from_file: batch.file}}
+            - else:
+                nodes:
+                  - act: {id: explode_items, create: item, many: {from_file: batch.file}, set: {class: batch.class}}
+
+  - id: annotator
+    entry: {trigger: user, access: {mode: open}}
+    nodes:
+      - act:
+          id: draw
+          claim:
+            resource: item
+            where: >
+              item.class == "standard"
+              || (counters.gold_seen >= params.clearance.min_seen
+                  && counters.gold_correct
+                     >= params.clearance.min_accuracy * counters.gold_seen)
+            substitute: {resource: gold, rate: params.gold_rate}
+      - collect: {id: label, fields: {value: {type: json}}}
+      - gate:
+          id: kind
+          branch:
+            - when: "draw.substituted"
+              nodes:
+                - assess:
+                    id: check
+                    kind: metric
+                    value: "label.value == draw.gold.expected"
+                    counters:
+                      gold_seen:    {add: "1"}
+                      gold_correct: {add: "value ? 1 : 0"}
+            - else:
+                nodes:
+                  - assess:
+                      id: submit
+                      kind: human
+                      from: label
+                      emit: {to: lifecycle.agreement, scope: draw.item}
+      - reward:
+          id: pay
+          amount: >
+            params.per_unit
+            * (counters.gold_seen == 0 ? 1.0
+               : counters.gold_correct * 1.0 / counters.gold_seen)
+          pool: params.pool
+
+  - id: audit
+    entry:
+      trigger: cron
+      schedule: weekly
+      over: {resource: item, where: "item.closed", sample: params.audit_rate}
+      cursor: engine
+    nodes:
+      - assess:
+          id: recheck
+          kind: metric
+          value: "aggregates.agreement.inputs.filter(i, i.value != aggregates.agreement.verdict)"
+      - reward:
+          id: clawback
+          to: recheck.value
+          amount: "-params.per_unit"
+          rule_key: clawback
+          pool: params.pool

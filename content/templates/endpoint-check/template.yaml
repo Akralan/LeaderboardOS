@@ -1,0 +1,153 @@
+# Endpoint validation as a template (interpreter J5).
+#
+# Retired by attrition, not by handover: the hand-written flow
+# (content/flows/endpoint-validation) keeps serving the challenges that exist,
+# and this template serves new ones under its own flow key and ledger keys.
+# No data moves between them.
+#
+# Reconciled with the hand-written flow, which wins wherever the conformance
+# suite §6 diverged:
+# - params carry the flow's names: cp_per_validation, required_validations
+#   and reviewer_qualification (defaulted by the distribution);
+# - reviewers hold the qualification; an admin or a manager does not review
+#   in their place, but exposes targets;
+# - a case is claimed by calling the endpoint with it: the probe runs first,
+#   and an unreachable endpoint refuses the claim (502) without holding it;
+# - a reviewer never validates their own submission, nor claims a case they
+#   wrote (403);
+# - the observation comes before the reveal, the reveal before the verdict;
+# - at quorum the majority side is paid, earliest first, clamped to the pool;
+#   late verdicts are recorded without pay;
+# - case files and endpoint responses are kept 12 months after close.
+#
+# claim, file, options, progress, overview and export are not written here:
+# the compiler generates them (design note, trade-off 10).
+
+format: leaderboardos/1
+
+template:
+  id: endpoint-check
+  version: 1.0.0
+  name: Validation
+  summary: >
+    Qualified reviewers verify deployed submissions from a source challenge
+    against peer-authored ground-truth cases, under quorum.
+
+params:
+  pool:                   {type: points, mutable: false}
+  cp_per_validation:      {type: points, check: "value >= 0", mutable: false}
+  required_validations:   {type: int, check: "value >= 1 && value % 2 == 1", mutable: false}
+  source_challenge:       {type: challenge_ref, mutable: false}
+  reviewer_qualification: {type: role, mutable: false}
+
+requires: {core: 1}
+
+presentation:
+  icon: shield
+  long_label: Endpoint validation
+  brief_required: false
+  public: false
+  contribution: {type: endpoint_check, title: Validations}
+
+resources:
+  target:
+    fields:
+      contribution: {type: link, from: params.source_challenge, deliverable: endpoint, unique: true}
+      endpoint_url: {type: url, visibility: [admin, "role(params.reviewer_qualification)"]}
+    created_by: [admin.create_target]
+    closure: {by: aggregate, verdict: [works, broken], permanent: true}
+
+  reference_case:
+    fields:
+      input:           {type: file, visibility: [author, admin], retention: {days_after_close: 365}}
+      expected_output: {type: file, visibility: [], retention: {days_after_close: 365}}
+    created_by: [author.create_case]
+    cardinality: {exactly: params.required_validations}
+    claim:
+      mode: unique_per
+      dimensions: [self, target]
+
+lifecycle:
+  states: standard
+  aggregates:
+    - id: quorum
+      over: target
+      per_participation: 1
+      resolve:
+        when:    "count(inputs) == params.required_validations"
+        verdict: "majority(inputs.map(i, i.verdict))"
+        then:
+          - transition: {resource: target, to: closed}
+          - reward:
+              to:       "inputs.filter(i, i.verdict == verdict)"
+              amount:   params.cp_per_validation
+              pool:     params.pool
+              order:    commit_time
+              clamp:    pool
+              rule_key: endpoint_check
+      state_visibility:
+        count: everyone
+        split: admin
+
+lanes:
+  - id: admin
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: expose
+          fields:
+            contribution: {type: link, from: params.source_challenge, deliverable: endpoint}
+            endpoint_url: {type: url}
+      - act: {id: create_target, create: target, from: expose}
+
+  - id: author
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_qualification}
+    nodes:
+      - collect:
+          id: submit_case
+          fields:
+            input:           {type: file}
+            expected_output: {type: file}
+      - act: {id: create_case, create: reference_case, from: submit_case}
+
+  - id: reviewer
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_qualification}
+    nodes:
+      - collect:
+          id: pick
+          fields:
+            target: {type: "ref(target)", where: "target.open"}
+            case:   {type: "ref(reference_case)"}
+      - gate:
+          id: eligibility
+          refuse: 403
+          all:
+            - "pick.case.author != participation.user"
+            - "pick.target.contribution.author != participation.user"
+      - act:
+          id: probe
+          kind: observer
+          claim: {resource: pick.case, scope: {target: pick.target}}
+          capability: http_proxy
+          send:  pick.case.input
+          to:    pick.target.endpoint_url
+          retention_days: "365"
+          store: response
+      - collect:
+          id: observation
+          fields: {text: {type: string, check: "size(value.trim()) > 0"}}
+      - act:
+          id: reveal
+          kind: grant
+          grant: {field: pick.case.expected_output, to: participation}
+      - assess:
+          id: verdict
+          kind: human
+          fields:
+            verdict:     {type: "enum(works, broken)"}
+            description: {type: string, check: "size(value.trim()) > 0"}
+          emit: {to: lifecycle.quorum, scope: pick.target}

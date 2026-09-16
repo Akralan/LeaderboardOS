@@ -5,7 +5,7 @@
 This is a monorepo managed with npm workspaces. The code is split by **nature**, not by feature (challenge 020):
 
 - **`packages/`** — the **core**: identity, structure, economy, capabilities and the registries. It knows no flow, connector or module by name.
-- **`content/`** — **installed content**: challenge flows, the kits they share, extensions, connectors, bundle sources, workspace providers and grid seeds.
+- **`content/`** — **installed content**: challenge flows (hand-written, or written as `leaderboardos/1` templates compiled by the interpreter), the kits they share, extensions, connectors, bundle sources, workspace providers and grid seeds.
 - **`modules/`** — **product modules** an admin can switch on and off: meetings, onboarding, digest, sandbox.
 - **`apps/leaderboard-client/`** — the **shell** (Next.js pages, routes, UI) and the **distribution** (`src/distribution/`), the manifest that assembles core, content and modules for MyTwin.
 
@@ -15,10 +15,12 @@ leaderboard/
 │   └── leaderboard-client/        ← Next.js app (the only deployed app)
 │       └── src/distribution/      ← composition root: what MyTwin installs
 ├── packages/                      ← CORE
-│   ├── registry/                  ← PlatformRegistry (flows, extensions, kits, modules, events, quests…)
+│   ├── registry/                  ← PlatformRegistry (flows, template versions, extensions, kits, modules, events, quests…)
+│   ├── interpreter/               ← leaderboardos/1 templates: validate (salvage parse), describe, compile to FlowDefinition
 │   ├── capabilities/              ← evaluate, bundle, board, groups, qualifications, pool/economy,
 │   │                                 challenge actions + hooks, cron, events, modules, crypto,
-│   │                                 credentials, identity (Google login), http-proxy (SSRF guard)
+│   │                                 credentials, identity (Google login), http-proxy (SSRF guard),
+│   │                                 resources, blobs, templates (database templates)
 │   ├── config/                    ← env validation + credential getters
 │   ├── database-service/          ← Drizzle schema + repositories
 │   ├── evaluator/                 ← OpenAI scoring agent + grid registry
@@ -28,8 +30,10 @@ leaderboard/
 │   ├── sync-meeting-agent/        ← not yet sorted: meeting AI analysis
 │   └── slack-signal-agent/        ← not yet sorted: Slack signal detection
 ├── content/
-│   ├── flows/                     ← code, ml, endpoint-validation, journey-validation
-│   ├── kits/validation/           ← shared by the two validation flows
+│   ├── flows/                     ← code, ml, endpoint-validation (retired), journey-validation,
+│   │                                 data-annotation (not installed: equivalence reference)
+│   ├── templates/                 ← data-annotation, endpoint-check (template.yaml + generated template.source.ts)
+│   ├── kits/validation/           ← shared by the hand-written validation flows
 │   ├── extensions/                ← slack-signals (all flows), compute (+ Scaleway client, ML)
 │   ├── connectors/                ← github, kaggle, slack
 │   ├── integrations/openai/
@@ -39,7 +43,7 @@ leaderboard/
 └── modules/                       ← meetings, onboarding, digest, sandbox
 ```
 
-To add a challenge flow without touching the core, see [`writing-a-flow.md`](./writing-a-flow.md).
+To add a challenge flow without touching the core, see [`writing-a-flow.md`](./writing-a-flow.md) — as TypeScript, as a template file, or as a template published in the database from the editor API.
 
 ## Import boundaries
 
@@ -59,6 +63,8 @@ To add a challenge flow without touching the core, see [`writing-a-flow.md`](./w
 
 The Next.js app is the single entry point for both the UI and the server-side logic. There is no separate API server. At startup, `src/instrumentation.ts` installs the distribution (`distribution/mytwin.server.ts`), which fills the core registries; the core then reads **what is installed** rather than branching on `challenges.type`.
 
+Templates published in the database join the registry beside the distribution. Every instance compiles **all published versions at boot**, so the registry stays synchronous for its readers (flow config, deliverables, hooks, pool rule keys, cron jobs…). A version published after an instance booted is caught up **on demand** — the dispatcher loads the version a challenge references (`ensureFlowFor`) — and **at the cron tick**, before the jobs are iterated. A version that no longer compiles never fails the boot: it is left out with a structured warning and its challenges answer 503. A published version is immutable in the database, so any instance may load it at any time and be right; the design is in `docs/input/templates-in-db-design-note.md`.
+
 ```mermaid
 flowchart LR
   Browser -->|HTTP| Shell["leaderboard-client\n(pages + route handlers)"]
@@ -74,11 +80,12 @@ flowchart LR
 
 | Contract | Declared by | Read through |
 |----------|-------------|--------------|
-| Flow (`FlowDefinition`: descriptor, `flow_config` schema, rules, rule keys, contribution types, deliverables, hooks, actions, events, quests, proposable) | `content/flows/*` | `PlatformRegistry` |
+| Flow (`FlowDefinition`: descriptor, `flow_config` schema, rules, rule keys, contribution types, deliverables, hooks, actions, events, quests, proposable, retired) | `content/flows/*` | `PlatformRegistry` |
+| Template flow (`template.yaml`, compiled into a `FlowDefinition` with generated reads) | `content/templates/*` (file, installed like a flow) or `template_versions` (published from the editor) | `PlatformRegistry` — `flowFor(challenge)` resolves the version |
 | Extension (compatible flows, actions, hooks) | `content/extensions/*` | `PlatformRegistry` |
 | Module (settings, jobs, events, subscriptions, `questRecorder`, `cpSource`) | `modules/*` | `PlatformRegistry` + capability `modules` |
 | Connector, integration, bundle source, provider, grid | `content/*` | their own core registry |
-| Client slots (tabs, form sections, rules view, hero stat, activity) | `distribution/mytwin.client.tsx`, `mytwin.forms.tsx`, `mytwin.activity.tsx` | `lib/flowSlots.ts`, `lib/flowFormSlots.ts` |
+| Client slots (tabs, form sections, rules view, hero stat, activity) | `distribution/mytwin.client.tsx`, `mytwin.forms.tsx`, `mytwin.activity.tsx`; a type absent from these tables falls back to the generated UI of its template, never another flow's screens | `lib/flowSlots.ts`, `lib/flowFormSlots.ts` |
 | Module slots (challenge section, admin nav and tab, public nav) | `distribution/mytwin.modules.tsx` | `lib/moduleSlots.ts` |
 
 ### Generic routes
@@ -88,7 +95,8 @@ flowchart LR
 | `/api/challenges/[id]/flow/[...action]` | a flow action; each action declares its access (`roles`, `manager`, `member`, `qualification`) and the core dispatcher (`packages/capabilities/challenge-actions.ts`) enforces it |
 | `/api/challenges/[id]/ext/[key]/[...action]` | same, for an extension attached to the challenge's flow |
 | `/api/integrations`, `/api/integrations/[key]/{connection,status,authorize,callback,extras/[action]}` | admin connections, secrets in `integration_credentials` (capabilities `crypto` + `credentials`) |
-| `/api/cron/tick` | the only scheduled entry point: runs the due jobs of the core, flows, extensions and enabled modules (`cron_runs`) |
+| `/api/cron/tick` | the only scheduled entry point: loads newly published template versions, then runs the due jobs of the core, flows, templates, extensions and enabled modules (`cron_runs`) |
+| `/api/templates`, `/api/templates/[key]/{draft,validate,publish,describe}` | the editor API for templates in the database — library, drafts with diagnostics, publication, serializable surface (see [`api.md`](./api.md#templates)) |
 | `/api/modules`, `/api/modules/[key]` | module list and state (public); settings and toggle (admin) |
 | `/api/events/ui` | the few events only the browser sees (`ui.*`), written to the outbox under the session's user |
 

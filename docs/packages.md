@@ -14,8 +14,11 @@ Key responsibilities:
 - Implements all API endpoints under `src/app/api/`, including the generic flow/extension action routes, `/api/integrations/*`, `/api/cron/tick`, `/api/modules` and `/api/events/ui`
 - Handles authentication (JWT cookies, route protection in `src/proxy.ts`)
 - **`src/distribution/`** — the composition root for MyTwin:
-  - `mytwin.platform.ts` — flows, extensions, kits and modules installed
-  - `mytwin.server.ts` — connectors, integrations, bundle sources, providers and grids; installed by `src/instrumentation.ts`
+  - `mytwin.platform.ts` — flows (hand-written and compiled from `content/templates/`, `endpoint-validation` retired), extensions, kits and modules installed
+  - `mytwin.server.ts` — connectors, integrations, bundle sources, providers and grids; installed by `src/instrumentation.ts`, which then loads the template versions published in the database (`loadDatabaseTemplates`) and checks the file templates for drift
+  - `mytwin.templates.ts` — the text of the file templates, read-only in the editor's library
+  - `client/generated.tsx` — the generated slots of a template, and `describedSlots`: the slots of a type absent from the client tables (a database template), built from its served description
+  - `forms/template.ts`, `forms/template-fields.tsx` — the creation form section of a database template, generated from its param declarations
   - `mytwin.client.tsx`, `mytwin.forms.tsx`, `mytwin.activity.tsx`, `mytwin.integrations.tsx` — client slots per flow and connector (`client/`, `forms/`, `activity/`)
   - `mytwin.modules.tsx`, `mytwin.proxy.ts` — module slots and module route rules (`modules/`)
 
@@ -27,13 +30,17 @@ Key responsibilities:
 
 `PlatformRegistry` (`platform.ts`): flows, extensions, kits, modules, qualifications, rule keys, contribution types, jobs, events, subscriptions, quests, evaluation handlers and CP sources. Installation fails on a duplicate key or on a subscription or quest bound to an undeclared event. Also holds the architecture, empty-distribution and example-flow tests.
 
+Beside the distribution it holds the **template versions published in the database**, indexed by `(key, version)` (`installTemplateVersion`, `templateVersionConflict` for a dry run). `flowFor(challenge)` is the canonical resolution — a challenge with a `template_version` gets exactly that compiled version, one without gets its file flow; `flow(key)` and `flows()` take the latest published version of a database template. Versions of one template share their ledger keys, and a job several versions declare stays one job that runs them all. A flow may be `retired`: installed, serving its challenges, refused for new ones. `flows.ts` is the flow catalog; its `unknown` option describes a type the client does not know (a database template).
+
 ### `packages/capabilities`
 
 What flows, extensions and modules build on:
 - **`evaluation.ts`** — `evaluate({ bundle, gridSlug, subject })`, runs and their retry; `bundle.ts` prepares and cleans the snapshot
 - **`challenge-actions.ts`** / **`challenge-hooks.ts`** — the action dispatcher with declared access, and the `onCreate` / `onJoin` / `onGroupJoin` / `onClose` / `onDelete` hooks
 - **`board.ts`**, **`groups.ts`**, **`qualifications.ts`** — personal task board, group policy, user qualifications
-- **`resources.ts`** — claimable work units: import, `draw` bounded by `k` with TTL and one live claim per person, `consume`, `release`, `close` (`resource_instances`, `resource_claims` — see [`data-annotation.md`](./data-annotation.md))
+- **`resources.ts`** — claimable work units: import, `draw` bounded by `k` with TTL and one live claim per person, `claimScoped` (a designated instance, unique per scope, exclusive or per person), the claim `context` a multi-step lane keeps, field grants (`grant`, `grantsFor`), `heldInScope`, `consume`, `release`, `close` (`resource_instances`, `resource_claims`, `resource_field_grants` — see [`data-annotation.md`](./data-annotation.md) and [`database.md`](./database.md#resources))
+- **`blobs.ts`** — files: `store` (up to 25 MB, returns a reference `{blob_id, content_type, filename, size}`), `get`, `delete`, `purgeExpired` (retention in days after the challenge closes, run by the core job `core.blobs.retention`); Postgres `bytea` in v1
+- **`templates.ts`** — templates in the database: `loadPublished` (boot), `ensureFlowFor` (dispatch catch-up, `unservable` → 503), `refreshPublished` (cron tick), `create`, `saveDraft`, `publish` (strict validation, version read from the YAML, dry-run conflict check), `library`, `detail`, `seedYaml`, `describeDraft`, `checkSystemDrift`, and `diagnose` — the one diagnostic list shared by draft saves and publication refusals
 - **`pool.ts`**, **`economy.ts`**, **`rewards.ts`**, **`deliverables.ts`**, **`flow-config.ts`**, **`grid-seeds.ts`**
 - **`cron.ts`** — the job registry behind `/api/cron/tick` (`cron_runs`)
 - **`events.ts`** — outbox: `emit`, `distribute`, `purge`
@@ -42,6 +49,28 @@ What flows, extensions and modules build on:
 - **`identity/google-auth.ts`** — Google OAuth login
 - **`http-proxy/`** — `ssrf-guard.ts` (`assertPublicHttpUrl`, guarded DNS lookup) and `endpoint-proxy.ts` (the proxied call to a contributor's endpoint)
 - **`testing/action-context.ts`** — a fake action context for handler tests
+
+### `packages/interpreter`
+
+Reads, validates and compiles `leaderboardos/1` challenge templates (`docs/input/interpreter-design-note.md`, milestones J1 to J5; templates in the database: `docs/input/templates-in-db-design-note.md`):
+- **`expr/`** — the CEL-syntax expression parser, its static type-checker and its evaluator
+- **`compile/`** — `compileTemplate(report, {runtime, published?})` turns a valid template with no v1 gap into a `FlowDefinition`: one `POST flow/<lane>[/<gesture>]` action per lane segment (`segments.ts`), a job per cron lane, an `onClose` hook for aggregates resolved at close, immutable params as `flow_config`, mutable params as `reward_rules`. `published: {version}` compiles a database template: its declared rule keys and contribution type are prefixed `<key>.`, and its jobs only run the challenges of that version.
+  - `engine.ts` runs the nodes: draws and designated claims (the observer runs before the claim is taken), grants (the reveal), aggregates and their deferred pay, reverse rewards, and what a claim keeps between steps — persisted from typing, scalars and references only.
+  - `reads.ts` generates `release`, `progress`, `overview`, `export`, `<lane>/claim`, `<lane>/file`, `file` and `<lane>/options`; each read takes its lane's access.
+  - `values.ts` hydrates resources and projects them by declared visibility **or** grant.
+  - `runtime.ts` is the port to the `resources`, `blobs` and contributions capabilities, the ledger, grid evaluation and observers (`http_proxy` over `capabilities/http-proxy`); `testing/memory-runtime.ts` is its in-memory double
+- **`format/`** — the document schema (zod) and the declared-type syntax
+- **`validate/`** — the passes: format, references, types, graph shape, economy, claims; plus the features v1 does not compile yet (`SupportGap`). `format.ts` is a **salvage parse**: sections, entries, lanes and nodes are validated one by one, what fails is left out with its diagnostic and a `broken` marker the analysis types `dyn` — so a holey draft still gets its reference, type and shape diagnostics on what stands, without cascades
+- **`catalog.ts`** — the capabilities a template may name, with their arguments, outputs and create-or-get flag
+- **`conformance/`** — the eleven templates of the conformance suite 0.2 in canonical form (`CANONICAL.md` lists the rewrites)
+
+`npm run templates:check` validates the corpus and `content/templates/*/template.yaml`.
+
+`describe.ts` is the client-safe entry, nothing executed: a template's descriptor, its config and rules schemas, and its **surface** — lanes, their steps (which one opens or resumes a claim), typed gesture fields, the qualification a lane requires, resource types, and the param declarations with their binding (`pool`, `source`, `config`, `rules`). The surface is serializable: `/api/templates/:key/describe` serves it, and the generated UI and the generic creation form are built from it. `npm run templates:build` writes each template's text into `template.source.ts` beside it, so the server, the client, vitest and tsx import it as a module; `templates:check` fails when that module is stale.
+
+`content/templates/data-annotation/template.yaml` is the data-annotation flow as a template, and the flow the MyTwin distribution installs (the hand-written `content/flows/data-annotation` stays as the reference of the equivalence tests); `equivalence.test.ts` beside it plays one seeded scenario against the hand-written flow and the compiled template and requires the same draws, pay, resource states and ledger rows, and `equivalence.integration.test.ts` does it on Postgres, including a campaign handed over mid-flight.
+
+`content/templates/endpoint-check/template.yaml` is endpoint validation as a template: it serves every new ML validation challenge, under its own keys, while the hand-written `endpoint-validation` is retired by attrition (see [`validation-challenges.md`](./validation-challenges.md)). Its screens are generated (`distribution/client/generated.tsx`, `src/components/generated/`).
 
 ### `packages/config`
 

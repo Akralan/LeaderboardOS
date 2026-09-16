@@ -89,6 +89,14 @@ export const challenges = pgTable("challenges", {
   // qui intéresse le digest est la dernière fermeture, pas la première.
   // 'archived' ne la pose pas — archiver retire des listings, ça ne termine pas.
   closed_at: timestamp("closed_at"),
+  // Un challenge servi par un template en base : la version publiée qu'il
+  // référence, jamais copiée. NULL pour les flows fichiers (templates système,
+  // flows écrits à la main). `template_status` vaut toujours 'published' à côté
+  // d'une version : il n'existe que pour la clé étrangère composite
+  // (type, template_version, template_status) → template_versions, qui interdit
+  // par la base de référencer un brouillon (scripts/db-apply-schema.ts).
+  template_version: varchar("template_version", { length: 32 }),
+  template_status: varchar("template_status", { length: 16 }),
 }, (table) => ({
   projectIdIdx: index("idx_challenges_project_id").on(table.project_id),
   statusIdx: index("idx_challenges_status").on(table.status),
@@ -1410,11 +1418,111 @@ export const resource_claims = pgTable("resource_claims", {
   expires_at: timestamp("expires_at"),
   consumed_at: timestamp("consumed_at"),
   released_at: timestamp("released_at"),
+  /**
+   * Les dimensions d'un `unique_per` au-delà de la ressource et de la personne
+   * (`target=<uuid>`), triées. Vide pour un tirage : l'unicité reste alors
+   * celle d'avant, une réclamation vivante par personne et par ressource.
+   */
+  scope_key: varchar("scope_key", { length: 255 }).notNull().default(""),
+  /** L'unicité ne compte pas la personne : une seule réclamation vivante par (ressource, scope). */
+  scope_exclusive: boolean("scope_exclusive").notNull().default(false),
+  /**
+   * Ce qu'une lane à plusieurs gestes garde entre deux appels : les champs
+   * collectés et les sorties que les segments suivants lisent. Scalaires et
+   * références seulement — jamais d'octets (un fichier est une référence de blob).
+   */
+  context: jsonb("context").$type<Record<string, unknown>>(),
 }, (table) => ({
   resourceIdx: index("idx_resource_claims_resource_id").on(table.resource_id),
   userIdx: index("idx_resource_claims_challenge_user").on(table.challenge_id, table.user_id),
-  liveIdx: uniqueIndex("idx_resource_claims_live").on(table.resource_id, table.user_id).where(sql`released_at IS NULL`),
+  liveIdx: uniqueIndex("idx_resource_claims_live_scoped")
+    .on(table.resource_id, table.user_id, table.scope_key)
+    .where(sql`released_at IS NULL`),
+  scopeIdx: uniqueIndex("idx_resource_claims_scope")
+    .on(table.resource_id, table.scope_key)
+    .where(sql`released_at IS NULL AND scope_exclusive`),
 }));
+
+/**
+ * Un champ de ressource rendu lisible à une participation, par un nœud
+ * (`grant`) : le reveal. La projection d'un champ lit « sa politique, ou un
+ * grant pour ce lecteur ». `participation` est le compte en v1 ; le nom tient
+ * le jour où une participation de groupe s'en distingue.
+ */
+export const resource_field_grants = pgTable("resource_field_grants", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  resource_id: uuid("resource_id").references(() => resource_instances.uuid, { onDelete: "cascade" }).notNull(),
+  field: varchar("field", { length: 64 }).notNull(),
+  participation: uuid("participation").references(() => users.uuid, { onDelete: "cascade" }).notNull(),
+  granted_by: varchar("granted_by", { length: 128 }).notNull(),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueGrant: uniqueIndex("idx_resource_field_grants_unique").on(table.resource_id, table.field, table.participation),
+}));
+
+// --- CAPACITÉ BLOBS (challenge 021, J5) ---
+
+/**
+ * Des fichiers opaques, rangés hors des tables métier : ce qu'un flow référence
+ * par `uuid`. `bytes` passe à NULL à la purge, `purged_at` la date ; les
+ * métadonnées restent. La rétention se compte après la fermeture du challenge.
+ */
+export const blobs = pgTable("blobs", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  challenge_id: uuid("challenge_id").references(() => challenges.uuid, { onDelete: "cascade" }),
+  content_type: varchar("content_type", { length: 255 }).notNull(),
+  filename: varchar("filename", { length: 255 }),
+  size: integer("size").notNull(),
+  bytes: bytea("bytes"),
+  retention_days: integer("retention_days"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  purged_at: timestamp("purged_at"),
+}, (table) => ({
+  challengeIdx: index("idx_blobs_challenge_id").on(table.challenge_id),
+}));
+
+// --- TEMPLATES EN BASE (challenge 021, T1) ---
+// Le texte YAML fait foi ; le compilé se dérive en mémoire. Une version publiée
+// est immuable : un trigger refuse toute mise à jour ou suppression d'une ligne
+// publiée, et impose qu'une publication soit strictement supérieure à la
+// précédente (semver comparé en entiers). Un brouillon n'a pas de version : elle
+// est lue dans le YAML à la publication. Un seul brouillon par template.
+// `created_by` et `published_by` sont une trace d'audit sans clé étrangère : un
+// ON DELETE SET NULL réécrirait une ligne publiée.
+export const templates = pgTable("templates", {
+  key: varchar("key", { length: 50 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  created_by: uuid("created_by"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  archived_at: timestamp("archived_at"),
+});
+
+export const template_versions = pgTable("template_versions", {
+  uuid: uuid("uuid").primaryKey().defaultRandom(),
+  template_key: varchar("template_key", { length: 50 }).notNull().references(() => templates.key),
+  status: varchar("status", { length: 16 }).notNull().default("draft"),
+  version: varchar("version", { length: 32 }),
+  yaml: text("yaml").notNull(),
+  checksum: varchar("checksum", { length: 64 }).notNull(),
+  created_by: uuid("created_by"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+  published_at: timestamp("published_at"),
+  published_by: uuid("published_by"),
+}, (table) => ({
+  versionIdx: uniqueIndex("idx_template_versions_version").on(table.template_key, table.version),
+  referenceIdx: uniqueIndex("idx_template_versions_reference").on(table.template_key, table.version, table.status),
+  draftIdx: uniqueIndex("idx_template_versions_draft").on(table.template_key).where(sql`status = 'draft'`),
+}));
+
+// L'empreinte de chaque template système au dernier démarrage : un changement
+// de fichier entre deux déploiements lève une alerte (les challenges en cours
+// suivent le déploiement — arbitrage 7 de la note).
+export const system_template_checksums = pgTable("system_template_checksums", {
+  key: varchar("key", { length: 50 }).primaryKey(),
+  checksum: varchar("checksum", { length: 64 }).notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+});
 
 // --- DATABASE CLIENT ---
 

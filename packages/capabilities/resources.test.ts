@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  scopeKeyOf,
   ClaimNotConsumableError,
   claimState,
   resources,
@@ -60,6 +61,15 @@ class MemoryStore {
           }
         }
       },
+      async releaseExpiredOn(resourceId, scopeKey, userId) {
+        await self.tick();
+        for (const c of self.claims) {
+          if (c.resource_id === resourceId && c.scope_key === scopeKey && (userId === null || c.user_id === userId)
+            && !c.consumed_at && !c.released_at && c.expires_at && c.expires_at.getTime() < self.now.getTime()) {
+            c.released_at = c.expires_at;
+          }
+        }
+      },
       async nextCandidate(q) {
         // Le filtre se lit sur l'instantané de la requête ; le verrou se prend
         // après. Entre les deux, une autre transaction peut valider sa
@@ -84,13 +94,16 @@ class MemoryStore {
       },
       async insertClaim(claim) {
         await self.tick();
-        if (self.claims.some((c) => c.resource_id === claim.resourceId && c.user_id === claim.userId && !c.released_at)) {
-          return null;
-        }
+        const scopeKey = claim.scopeKey ?? "";
+        // Les deux index uniques partiels : (ressource, personne, scope), et (ressource, scope) quand il est exclusif.
+        const live = self.claims.filter((c) => c.resource_id === claim.resourceId && !c.released_at);
+        if (live.some((c) => c.user_id === claim.userId && c.scope_key === scopeKey)) return null;
+        if (claim.scopeExclusive && live.some((c) => c.scope_exclusive && c.scope_key === scopeKey)) return null;
         const row: ResourceClaim = {
           uuid: self.id("claim"), resource_id: claim.resourceId, challenge_id: claim.challengeId, user_id: claim.userId,
           result: null, claimed_at: self.now, consumed_at: null, released_at: null,
           expires_at: claim.ttlHours === undefined ? null : new Date(self.now.getTime() + claim.ttlHours * 3600_000),
+          scope_key: scopeKey, scope_exclusive: claim.scopeExclusive ?? false, context: null,
         };
         self.claims.push(row);
         return row;
@@ -121,6 +134,14 @@ class MemoryStore {
       },
       async findClaim(claimId) {
         return self.claims.find((c) => c.uuid === claimId) ?? null;
+      },
+      async liveScopeClaims(resourceIds: readonly string[], scopeKey: string) {
+        return self.claims
+          .filter((c) => resourceIds.includes(c.resource_id) && c.scope_key === scopeKey && !c.released_at && (c.consumed_at !== null || self.isActive(c)))
+          .map((c) => ({ resource_id: c.resource_id, user_id: c.user_id, scope_exclusive: c.scope_exclusive }));
+      },
+      async findResource(resourceId) {
+        return self.instances.find((r) => r.uuid === resourceId) ?? null;
       },
     } as unknown as ResourceStore;
   }
@@ -300,5 +321,52 @@ describe("claimState", () => {
     [{ consumed_at: null, released_at: null, expires_at: null }, "active"],
   ])("%o is %s", (claim, state) => {
     expect(claimState(claim, now)).toBe(state);
+  });
+});
+
+describe("resources.claimScoped — unique_per au-delà de la personne", () => {
+  it("builds a stable scope key from sorted dimensions", () => {
+    expect(scopeKeyOf({ target: "t1", step: "s2" })).toBe("step=s2&target=t1");
+  });
+
+  it("gives one live claim per (case, target) to everyone when the scope is exclusive, and lets a case serve another target", async () => {
+    const mem = new MemoryStore();
+    const [caseId] = mem.add("reference_case", 1);
+    const res = resources(mem.store());
+    const on = (target: string, user: string) => res.claimScoped("c1", user, { resourceId: caseId, scope: { target }, exclusive: true });
+
+    const results = await Promise.all(["u1", "u2", "u3", "u4"].map((user) => on("t1", user)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const winner = ["u1", "u2", "u3", "u4"][results.findIndex(Boolean)];
+    // Le même cas, pour la même personne, sur un autre target : un autre scope.
+    expect(await on("t2", winner)).not.toBeNull();
+  });
+
+  it("keeps the person in the uniqueness when the scope is not exclusive", async () => {
+    const mem = new MemoryStore();
+    const [stepId] = mem.add("journey_step", 1);
+    const res = resources(mem.store());
+    const on = (user: string) => res.claimScoped("c1", user, { resourceId: stepId, scope: { target: "t1" }, exclusive: false });
+    expect(await on("u1")).not.toBeNull();
+    expect(await on("u1")).toBeNull();
+    expect(await on("u2")).not.toBeNull();
+  });
+
+  it("frees an expired combination for the next claimant", async () => {
+    const mem = new MemoryStore();
+    const [caseId] = mem.add("reference_case", 1);
+    const res = resources(mem.store());
+    const first = await res.claimScoped("c1", "u1", { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 });
+    expect(await res.claimScoped("c1", "u2", { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 })).toBeNull();
+    mem.now = new Date(mem.now.getTime() + 2 * 3600_000);
+    expect(await res.claimScoped("c1", "u2", { resourceId: caseId, scope: { target: "t1" }, exclusive: true, ttlHours: 1 })).not.toBeNull();
+    expect(first).not.toBeNull();
+  });
+
+  it("refuses a resource of another challenge", async () => {
+    const mem = new MemoryStore();
+    const [caseId] = mem.add("reference_case", 1);
+    mem.instances[0].challenge_id = "c2";
+    expect(await resources(mem.store()).claimScoped("c1", "u1", { resourceId: caseId, scope: { target: "t1" }, exclusive: true })).toBeNull();
   });
 });

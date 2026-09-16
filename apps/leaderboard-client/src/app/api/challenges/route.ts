@@ -13,6 +13,7 @@ import {
   prepareFlowConfig,
 } from '../../../../../../packages/capabilities/flow-config';
 import { flowsValidating, requiresDeliverable } from '../../../../../../packages/capabilities/deliverables';
+import { PlatformRegistry } from '../../../../../../packages/registry/platform';
 
 /**
  * Compatibilité : un tiroir chargé avant le lot L4c du challenge 020 envoie
@@ -111,19 +112,32 @@ export async function POST(request: NextRequest) {
     // livrables du challenge source (un endpoint, une application déployée).
     // Un flow explicite reste accepté s'il sait éprouver ce source. Le quorum
     // et le forfait sont vérifiés par le schéma du flow retenu.
+    // Un template publié en base depuis le démarrage de cette instance : rattrapé avant de juger le type.
+    if (validated.type !== FORM_VALIDATION_TYPE && !PlatformRegistry.flow(validated.type)) {
+      const { templates } = await import('../../../../../../packages/capabilities/templates');
+      await templates().refreshPublished().catch((error) => console.error('[challenges] templates refresh failed:', error));
+    }
+    // Un flow retiré sert ses challenges, il n'en reçoit plus de nouveaux.
+    if (PlatformRegistry.flow(validated.type)?.retired) {
+      return NextResponse.json({ error: `Flow ${validated.type} no longer accepts new challenges` }, { status: 400 });
+    }
     let flowKey = validated.type;
     if (validated.type === FORM_VALIDATION_TYPE || requiresDeliverable(validated.type)) {
       if (!validated.source_challenge_id) {
         return NextResponse.json({ error: 'source_challenge_id is required for validation challenges' }, { status: 400 });
       }
-      if (!validated.cp_per_validation) {
+      // Un template en base porte ses propres paramètres, que son schéma valide : le forfait à plat est celui des flows de validation fichiers.
+      const fromDatabase = !!PlatformRegistry.latestTemplateVersion(validated.type);
+      if (!fromDatabase && !validated.cp_per_validation) {
         return NextResponse.json({ error: 'cp_per_validation is required for validation challenges' }, { status: 400 });
       }
 
       const source = await challengeRepo.findById(validated.source_challenge_id);
       const candidates = source ? flowsValidating(source.type) : [];
+      // Le formulaire historique `validation` ne choisit qu'entre les flows fichiers ; un template en base se nomme explicitement.
+      const fileCandidates = candidates.filter((candidate) => !PlatformRegistry.latestTemplateVersion(candidate));
       const resolved = validated.type === FORM_VALIDATION_TYPE
-        ? (candidates.length === 1 ? candidates[0] : null)
+        ? (fileCandidates.length === 1 ? fileCandidates[0] : null)
         : (candidates.includes(validated.type) ? validated.type : null);
       if (!resolved) {
         return NextResponse.json(
@@ -157,6 +171,8 @@ export async function POST(request: NextRequest) {
     // ses défauts, chaque extension attachée valide sa section. Les champs à
     // plat absents (`undefined`) ne masquent pas ceux de `flow_config`.
     const givenExtensions = flow_config?.extensions;
+    // Un template en base : le challenge référence sa dernière version publiée, jamais une copie.
+    const templateVersion = PlatformRegistry.latestTemplateVersion(flowKey) ?? null;
     let storedConfig: ReturnType<typeof prepareFlowConfig>;
     try {
       storedConfig = prepareFlowConfig(flowKey, {
@@ -168,7 +184,7 @@ export async function POST(request: NextRequest) {
           ...(givenExtensions && typeof givenExtensions === 'object' && !Array.isArray(givenExtensions) ? givenExtensions : {}),
           compute: { enabled: compute_enabled },
         },
-      });
+      }, templateVersion);
     } catch (error) {
       if (error instanceof FlowConfigError) {
         return NextResponse.json({ error: error.message }, { status: 400 });
@@ -185,7 +201,8 @@ export async function POST(request: NextRequest) {
         end_date: validated.end_date ? new Date(validated.end_date) : null,
         completion: 0,
         reward_rules: rewardRules.rules,
-        source_challenge_id: requiresDeliverable(flowKey) ? source_challenge_id : null,
+        source_challenge_id: requiresDeliverable(flowKey) || templateVersion ? source_challenge_id ?? null : null,
+        template_version: templateVersion,
         ...storedConfig,
       });
     } catch (error) {

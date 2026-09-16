@@ -43,14 +43,39 @@ export type ResourceStore = Pick<
   | "consumedClaims"
   | "listResources"
   | "counts"
+  | "mergeContext"
+  | "liveScopeClaims"
+  | "grantField"
+  | "grantsFor"
 > & {
   inDrawTransaction<T>(run: (tx: DrawTransaction) => Promise<T>): Promise<T>;
 };
 
 export type DrawTransaction = Pick<
   ResourceDrawTransaction,
-  "releaseExpired" | "nextCandidate" | "countTowardK" | "insertClaim"
+  "releaseExpired" | "releaseExpiredOn" | "nextCandidate" | "countTowardK" | "insertClaim"
 >;
+
+/**
+ * Une réclamation sur une ressource désignée, dans un scope : `unique_per`
+ * au-delà de la personne. `scope` donne les autres dimensions
+ * (`{ target: "<uuid>" }`) ; `exclusive` dit si la personne sort de l'unicité
+ * — une seule réclamation vivante par (ressource, scope), tous confondus.
+ */
+export interface ScopedClaimOptions {
+  resourceId: string;
+  scope: Readonly<Record<string, string>>;
+  exclusive: boolean;
+  ttlHours?: number;
+}
+
+/** La clé d'un scope : ses dimensions triées, `target=<uuid>`. Stable, donc indexable. */
+export function scopeKeyOf(scope: Readonly<Record<string, string>>): string {
+  return Object.keys(scope)
+    .sort()
+    .map((dimension) => `${dimension}=${scope[dimension]}`)
+    .join("&");
+}
 
 export interface DrawOptions {
   type: string;
@@ -151,6 +176,34 @@ export function resources(store?: ResourceStore) {
       });
     },
 
+    /**
+     * Réclame une ressource désignée dans un scope, en une transaction :
+     * libérer les réclamations échues de la combinaison, puis insérer. `null`
+     * quand la ressource n'est pas ouverte dans ce challenge, ou quand la
+     * combinaison est déjà tenue — les index uniques partiels tranchent la course.
+     */
+    async claimScoped(challengeId: string, userId: string, options: ScopedClaimOptions): Promise<DrawnResource | null> {
+      const scopeKey = scopeKeyOf(options.scope);
+      if (!scopeKey) throw new Error("[resources] a scoped claim names at least one dimension");
+      const s = await storeOf();
+      const resource = await s.findResource(options.resourceId);
+      if (!resource || resource.challenge_id !== challengeId || resource.state !== "open") return null;
+
+      return s.inDrawTransaction(async (tx) => {
+        await tx.releaseExpiredOn(options.resourceId, scopeKey, options.exclusive ? null : userId);
+        const claim = await tx.insertClaim({
+          resourceId: options.resourceId,
+          challengeId,
+          userId,
+          ttlHours: options.ttlHours,
+          scopeKey,
+          scopeExclusive: options.exclusive,
+        });
+        if (!claim) return null;
+        return { claimId: claim.uuid, resourceId: options.resourceId, payload: resource.payload, expiresAt: claim.expires_at };
+      });
+    },
+
     /** La réclamation active de l'appelant sur ce challenge, s'il en a une. */
     async activeClaim(challengeId: string, userId: string) {
       return (await storeOf()).findActiveClaim(challengeId, userId);
@@ -165,6 +218,39 @@ export function resources(store?: ResourceStore) {
       const claim = await s.findClaim(claimId);
       if (!claim || claim.user_id !== userId) throw new ClaimNotConsumableError("not_found");
       throw new ClaimNotConsumableError(claimState(claim) === "consumed" ? "consumed" : "lapsed");
+    },
+
+    /**
+     * Garde `patch` dans le contexte d'une réclamation active : ce qu'une lane
+     * à plusieurs gestes relit d'un appel à l'autre. `false` si la réclamation
+     * n'est plus active ou n'est pas à l'appelant.
+     */
+    async updateContext(claimId: string, userId: string, patch: Record<string, unknown>): Promise<boolean> {
+      return (await (await storeOf()).mergeContext(claimId, userId, patch)) !== null;
+    },
+
+    /**
+     * Les ressources dont la combinaison (ressource, scope) est déjà tenue pour
+     * l'appelant : par n'importe qui quand le scope est exclusif, par lui sinon.
+     * Ce qu'un picker retire avant qu'un claim ne réponde 409.
+     */
+    async heldInScope(resourceIds: readonly string[], scope: Readonly<Record<string, string>>, userId: string): Promise<Set<string>> {
+      const rows = await (await storeOf()).liveScopeClaims(resourceIds, scopeKeyOf(scope));
+      return new Set(rows.filter((row) => row.scope_exclusive || row.user_id === userId).map((row) => row.resource_id));
+    },
+
+    /** Le reveal : rend `field` lisible à `participation` sur cette ressource. Idempotent. */
+    async grant(resourceId: string, field: string, participation: string, grantedBy: string): Promise<boolean> {
+      return (await storeOf()).grantField(resourceId, field, participation, grantedBy);
+    },
+
+    /** Les champs accordés à `participation`, par ressource : `{ "<uuid>": ["expected_output"] }`. */
+    async grantsFor(resourceIds: readonly string[], participation: string): Promise<Record<string, string[]>> {
+      const grants: Record<string, string[]> = {};
+      for (const row of await (await storeOf()).grantsFor(resourceIds, participation)) {
+        (grants[row.resource_id] ??= []).push(row.field);
+      }
+      return grants;
     },
 
     /** Abandon explicite. `false` si la réclamation n'était pas active ou pas à l'appelant. */

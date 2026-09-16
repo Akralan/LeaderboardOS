@@ -73,6 +73,7 @@ export const challengeSchema = z.object({
   // valide avant l'écriture (capacité `flow-config`).
   reward_rules: z.unknown().nullish(),
   source_challenge_id: z.string().uuid().nullish(),
+  template_version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/).nullish(),
   flow_config: z.record(z.string(), z.unknown()).nullish(),
   flow_config_version: z.number().int().positive().default(1),
   created_at: z.coerce.date(),

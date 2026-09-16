@@ -233,7 +233,7 @@ describe("PlatformRegistry — jobs", () => {
       ["demo.purge", "flow:demo"],
       ["digest.generate", "module:digest"],
     ]);
-    expect(installedJobs().map((j) => j.key)).toEqual(["core.refresh-tokens.cleanup", "core.events.distribute", "core.events.purge", "demo.purge", "digest.generate"]);
+    expect(installedJobs().map((j) => j.key)).toEqual(["core.refresh-tokens.cleanup", "core.blobs.retention", "core.events.distribute", "core.events.purge", "demo.purge", "digest.generate"]);
   });
 
   it("refuses a job key declared twice", () => {

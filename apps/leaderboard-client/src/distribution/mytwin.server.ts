@@ -16,6 +16,8 @@ import { slackConnector } from '../../../../content/connectors/slack';
 import { githubSnapshotSource } from '../../../../content/bundle-sources/github-snapshot';
 import { kaggleArtifactSource } from '../../../../content/bundle-sources/kaggle-artifact';
 import { GitHubBranchProvider } from '../../../../content/workspace-providers/github-branch';
+import { templates } from '../../../../packages/capabilities/templates';
+import { systemTemplateSources } from './mytwin.templates';
 import { platform } from './mytwin.platform';
 
 /**
@@ -66,4 +68,20 @@ export function installServerDistribution(): void {
   ProvisionerRegistry.register(new GitHubBranchProvider());
 
   holder[INSTALLED_KEY] = true;
+}
+
+/**
+ * Après l'installation : les versions publiées des templates en base, toutes
+ * compilées dans cette instance, et l'alerte de dérive des templates système.
+ * Rien ici ne fait échouer le démarrage — une version cassée est écartée, une
+ * base injoignable laisse le rattrapage à la demande faire le travail.
+ */
+export async function loadDatabaseTemplates(): Promise<void> {
+  try {
+    const loaded = await templates().loadPublished();
+    console.log(`[templates] ${loaded.loaded} published version(s) loaded, ${loaded.unservable} unservable`);
+    await templates().checkSystemDrift(systemTemplateSources);
+  } catch (error) {
+    console.error('[templates] Published templates could not be loaded at boot:', error);
+  }
 }

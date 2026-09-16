@@ -33,7 +33,7 @@ export interface ChallengeRewardsReading {
 
 /** L'état du pool, ou `null` pour un challenge dont le flow n'a pas de règles de récompense. */
 export async function readChallengeRewards(challenge: Challenge, ledger: RewardsLedger): Promise<ChallengeRewardsReading | null> {
-  const flow = PlatformRegistry.flow(challenge.type);
+  const flow = PlatformRegistry.flowFor(challenge);
   if (!flow?.rules) return null;
 
   const entries = await ledger.findByChallenge(challenge.uuid);
