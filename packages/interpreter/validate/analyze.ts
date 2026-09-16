@@ -60,6 +60,8 @@ const ENGINE_FIELD_NAMES =["author", "open", "closed", "verdict", "created_at"];
 export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   const issues: TemplateIssue[] = [];
   const gaps: SupportGap[] = [];
+  /** Les champs résolus d'un collect ou d'une évaluation humaine : le compilateur en tire la validation des requêtes. */
+  const nodeFields = new Map<NodeModel, Record<string, Type>>();
   const { shell } = model;
 
   const report = (pass: IssuePass, path: TemplatePath, message: string, extra: Partial<TemplateIssue> = {}) => {
@@ -479,7 +481,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   // ── Lanes ───────────────────────────────────────────────────────────────
   for (const lane of model.lanes) checkLane(lane);
 
-  return { issues, gaps };
+  return { issues, gaps, types: { params: paramTypes, counters: counterTypes, resources: resourceFieldTypes, nodeFields, verdicts: verdictTypes } };
 
   // ────────────────────────────────────────────────────────────────────────
 
@@ -609,7 +611,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     switch (node.family) {
       case "collect":
         interactive(node, ctx, segments);
-        return T.record(collectFieldTypes(node.body.fields, [...node.path, "fields"], scope, node.id));
+        nodeFields.set(node, collectFieldTypes(node.body.fields, [...node.path, "fields"], scope, node.id));
+        return T.record(nodeFields.get(node)!);
 
       case "act":
         return checkAct(node as Extract<NodeModel, { family: "act" }>, scope, ctx, segments);
@@ -653,6 +656,11 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     }
     for (const branch of branches) {
       if (branch.when !== null) hot(branch.when, [...branch.path, "when"]);
+      for (const inner of branch.nodes) {
+        if (inner.family === "collect" || (inner.family === "assess" && inner.body.kind === "human" && inner.body.fields)) {
+          gap("interactive node in a branch", inner.path, "a gesture inside a branch is not compiled in v1; collect before the gate", inner.id);
+        }
+      }
       walk(ctx.lane, branch.nodes, scope, ctx.index, segments);
     }
   }
@@ -688,6 +696,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
     } else {
       // Une instance désignée par une expression.
+      gap("designated claim", [...path, "resource"], "v1 compiles draws only; claiming a designated instance needs scoped claims", node);
       const { type } = expr(claim.resource, scope, [...path, "resource"], node);
       if (type.kind === "resource") resource = type.name;
       else if (type.kind !== "dyn") report("type", [...path, "resource"], `a claim takes a resource, got ${showType(type)}`, { node });
@@ -901,7 +910,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         if (body.fields && body.from) report("shape", path, "a human assessment has fields or from, not both", { node: id });
         if (body.fields) {
           interactive(node, ctx, segments);
-          output = T.record(collectFieldTypes(body.fields, [...path, "fields"], scope, id));
+          nodeFields.set(node, collectFieldTypes(body.fields, [...path, "fields"], scope, id));
+          output = T.record(nodeFields.get(node)!);
         } else if (body.from) {
           const { type } = expr(body.from, scope, [...path, "from"], id);
           const source = ctx.index.get(body.from)?.[0]?.node;

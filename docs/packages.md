@@ -45,8 +45,9 @@ What flows, extensions and modules build on:
 
 ### `packages/interpreter`
 
-Reads and validates `leaderboardos/1` challenge templates (milestone J1 of `docs/input/interpreter-design-note.md`; compiling to a `FlowDefinition` is J2):
-- **`expr/`** — the CEL-syntax expression parser and its static type-checker
+Reads, validates and compiles `leaderboardos/1` challenge templates (milestones J1 and J2 of `docs/input/interpreter-design-note.md`):
+- **`expr/`** — the CEL-syntax expression parser, its static type-checker and its evaluator
+- **`compile/`** — `compileTemplate(report, {runtime})` turns a valid template with no v1 gap into a `FlowDefinition`: one `POST flow/<lane>[/<gesture>]` action per lane segment, a job per cron lane, an `onClose` hook for aggregates resolved at close, immutable params as `flow_config`, mutable params as `reward_rules`. `runtime.ts` is the port to the `resources` capability, the ledger, grid evaluation and observers; `testing/memory-runtime.ts` is its in-memory double
 - **`format/`** — the document schema (zod) and the declared-type syntax
 - **`validate/`** — the passes: format, references, types, graph shape, economy, claims; plus the features v1 does not compile yet (`SupportGap`)
 - **`catalog.ts`** — the capabilities a template may name, with their arguments, outputs and create-or-get flag

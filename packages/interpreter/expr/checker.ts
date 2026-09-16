@@ -201,6 +201,8 @@ export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type
               return fail("type", `'${node.op}' expects numbers, got ${showType(left)} and ${showType(right)}`, node.pos);
             }
             if (left.kind === "dyn" || right.kind === "dyn") return T.dyn;
+            // `/` est une division réelle : l'évaluateur n'a pas d'entiers.
+            if (node.op === "/") return T.number;
             return left.kind === "int" && right.kind === "int" ? T.int : T.number;
           }
         }

@@ -3,6 +3,8 @@ import { DEFAULT_CATALOG, type CapabilityCatalog } from "./catalog.js";
 import { PASS_ORDER, type SupportGap, type TemplateIssue } from "./issues.js";
 import { analyzeTemplate } from "./validate/analyze.js";
 import { validateFormat, type TemplateModel } from "./validate/format.js";
+import type { Type } from "./expr/types.js";
+import type { NodeModel } from "./validate/format.js";
 
 /**
  * L'interpréteur — J1 : lire et valider
@@ -16,6 +18,17 @@ import { validateFormat, type TemplateModel } from "./validate/format.js";
 export { DEFAULT_CATALOG, type CapabilityCatalog } from "./catalog.js";
 export { formatIssue, type SupportGap, type TemplateIssue } from "./issues.js";
 export type { TemplateModel } from "./validate/format.js";
+export { CompileError, compileTemplate, type CompileOptions } from "./compile/compile.js";
+export { defaultRuntime, RuntimeBindingError, type TemplateRuntime } from "./compile/runtime.js";
+
+/** Ce que l'analyse a résolu, pour le compilateur. */
+export interface TemplateTypes {
+  params: Readonly<Record<string, Type>>;
+  counters: Readonly<Record<string, Type>>;
+  resources: ReadonlyMap<string, Readonly<Record<string, Type>>>;
+  nodeFields: ReadonlyMap<NodeModel, Record<string, Type>>;
+  verdicts: ReadonlyMap<string, Type>;
+}
 
 /** La version du core que cette implémentation fournit. */
 export const CORE_VERSION = 1;
@@ -35,6 +48,7 @@ export interface TemplateReport {
   /** Vide : la v1 compile tout ce que le template utilise. */
   gaps: SupportGap[];
   model: TemplateModel | null;
+  types: TemplateTypes | null;
 }
 
 function byPass(a: TemplateIssue, b: TemplateIssue): number {
@@ -44,9 +58,9 @@ function byPass(a: TemplateIssue, b: TemplateIssue): number {
 export function checkTemplate(raw: unknown, name: string, options: CheckOptions = {}): TemplateReport {
   const format = validateFormat(raw);
   if (!format.model) {
-    return { name, valid: false, errors: format.issues, advisories: [], gaps: [], model: null };
+    return { name, valid: false, errors: format.issues, advisories: [], gaps: [], model: null, types: null };
   }
-  const { issues, gaps } = analyzeTemplate(format.model, {
+  const { issues, gaps, types } = analyzeTemplate(format.model, {
     catalog: options.catalog ?? DEFAULT_CATALOG,
     coreVersion: options.coreVersion ?? CORE_VERSION,
     gridExists: options.gridExists,
@@ -59,6 +73,7 @@ export function checkTemplate(raw: unknown, name: string, options: CheckOptions 
     advisories: issues.filter((issue) => issue.severity === "advisory").sort(byPass),
     gaps,
     model: errors.length === 0 ? format.model : null,
+    types: errors.length === 0 ? types : null,
   };
 }
 
@@ -80,6 +95,7 @@ export function checkTemplateSource(source: string, name: string, options: Check
       advisories: [],
       gaps: [],
       model: null,
+      types: null,
     };
   }
 
