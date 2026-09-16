@@ -93,7 +93,15 @@ describe("compiling data-annotation", () => {
 
   it("declares what the core reads: config, rules, rule keys, actions, the audit job", () => {
     const flow = PlatformRegistry.flow("data-annotation")!;
-    expect(flow.actions!.map((action) => action.path)).toEqual(["import/batch", "annotator", "annotator/label"]);
+    expect(flow.actions!.map((action) => `${action.method} ${action.path}`)).toEqual([
+      "POST import/batch",
+      "POST annotator",
+      "POST annotator/label",
+      "POST annotator/release",
+      "GET progress",
+      "GET overview",
+      "GET export",
+    ]);
     expect(flow.jobs!.map((job) => [job.key, job.schedule])).toEqual([["data-annotation.audit", "0 4 * * 1"]]);
     expect(PlatformRegistry.ruleKeys().map((key) => [key.key, key.consumesPool])).toEqual([
       ["data-annotation.annotator.pay", true],
@@ -128,7 +136,8 @@ describe("compiling data-annotation", () => {
 
     const labeled = await call(u1, "annotator/label", { claim_id: drawn.body.claim.claim_id, value: "mass" });
     expect(labeled).toEqual({ status: 200, body: { ok: true, cp_awarded: 5 } });
-    expect(runtime.claims[0].result).toMatchObject({ metrics: { check: true } });
+    // La forme du flow écrit à la main : les champs du geste, à plat ; la métrique se rejoue.
+    expect(runtime.claims[0].result).toEqual({ value: "mass" });
 
     // Le même geste rejoué est refusé, sans seconde paie.
     const replay = await call(u1, "annotator/label", { claim_id: drawn.body.claim.claim_id, value: "mass" });
@@ -154,7 +163,7 @@ describe("compiling data-annotation", () => {
     expect(runtime.instances[0].state).toBe("open");
     await label("u3", "calc");
 
-    expect(runtime.instances[0]).toMatchObject({ state: "closed", verdict: "labeled", resolution: { verdict: "mass" } });
+    expect(runtime.instances[0]).toMatchObject({ state: "closed", verdict: "labeled", resolution: { consensus: "mass" } });
     expect(runtime.ledgerRows.map((row) => [row.user_id, row.points])).toEqual([["u1", 5], ["u2", 5], ["u3", 5]]);
   });
 

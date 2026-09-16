@@ -72,6 +72,10 @@ export const transitionBody = z.strictObject({
   resource: exprSource,
   to: z.enum(["open", "closed"]),
   verdict: z.string().optional(),
+  /** Sur une ressource déjà fermée : change son verdict, seulement s'il vaut encore celui-ci (premier arrivé). */
+  from: identifier.optional(),
+  /** Ce que la transition ajoute à `resolution`, clé par clé. */
+  resolution: z.record(identifier, exprSource).optional(),
 });
 export type TransitionBody = z.infer<typeof transitionBody>;
 
@@ -239,6 +243,14 @@ export const documentShell = z.strictObject({
       })
     )
     .default({}),
+  /** Ce que le template dit de sa présentation, hors du programme. */
+  presentation: z
+    .strictObject({
+      icon: z.string().optional(),
+      /** La contribution qui porte les lignes du ledger d'un participant. */
+      contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
+    })
+    .optional(),
   lifecycle: z
     .strictObject({
       states: z

@@ -194,6 +194,8 @@ export function evaluate(expr: Expr, bindings: Bindings, context: EvalContext = 
         const object = run(first.object, scope);
         return isObject(object) && object[first.name] !== undefined && object[first.name] !== null;
       }
+      case "now":
+        return (context.now ?? new Date()).toISOString();
       case "age": {
         const resource = run(first, scope);
         const created = isObject(resource) ? resource.created_at : null;

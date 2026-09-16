@@ -293,6 +293,17 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const path = ["resources", name];
     for (const [key, field] of Object.entries(resource.fields)) {
       checkVisibility(field.visibility, [...path, "fields", key, "visibility"]);
+      if (field.check !== undefined) {
+        // Évalué à chaque création, imports compris : la valeur et les paramètres, rien d'autre.
+        const at = [...path, "fields", key, "check"];
+        const { type } = expr(field.check, Scope.root({ params: T.record(paramTypes), value: resourceFieldTypes.get(name)![key] }), at);
+        expectType(type, isBool, "a field check must be bool", at);
+      }
+      for (const misplaced of ["where", "when", "from"] as const) {
+        if (field[misplaced] !== undefined && !(misplaced === "from" && field.type === "link")) {
+          report("shape", [...path, "fields", key, misplaced], `${misplaced} applies to a collected field, not to a resource field`);
+        }
+      }
     }
     const claim = resource.claim;
     if (claim) {
@@ -1006,8 +1017,16 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     if (body.to === "closed" && closer !== "aggregate" && !closers.includes(closer) && !(closer === "admin_act" && closers.includes("transition"))) {
       report("shape", path, `${type.name} is not closed by ${closer === "admin_act" ? "an admin act" : "a transition"} (closure.by: ${closers.join(", ") || "none"})`, { node });
     }
-    if (body.verdict === undefined) return;
     const verdicts = closure?.verdict ?? [];
+    if (body.from !== undefined) {
+      if (body.to !== "closed") report("shape", [...path, "from"], "from recloses a closed resource: to: closed", { node });
+      if (!verdicts.includes(body.from)) report("reference", [...path, "from"], `${type.name} has no verdict ${body.from}`, { node });
+      if (body.verdict === undefined) report("shape", [...path, "verdict"], "reclosing from a verdict names the new verdict", { node });
+    }
+    for (const [key, source] of Object.entries(body.resolution ?? {})) {
+      expr(source, scope, [...path, "resolution", key], node);
+    }
+    if (body.verdict === undefined) return;
     if (verdicts.includes(body.verdict)) return;
     // Pas un verdict déclaré écrit nu : une expression.
     const { type: verdictType } = expr(body.verdict, scope, [...path, "verdict"], node);

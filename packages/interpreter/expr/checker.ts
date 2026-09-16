@@ -56,7 +56,7 @@ const CONTRIBUTION_FIELDS: Record<string, Type> = { author: T.user, url: T.url, 
 const USER_FIELDS: Record<string, Type> = { id: T.string };
 
 export const BUILTINS = [
-  "size", "count", "exists", "majority", "mode", "mean", "min", "max", "has", "age", "int", "double", "string",
+  "size", "count", "exists", "majority", "mode", "mean", "min", "max", "has", "age", "now", "int", "double", "string",
 ] as const;
 
 export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type; issues: ExprIssue[] } {
@@ -317,6 +317,10 @@ export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type
         if (arg && arg.k === "member") visit(arg.object, s);
         return T.bool;
       }
+      case "now":
+        // L'horloge du moteur, en ISO 8601 : une date qui se stocke, jamais une source de hasard.
+        arity(0);
+        return T.date;
       case "age": {
         arity(1);
         if (!args[0]) return T.int;

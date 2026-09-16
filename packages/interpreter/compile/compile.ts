@@ -16,9 +16,10 @@ import type { Type } from "../expr/types.js";
 import type { ExprSource, FieldDecl, RewardBody } from "../format/schema.js";
 import type { TemplateReport } from "../index.js";
 import type { LaneModel, NodeModel } from "../validate/format.js";
-import { Engine, Refusal, newState, type CompiledTemplate, type RunState } from "./engine.js";
+import { Engine, Refusal, newState, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
 import { compileParams, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
+import { generatedActions, generatedPathConflicts } from "./reads.js";
 import { project, resourceValue } from "./values.js";
 
 /**
@@ -152,7 +153,6 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   const compiled: CompiledTemplate = {
     model,
     flowKey,
-    contributionType: flowKey,
     runtime,
     resourceTypes: types.resources,
     ruleKeys: new Map(rewards.map((reward) => [reward.body, reward.key])),
@@ -165,6 +165,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       })
     ),
     counterWrites: model.lanes.flatMap((lane) => counterWritesOf(lane.nodes)),
+    replays: replaysOf(flowKey, model.lanes),
+    contribution: shell.presentation?.contribution ?? { type: flowKey, title: shell.template.name },
   };
   const engine = new Engine(compiled);
 
@@ -193,6 +195,13 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     });
   }
 
+  // ── Surfaces générées : release, progress, overview, export ─────────────
+  const conflicts = generatedPathConflicts(model.lanes, actions.map((action) => action.path));
+  if (conflicts.length > 0) {
+    throw new CompileError(`[interpreter] ${flowKey}: ${conflicts.join(", ")} would shadow a generated read or release`);
+  }
+  actions.push(...generatedActions(compiled, engine, params));
+
   // ── Aggregates résolus à la clôture ─────────────────────────────────────
   const lifecycleAggregates = model.aggregates.filter(
     (aggregate) => typeof aggregate.decl.resolve.when === "string" && !readsRoot(parseExpr(aggregate.decl.resolve.when), "inputs")
@@ -203,14 +212,14 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       key: flowKey,
       label: shell.template.name,
       longLabel: shell.template.name,
-      icon: options.icon ?? "sparkles",
+      icon: options.icon ?? shell.presentation?.icon ?? "sparkles",
       briefRequired: true,
       publiclyVisible: options.publiclyVisible ?? false,
     },
     config: { version: 1, schema: params.configSchema },
     rules: { parse: (raw) => (params.rulesSchema.safeParse(raw ?? {}).success ? params.rulesSchema.parse(raw ?? {}) : null) },
     ruleKeys,
-    contributionTypes: [{ key: flowKey, countsAsContribution: true }],
+    contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
     uses: { board: false, groups: false },
     actions,
     jobs,
@@ -320,7 +329,7 @@ async function runSegment(
       const fields = gestureFields(gesture);
       const bound = await readGesture(fields, nodeFields.get(gesture) ?? {}, body, state, engine, t);
       state.bindings[gesture.id] = bound;
-      state.result.fields[gesture.id] = bound;
+      Object.assign(state.result, bound);
     }
 
     await engine.run(segment.nodes, state);
@@ -405,7 +414,8 @@ async function readGesture(
 function cronJob(lane: LaneModel, t: CompiledTemplate, engine: Engine, params: CompiledParams): JobDeclaration {
   const over = lane.entry.over;
   const schedule = SCHEDULES[lane.entry.schedule ?? ""] ?? lane.entry.schedule ?? "0 3 * * *";
-  const cursorKey = `cursor.${lane.id}`;
+  // La marque d'une instance traitée porte le nom de la lane (`audit`), comme le flow écrit à la main.
+  const cursorKey = lane.id;
 
   return {
     key: `${t.flowKey}.${lane.id}`,
@@ -431,7 +441,7 @@ function cronJob(lane: LaneModel, t: CompiledTemplate, engine: Engine, params: C
         for (const instance of instances) {
           const state = newState(challenge, null, values);
           state.bindings[over.resource] = await resourceValue(instance, t.runtime.resources, t.resourceTypes);
-          state.bindings.aggregates = await aggregatesOf(over.resource, instance.uuid, instance.resolution, t, engine);
+          state.bindings.aggregates = await aggregatesOf(over.resource, instance.uuid, instance.resolution, t, engine, values);
           if (over.where !== undefined && (await engine.eval(over.where, state)) !== true) continue;
           summary.instances++;
 
@@ -462,18 +472,63 @@ async function runCronNodes(nodes: readonly NodeModel[], state: RunState, engine
   }
 }
 
+/**
+ * Ce qu'il faut rejouer des claims de chaque type tiré : le segment qui suit le
+ * tirage. Un nœud rejoué ne lit que les paramètres, le claim, les gestes du
+ * segment et ce que le rejeu a déjà produit — sinon le rejeu ne serait pas pur.
+ */
+function replaysOf(flowKey: string, lanes: readonly LaneModel[]): Map<string, ReplaySpec> {
+  const replays = new Map<string, ReplaySpec>();
+  const all = (nodes: readonly NodeModel[]): NodeModel[] =>
+    nodes.flatMap((node) => [node, ...(node.family === "gate" ? (node.branches ?? []).flatMap((b) => all(b.nodes)) : [])]);
+
+  for (const lane of lanes) {
+    if (lane.entry.trigger === "cron") continue;
+    const segments = segmentsOf(lane);
+    const index = segments.findIndex((segment) => segment.nodes.some((node) => node.family === "act" && node.body.claim));
+    if (index < 0) continue;
+    const claimAct = segments[index].nodes.find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }>;
+    const delivery = segments[index + 1] ?? { nodes: [], gestures: [] };
+    const gestures = delivery.gestures.map((gesture) => ({ id: gesture.id, fields: Object.keys(gestureFields(gesture)) }));
+    const spec: ReplaySpec = { claimActId: claimAct.id, claim: claimAct.body.claim!, gestures, nodes: delivery.nodes };
+
+    const replayed = all(delivery.nodes).filter((node) => node.family === "gate" || (node.family === "assess" && (node.body.counters || node.body.emit)));
+    const allowed = new Set(["params", "value", claimAct.id, ...gestures.map((gesture) => gesture.id), ...replayed.map((node) => node.id)]);
+    const forbidden = all(lane.nodes).map((node) => node.id).filter((id) => !allowed.has(id));
+    for (const node of replayed) {
+      const sources: unknown[] =
+        node.family === "gate"
+          ? (node.branches ?? []).map((branch) => branch.when)
+          : node.family === "assess"
+            ? [node.body.value, node.body.from, ...Object.values(node.body.counters ?? {}).map((update) => update.add)]
+            : [];
+      for (const ast of expressionsOf(sources)) {
+        const read = [...forbidden, "counters", "challenge", "participation", "aggregates"].find((name) => readsRoot(ast, name));
+        if (read) throw new CompileError(`[interpreter] ${flowKey}: ${node.id} is replayed from stored claims and cannot read '${read}'`);
+      }
+    }
+
+    for (const type of [claimAct.body.claim!.resource, claimAct.body.claim!.substitute?.resource].filter((t): t is string => Boolean(t))) {
+      if (replays.has(type)) throw new CompileError(`[interpreter] ${flowKey}: ${type} is drawn by two lanes; v1 replays one`);
+      replays.set(type, spec);
+    }
+  }
+  return replays;
+}
+
 async function aggregatesOf(
   resource: string,
   resourceId: string,
   resolution: Record<string, unknown> | null,
   t: CompiledTemplate,
-  engine: Engine
+  engine: Engine,
+  params: Record<string, Value>
 ): Promise<Record<string, Value>> {
   const aggregates: Record<string, Value> = {};
   for (const aggregate of t.model.aggregates) {
     if (aggregate.decl.over !== resource) continue;
-    const inputs = await engine.inputs(aggregate.decl.id, resourceId);
-    aggregates[aggregate.decl.id] = { verdict: (resolution?.verdict as Value) ?? null, inputs, count: inputs.length };
+    const inputs = await engine.inputs(aggregate.decl.id, resourceId, params);
+    aggregates[aggregate.decl.id] = { verdict: (resolution?.consensus as Value) ?? null, inputs, count: inputs.length };
   }
   return aggregates;
 }

@@ -11,11 +11,11 @@
 # - golds are claimed once per annotator, with the same TTL as items;
 # - the audit visits each labeled item once and reverses exactly what a
 #   disagreeing label was paid, net of earlier clawbacks;
-# - the ledger keys are `annotation` and `annotation_clawback`.
+# - the ledger keys are `annotation` and `annotation_clawback`;
+# - an admin settles a contested item by hand (the resolve lane).
 #
-# Out of the template for now: release, progress, overview, export and the
-# manual resolution of a contested item (reads and a reopening transition v1
-# does not compile).
+# release, progress, overview and export are not written here: the compiler
+# generates them (design note, trade-off 10).
 
 format: leaderboardos/1
 
@@ -46,6 +46,10 @@ params:
 
 requires: {core: 1}
 
+presentation:
+  icon: tag
+  contribution: {type: annotation, title: Annotations}
+
 resources:
   item:
     fields:
@@ -53,11 +57,11 @@ resources:
       class:     {type: "enum(standard, sensitive)", visibility: [admin]}
     created_by: [import.explode_items]
     claim: {mode: k_bounded, k: params.k, ttl: params.ttl_hours}
-    closure: {by: aggregate, verdict: [labeled, contested]}
+    closure: {by: [aggregate, admin_act], verdict: [labeled, contested]}
   gold:
     fields:
       image_url: {type: url, visibility: [claimant, admin]}
-      expected:  {type: string, visibility: []}
+      expected:  {type: string, visibility: [], check: "params.label_schema.options.exists(o, o.key == value)"}
     created_by: [import.explode_golds]
     claim: {mode: unique_per, dimensions: [self, participation], ttl: params.ttl_hours}
 
@@ -95,6 +99,23 @@ lanes:
             - else:
                 nodes:
                   - act: {id: explode_items, create: item, many: {from_file: batch.file}, set: {class: batch.class}}
+
+  - id: resolve
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: decide
+          fields:
+            item:  {type: "ref(item)"}
+            value: {type: string, check: "params.label_schema.options.exists(o, o.key == value)"}
+      - act:
+          id: settle
+          transition:
+            resource: decide.item
+            to: closed
+            from: contested
+            verdict: labeled
+            resolution: {consensus: decide.value, resolved_by: participation.user, resolved_at: now()}
 
   - id: annotator
     entry: {trigger: user, access: {mode: open}}

@@ -39,6 +39,8 @@ export default defineConfig({
             "content/**/*.test.{ts,tsx}",
             "modules/**/*.test.{ts,tsx}",
           ],
+          // Les tests d'intégration tournent sur Postgres : `npm run test:integration`.
+          exclude: ["**/node_modules/**", "**/*.integration.test.ts"],
         },
       },
     ],

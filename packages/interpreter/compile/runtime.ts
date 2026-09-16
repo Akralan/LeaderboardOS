@@ -22,6 +22,7 @@ export type RuntimeResources = Pick<
   | "consume"
   | "release"
   | "close"
+  | "reclose"
   | "stampResolution"
   | "resource"
   | "claim"
@@ -35,7 +36,7 @@ export interface RuntimeLedger {
   distributed(challengeId: string): Promise<number>;
   entries(challengeId: string): Promise<RewardEntry[]>;
   /** La contribution qui porte les lignes d'un participant ; créée au premier paiement. */
-  contribution(challenge: Challenge, userId: string, type: string): Promise<string>;
+  contribution(challenge: Challenge, userId: string, contribution: { type: string; title: string }): Promise<string>;
   write(drafts: RewardEntryDraft[]): Promise<void>;
 }
 
@@ -62,7 +63,9 @@ export interface TemplateRuntime {
 export class RuntimeBindingError extends Error {}
 
 /** Le port branché sur les capacités et les repositories du core. */
-export function defaultRuntime(bindings: Partial<Pick<TemplateRuntime, "evaluate" | "observe">> = {}): TemplateRuntime {
+export function defaultRuntime(
+  bindings: Partial<Pick<TemplateRuntime, "evaluate" | "observe" | "random" | "now" | "challengesOf">> = {}
+): TemplateRuntime {
   const repositories = () => import("../../database-service/repositories/index.js");
   let resourcesCapability: Resources | null = null;
   const res = async () => {
@@ -80,6 +83,7 @@ export function defaultRuntime(bindings: Partial<Pick<TemplateRuntime, "evaluate
       consume: lazy("consume"),
       release: lazy("release"),
       close: lazy("close"),
+      reclose: lazy("reclose"),
       stampResolution: lazy("stampResolution"),
       resource: lazy("resource"),
       claim: lazy("claim"),
@@ -97,10 +101,10 @@ export function defaultRuntime(bindings: Partial<Pick<TemplateRuntime, "evaluate
         const { RewardEntryRepository } = await repositories();
         return new RewardEntryRepository().findByChallenge(challengeId);
       },
-      async contribution(challenge, userId, type) {
+      async contribution(challenge, userId, { type, title }) {
         const { ContributionRepository } = await repositories();
         const { contribution } = await new ContributionRepository().createIfAbsent({
-          title: challenge.title,
+          title,
           type,
           reward: 0,
           user_id: userId,
@@ -125,11 +129,11 @@ export function defaultRuntime(bindings: Partial<Pick<TemplateRuntime, "evaluate
       (async (capability) => {
         throw new RuntimeBindingError(`no binding installed for capability ${capability}`);
       }),
-    async challengesOf(flowKey) {
+    challengesOf: bindings.challengesOf ?? (async (flowKey) => {
       const { ChallengeRepository } = await repositories();
       return (await new ChallengeRepository().findAll()).filter((challenge) => challenge.type === flowKey);
-    },
-    random: Math.random,
-    now: () => new Date(),
+    }),
+    random: bindings.random ?? (() => Math.random()),
+    now: bindings.now ?? (() => new Date()),
   };
 }

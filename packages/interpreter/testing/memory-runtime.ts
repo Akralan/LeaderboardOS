@@ -125,6 +125,14 @@ export function memoryRuntime(options: {
         return instance as never;
       },
 
+      async reclose(resourceId, fromVerdict, verdict, resolution) {
+        const instance = runtime.instances.find((candidate) => candidate.uuid === resourceId);
+        if (!instance || instance.state !== "closed" || instance.verdict !== fromVerdict) return null;
+        // Comme le repository : le verdict change, `resolution` se fusionne.
+        Object.assign(instance, { verdict, resolution: { ...(instance.resolution ?? {}), ...resolution } });
+        return instance as never;
+      },
+
       async stampResolution(resourceId, key, value) {
         const instance = runtime.instances.find((candidate) => candidate.uuid === resourceId);
         // Comme le repository : une marque ne se pose que sur une ressource fermée.
@@ -171,7 +179,7 @@ export function memoryRuntime(options: {
       async entries(challengeId) {
         return runtime.ledgerRows.filter((row) => row.challenge_id === challengeId);
       },
-      async contribution(challenge, userId, type) {
+      async contribution(challenge, userId, { type }) {
         return `contribution-${challenge.uuid}-${userId}-${type}`;
       },
       async write(drafts: RewardEntryDraft[]) {

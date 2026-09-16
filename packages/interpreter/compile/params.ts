@@ -34,6 +34,8 @@ export function zodOf(type: Type): z.ZodType {
       for (const [key, field] of Object.entries(type.fields)) shape[key] = zodOf(field);
       return z.object(shape);
     }
+    case "url":
+      return z.string().regex(/^https?:\/\/\S+$/, "an http(s) URL");
     case "null":
       return z.null();
     case "dyn":
