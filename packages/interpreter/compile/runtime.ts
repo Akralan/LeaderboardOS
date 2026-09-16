@@ -60,6 +60,8 @@ export interface LinkedContribution {
   [key: string]: Value;
   id: string;
   author: string;
+  /** Son titre : ce qu'un sélecteur en affiche. */
+  title: string | null;
   url: string | null;
   kind: string;
 }
@@ -261,10 +263,11 @@ async function httpProxy(args: Record<string, Value>, context: ObserveContext): 
   return { status: result.status, ok: result.status >= 200 && result.status < 300, content_type: result.contentType, response: response as unknown as Value };
 }
 
-function linked(contribution: { uuid: string; user_id: string; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }): LinkedContribution {
+function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }): LinkedContribution {
   return {
     id: contribution.uuid,
     author: contribution.user_id,
+    title: contribution.title ?? null,
     url: contribution.live_endpoint_url ?? contribution.artifact_url ?? null,
     kind: contribution.type,
   };

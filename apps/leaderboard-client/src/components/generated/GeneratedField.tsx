@@ -23,11 +23,22 @@ interface Option {
   [key: string]: unknown;
 }
 
-/** Le libellé d'un choix : sa première valeur lisible, l'état de ses aggregates, sinon son rang. */
+/** Ce qui nomme une valeur : un titre, un nom, sinon une URL — jamais un identifiant. */
+function nameOf(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['title', 'name']) if (typeof record[key] === 'string' && record[key]) return record[key] as string;
+  for (const item of Object.values(record)) {
+    const nested = item && typeof item === 'object' ? nameOf(item) : null;
+    if (nested) return nested;
+  }
+  const url = Object.values(record).find((item) => typeof item === 'string' && /^https?:\/\//.test(item));
+  return typeof url === 'string' ? url : null;
+}
+
+/** Le libellé d'un choix : ce qui le nomme, l'état de ses aggregates, sinon son rang. */
 function labelOf(option: Option, index: number, field: SurfaceField): string {
-  const readable = Object.entries(option).find(([key, value]) => key !== 'id' && key !== 'aggregates' && (typeof value === 'string' || (value && typeof value === 'object' && typeof (value as { url?: unknown }).url === 'string')));
-  const text = readable ? (typeof readable[1] === 'string' ? readable[1] : String((readable[1] as { url: string }).url)) : null;
-  const base = text ?? (typeof option.url === 'string' ? option.url : `${humanize(field.resource ?? field.name)} #${index + 1}`);
+  const base = nameOf(option) ?? `${humanize(field.resource ?? field.name)} #${index + 1}`;
   const aggregates = option.aggregates as Record<string, { count?: number }> | undefined;
   const counts = aggregates ? Object.values(aggregates).map((state) => state.count).filter((count) => typeof count === 'number') : [];
   return counts.length ? `${base} · ${counts[0]} in` : base;

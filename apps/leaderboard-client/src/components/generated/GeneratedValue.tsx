@@ -31,7 +31,13 @@ export function GeneratedValue({
     return <pre className="whitespace-pre-wrap break-all text-xs" style={{ color: fgAt(0.6) }}>{JSON.stringify(value, null, 2)}</pre>;
   }
   if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([key]) => !key.startsWith('$'));
+    // Ni identifiant ni référence (`{$resource}`) : ce que la lane a choisi se lit déjà dans ce qu'elle montre.
+    const isReference = (item: unknown) => !!item && typeof item === 'object' && '$resource' in (item as object);
+    const entries = Object.entries(value as Record<string, unknown>).filter(
+      ([key, item]) => !key.startsWith('$') && key !== 'id' && !isReference(item)
+        && !(item && typeof item === 'object' && !Array.isArray(item) && Object.values(item).length > 0 && Object.values(item).every(isReference))
+    );
+    if (entries.length === 0) return null;
     return (
       <dl className="space-y-2">
         {entries.map(([key, item]) => (

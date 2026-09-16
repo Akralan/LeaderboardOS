@@ -23,7 +23,7 @@ export interface MemoryRuntime extends TemplateRuntime {
   claims: ResourceClaim[];
   grants: { resource_id: string; field: string; participation: string; granted_by: string }[];
   /** Les contributions des challenges sources : `challenge` est le challenge source, `capabilities` ce qu'elles livrent. */
-  contributionRows: { id: string; author: string; url: string | null; kind: string; challenge: string; capabilities: string[] }[];
+  contributionRows: { id: string; author: string; title?: string; url: string | null; kind: string; challenge: string; capabilities: string[] }[];
   blobRows: StoredBlob[];
   ledgerRows: RewardEntry[];
   challenges: Challenge[];
@@ -270,12 +270,12 @@ export function memoryRuntime(options: {
     contributions: {
       async find(contributionId) {
         const row = runtime.contributionRows.find((candidate) => candidate.id === contributionId);
-        return row ? { id: row.id, author: row.author, url: row.url, kind: row.kind } : null;
+        return row ? { id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind } : null;
       },
       async eligible(challenge, capability) {
         return runtime.contributionRows
           .filter((row) => row.challenge === challenge.source_challenge_id && row.capabilities.includes(capability))
-          .map((row) => ({ id: row.id, author: row.author, url: row.url, kind: row.kind }));
+          .map((row) => ({ id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind }));
       },
     },
 
