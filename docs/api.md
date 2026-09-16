@@ -56,7 +56,7 @@ All request bodies are JSON unless noted (a few validation routes take `multipar
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/challenges` | List challenges. `?managed=true` instead lists all challenges (drafts included) of projects the caller manages. | Public (managed filter requires auth) |
-| `POST` | `/api/challenges` | Create a challenge. Optional `slug`, derived from the title when omitted; `409 { field: 'slug', suggestion }` when taken. | Admin or project manager |
+| `POST` | `/api/challenges` | Create a challenge. Optional `slug`, derived from the title when omitted; `409 { field: 'slug', suggestion }` when taken. `type` may be a template published in the database: the challenge then references its latest published version (`template_version`). A retired flow (`endpoint-validation`) refuses new challenges (`400`). | Admin or project manager |
 | `GET` | `/api/challenges/slug-availability` | `?slug=&exclude=<uuid>` → `{ available, problem, suggestion }`. What the form checks while typing; reserves nothing. | Admin or project manager |
 | `GET` | `/api/challenges/:id` | Get a challenge by ID. | Public |
 | `PUT` | `/api/challenges/:id` | Update a challenge. A changed `slug` keeps the old one as a redirect; `409` when taken. | Admin or manager of its project |
@@ -85,7 +85,7 @@ All request bodies are JSON unless noted (a few validation routes take `multipar
 
 ### Flow and extension actions
 
-What a challenge type adds lives behind two generic routes. The core dispatcher (`packages/capabilities/challenge-actions.ts`) matches the path against the actions the challenge's flow declares (`content/flows/*/index.ts`, with `content/kits/validation/actions/index.ts` for both validation flows) or an extension attached to that flow declares (`content/extensions/*/index.ts`):
+What a challenge type adds lives behind two generic routes. The core dispatcher (`packages/capabilities/challenge-actions.ts`) matches the path against the actions the challenge's flow declares (`content/flows/*/index.ts`, with `content/kits/validation/actions/index.ts` for the hand-written validation flows; for a template, the actions the interpreter compiles from it) or an extension attached to that flow declares (`content/extensions/*/index.ts`). The flow is resolved **per challenge** (`PlatformRegistry.flowFor`): a challenge on a database template is served by the exact version it references, loaded on demand if this instance has not seen it yet, and answers `503` when that version no longer compiles:
 
 | Path | Dispatched to |
 |------|---------------|
@@ -108,9 +108,38 @@ Every action needs a session. Its declared access is met by **any one** of its c
 | `GET` | `flow/workspace` | Each contributor's submitted artifact URLs. | Signed in |
 | `PATCH` | `flow/workspace` | Submit/clear an artifact URL for one step (dataset, model, model code, API packaging). Triggers scoring, and makes the submitter a challenge member. | Signed in (self) |
 
+#### Template flows
+
+Every flow compiled from a template (`data-annotation`, `endpoint-check`, and templates published in the database) exposes one `POST` action per step of each lane — `flow/<lane>` when the step starts with a server act (a draw), `flow/<lane>/<gesture>` otherwise; a step after a claim takes `claim_id` — plus reads the compiler generates:
+
+| Method | Path | Description | Access |
+|--------|------|-------------|--------|
+| `POST` | `flow/<lane>/release` | `{ claim_id }` — give up a claim (lanes that claim). | The lane's access |
+| `GET` | `flow/<lane>/claim` | `?claim_id=` — the caller's claim, its resource as the caller may read it (declared visibility **or** a grant), and what the lane kept (`context`). | The lane's access |
+| `GET` | `flow/<lane>/file` | `?claim_id=&path=resource.<field>` or `context.<node>.<key>` — bytes of a readable file; `404` when not readable, `410` once purged. | The lane's access |
+| `GET` | `flow/<lane>/options` | `?field=<gesture>.<field>` (plus the gesture's other fields) — the choices of a `ref` or `link` field: `where` evaluated server-side, combinations a designated claim would refuse removed, each choice projected, with its aggregates' state per `state_visibility`. | The lane's access |
+| `GET` | `flow/file` | `?resource_id=&field=` — bytes of a readable file field. | Participants, or the template's qualification |
+| `GET` | `flow/progress` | What the caller delivered and earned, their counters (lagged as declared), eligible classes, active claim. | Participants, or the template's qualification |
+| `GET` | `flow/overview` | Counts per resource type and verdict, pool, participants with names and unlagged counters, resources an admin lane awaits. | Admin or manager |
+| `GET` | `flow/export` | `?type=` — CSV of closed resources. | Admin or manager |
+
+A generated read takes the access of its lane: for a lane reserved to a qualification, holding it is enough, without challenge membership. See [`data-annotation.md`](./data-annotation.md#actions) and [`validation-challenges.md`](./validation-challenges.md#reference-case-mode-as-a-template-endpoint-check) for the two installed templates.
+
 #### Validation flows (see [`validation-challenges.md`](./validation-challenges.md))
 
-Common to `endpoint-validation` and `journey-validation` (validation kit):
+`endpoint-check` (template, serves every new ML validation challenge) — "Reviewer" holds the challenge's `reviewer_qualification`:
+
+| Method | Path | Description | Access |
+|--------|------|-------------|--------|
+| `POST` | `flow/admin/expose` | `{ contribution, endpoint_url }` — expose an eligible submission of the source challenge (`409` if already exposed). | Admin or manager |
+| `POST` | `flow/author/submit_case` | `{ input, expected_output }` (files) — author a reference case; `409` past `required_validations`. | Reviewer |
+| `POST` | `flow/reviewer/pick` | `{ target, case }` — call the endpoint with the case input, then claim the (case, target) combination. `403` on your own case or submission, `502` when the endpoint fails (nothing held), `409` when taken. | Reviewer |
+| `POST` | `flow/reviewer/observation` | `{ claim_id, text }` — record what you saw; reveals the expected output to you. | Reviewer (claim owner) |
+| `POST` | `flow/reviewer/verdict` | `{ claim_id, verdict, description }` — `400` before the observation; resolves and pays at quorum. | Reviewer (claim owner) |
+
+Plus the generated reads above (`reviewer/options`, `reviewer/claim`, `reviewer/file`, `admin/options`, `progress`, `overview`, `export`, `reviewer/release`).
+
+Common to the hand-written `endpoint-validation` (**retired**: it serves existing challenges only) and `journey-validation` (validation kit):
 
 | Method | Path | Description | Access |
 |--------|------|-------------|--------|
@@ -119,7 +148,7 @@ Common to `endpoint-validation` and `journey-validation` (validation kit):
 | `DELETE` | `flow/targets/:targetId` | Remove a target (409 once verdicts exist). | Admin or manager |
 | `GET` | `flow/rewards` | Pool state + per-validator breakdown. | Admin or manager |
 
-`endpoint-validation` — "Reviewer" is a holder of the challenge's `reviewer_qualification`:
+`endpoint-validation` (retired) — "Reviewer" is a holder of the challenge's `reviewer_qualification`:
 
 | Method | Path | Description | Access |
 |--------|------|-------------|--------|
@@ -320,21 +349,38 @@ See [`admin-settings.md`](./admin-settings.md) for what each of these controls.
 | `GET` | `/api/admin/digests/:id` | One digest's full payload. | Admin |
 | `POST` | `/api/admin/digests/generate` | Generate a digest now. Optional `{ period_start }` forces the lower bound (ISO or `YYYY-MM-DD`, read as midnight UTC, must be past); without it, the last `period_end` is used. | Admin |
 
+## Templates
+
+Templates written in the editor and stored in the database (see [`database.md`](./database.md#templates) and `docs/input/templates-in-db-design-note.md`). The logic lives in `packages/capabilities/templates.ts`; the routes are thin. A diagnostic is `{ severity: error | advisory, code (validation pass, support or publish), path (logical, e.g. lanes.2.nodes.1.gate.all.0), message }`, and the list a draft save returns is exactly the list a publication is refused with.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/templates` | The library: `system` (the distribution's file templates, read-only, duplicable) and `templates` (database ones: published versions with their challenge counts, whether a draft exists, and the latest version's descriptor and surface). Archived templates are left out. | Admin |
+| `POST` | `/api/templates` | `{ key, name, yaml?, seed?: { key, version? } }` — create a template and its first draft, from a text or as a copy of a system template or a published version (the document's `template.id` is rewritten). `key` is kebab-case without dots; `409` when taken or served by an installed flow, `404` for an unknown seed. Returns the draft's diagnostics. | Admin |
+| `GET` | `/api/templates/:key` | Published versions (with usage and checksum) and the draft, with its diagnostics. | Admin |
+| `PUT` | `/api/templates/:key/draft` | `{ yaml }` — save the draft, however holey; returns its diagnostics. | Admin |
+| `POST` | `/api/templates/:key/validate` | `{ yaml? }` — diagnostics of the given text, or of the saved draft. | Admin |
+| `POST` | `/api/templates/:key/publish` | No body: the version is read from the draft's `template.version`. `201 { version, published_at }`; `422 { diagnostics }` while the draft has errors; `409` when the version is not greater than the last published; `404` without a draft. The version is installed in this instance at once; other instances catch up on demand and at the cron tick. | Admin |
+| `GET` | `/api/templates/:key/describe` | The serializable surface of a published version — descriptor, lanes and their steps, typed fields, param declarations — from which the client generates a challenge's screens and the creation form's section. `?version=` (latest otherwise). `?draft=1` (admin) previews the draft, `422 { diagnostics }` when it cannot be described yet. | Signed in (published versions); admin for `?draft=1` |
+
 ---
 
 ## Cron
 
-One route, `GET /api/cron/tick`, secured by `Authorization: Bearer $CRON_SECRET` and called **every minute** by the scheduler. It runs the jobs that are due, one after the other, each under its lock in `cron_runs`; a failing job is recorded there and does not stop the next. Jobs are declared by their owner — the core, a flow, an extension or a module — and collected by `packages/capabilities/cron.ts`. A disabled module's jobs are skipped.
+One route, `GET /api/cron/tick`, secured by `Authorization: Bearer $CRON_SECRET` and called **every minute** by the scheduler. It first loads the template versions published since this instance booted (so their jobs run), then runs the jobs that are due, one after the other, each under its lock in `cron_runs`; a failing job is recorded there and does not stop the next. Jobs are declared by their owner — the core, a flow, an extension or a module — and collected by `packages/capabilities/cron.ts`. A disabled module's jobs are skipped.
 
 | Job | Owner | Schedule (UTC) | Purpose |
 |-----|-------|----------------|---------|
 | `core.events.distribute` | core | every minute | Deliver platform events to their subscribers (quests…). |
 | `core.events.purge` | core | daily, 05:30 | Purge events older than 30 days. |
 | `core.refresh-tokens.cleanup` | core | daily, 05:00 | Delete expired refresh tokens. |
+| `core.blobs.retention` | core | daily, 03:30 | Purge the bytes of blobs whose challenge closed more than their `retention_days` ago; metadata stays. |
 | `compute.provisioning` | `compute` extension | every minute | Poll GPU instances still provisioning and flip them to `ready`. |
 | `compute.expiration` | `compute` extension | every minute | Terminate GPU instances past their 24h window. |
 | `slack-signals.detect` | `slack-signals` extension | daily, 06:00 | Slack signal detection + CP awards. See [`slack-signals.md`](./slack-signals.md). |
-| `endpoint-validation.evidence.purge` | `endpoint-validation` flow | daily, 05:00 | Purge the evidence (inputs, responses) of challenges closed for 12 months. |
+| `endpoint-validation.evidence.purge` | `endpoint-validation` flow (retired) | daily, 05:00 | Purge the evidence (inputs, responses) of challenges closed for 12 months. |
+| `data-annotation.audit` | `data-annotation` template | Mondays, 04:00 | Sampled clawback audit — see [`data-annotation.md`](./data-annotation.md#audit). |
+| `<key>.<lane>` | database template | as declared | A cron lane of a published template: one job for all its versions, each running on its own challenges. |
 | `meetings.check` | `meetings` module | every minute | Detect completed meetings and trigger analysis. |
 | `digest.generate` | `digest` module | daily, 05:00 | Generate an activity digest when one is due. See [`digest.md`](./digest.md). |
 | `sandbox.ip-hashes.purge` | `sandbox` module | daily, 05:00 | Purge star IP hashes older than 30 days. |

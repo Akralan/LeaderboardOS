@@ -180,7 +180,7 @@ Tasks are purely organizational and never become a contribution directly. For a 
 
 ```
 projects (manager_id → users, optional)
-  └── challenges (type: a flow key — code | ml | endpoint-validation | journey-validation; flow_config)
+  └── challenges (type: a flow key — code | ml | endpoint-check | endpoint-validation (retired) | journey-validation | data-annotation | a database template; flow_config; template_version for a database template)
         ├── challenge_teams  → users (+ workspace_provider/ref/url/status for code)
         ├── challenge_repos  → repos
         ├── challenge_documents  (incl. brief.md)

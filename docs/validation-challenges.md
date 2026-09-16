@@ -3,11 +3,12 @@
 Validation challenges let people check whether what a contributor delivered
 actually works — with their own CP pool, and without ever touching the source
 contribution's grade. A validation challenge is linked to a **source challenge**
-(`source_challenge_id`), and comes as **two flows**, one per kind of deliverable:
+(`source_challenge_id`), and comes as **flows**, one per kind of deliverable:
 
 | Flow (`challenges.type`) | Mode | Requires from the source | How it is judged | Who may judge |
 |---|---|---|---|---|
-| `endpoint-validation` | **Reference case** | a deliverable with the `endpoint` capability (MyTwin: ML `api_packaging`) + its deployed endpoint | the platform calls the endpoint with a ground-truth input; the reviewer records what they saw, reveals the expected output, then votes `works` / `broken`. Majority pays once quorum is reached. | holders of `reviewer_qualification` |
+| `endpoint-check` | **Reference case** | a deliverable with the `endpoint` capability (MyTwin: ML `api_packaging`) + its deployed endpoint | the same gesture as below, served by the template `content/templates/endpoint-check`: claim a case by calling the endpoint, observe, reveal, vote. Majority pays once quorum is reached. | holders of `reviewer_qualification` |
+| `endpoint-validation` *(retired)* | **Reference case** | a deliverable with the `endpoint` capability (MyTwin: ML `api_packaging`) + its deployed endpoint | the platform calls the endpoint with a ground-truth input; the reviewer records what they saw, reveals the expected output, then votes `works` / `broken`. Majority pays once quorum is reached. | holders of `reviewer_qualification` |
 | `journey-validation` | **Scenario walkthrough** | a deliverable with the `deployed_app` capability (MyTwin: code `project`) + its URL | a validator walks a fixed, admin-authored scenario through the application in an iframe, marking each step `passed` / `failed` / `blocked` with a comment, then closes with a mandatory overall feedback. Every completed walkthrough pays. | roles in `eligible_roles` (the expert opinion field needs `expert_comment_qualification`) |
 
 **The mode is the flow.** A source flow declares its deliverables
@@ -17,6 +18,16 @@ capability it needs (`requires: { deliverableCapability }`), and
 Nothing is derived from the source challenge's type any more. At most one validation
 challenge of each flow per source (unique partial index on
 `(source_challenge_id, type)`).
+
+**Endpoint validation is retired by attrition.** New ML validation challenges are
+created on `endpoint-check`, the template (see [Reference-case mode as a
+template](#reference-case-mode-as-a-template-endpoint-check)). The hand-written
+`endpoint-validation` flow is declared `retired: true`: it stays installed and keeps
+serving the challenges that already exist on it, but `POST /api/challenges` refuses a
+new one (400) and `flowsValidating` no longer offers it. The two share no data and no
+ledger key; `endpoint-validation` uninstalls once no challenge references it. The rest
+of the reference-case sections below describe the hand-written flow, which is what
+existing challenges run.
 
 ---
 
@@ -44,6 +55,7 @@ Each flow's settings live in `challenges.flow_config`, validated by the flow's s
 
 | Flow | `flow_config` |
 |---|---|
+| `endpoint-check` | `cp_per_validation`, `required_validations` (odd, required), `reviewer_qualification` — the template's params |
 | `endpoint-validation` | `cp_per_validation`, `required_validations` (odd), `reviewer_qualification` |
 | `journey-validation` | `cp_per_validation`, `eligible_roles` (default `["contributor", "admin"]`), `expert_comment_qualification` (or `null`) |
 
@@ -153,6 +165,49 @@ Third-party deployments (HuggingFace Spaces, Render, …) generally won't have C
 
 ---
 
+## Reference-case mode as a template: `endpoint-check`
+
+`content/templates/endpoint-check/template.yaml` is the reference-case flow written as a
+`leaderboardos/1` template and compiled by the interpreter (see
+[`packages.md`](./packages.md#packagesinterpreter)). It serves every **new** ML validation
+challenge. Its own keys: flow key `endpoint-check`, ledger key `endpoint_check`,
+contribution type `endpoint_check` — nothing is shared with `endpoint-validation` or the
+validation kit.
+
+The same rules, expressed as template lanes over the core `resources` capability:
+
+| Lane | Actions (`/api/challenges/:id/flow/…`) | What it does |
+|---|---|---|
+| `admin` | `POST admin/expose` `{contribution, endpoint_url}` | Exposes an eligible submission of the source challenge (a `link` field with `deliverable: endpoint`, `unique`) as a `target` resource |
+| `author` | `POST author/submit_case` `{input, expected_output}` (files, multipart or base64 JSON) | A qualified reviewer writes a `reference_case`; at most `required_validations` of them (409 beyond) |
+| `reviewer` | `POST reviewer/pick` `{target, case}` | Gate (403 on your own case or your own submission), then the **probe**: `http_proxy` calls the endpoint with the case input **before** the claim is taken; an unreachable endpoint refuses with 502 and holds nothing. The claim is designated and scoped by `target` (409 when the combination is taken) |
+| | `POST reviewer/observation` `{claim_id, text}` | Recorded on the claim; then the **reveal** grants `expected_output` to this reviewer (`resource_field_grants`) |
+| | `POST reviewer/verdict` `{claim_id, verdict, description}` | Emits into the `quorum` aggregate over the target; at `required_validations` inputs the majority side is paid `cp_per_validation`, earliest first, clamped to the pool |
+
+The compiler also generates the reads: `reviewer/options?field=pick.case&target=…` (cases
+still pickable on a target, with the quorum count), `reviewer/claim` (the claim, its
+resource as the reader may see it, the stored probe response), `reviewer/file` and
+`file` (bytes of a readable file field), `progress`, `overview`, `export`,
+`reviewer/release`. A generated read follows its lane's access: a qualified reviewer
+needs no challenge membership.
+
+Behavioural differences with the hand-written flow, proven by
+`content/templates/endpoint-check/equivalence.integration.test.ts` (same campaign played
+on both flows against a real local endpoint — refusals, bytes, resolution, ledger):
+
+- Reading the expected output before the observation answers **404** (the field does not
+  exist for you yet) where `endpoint-validation` answered 400 — the older answer leaked
+  that the file exists.
+- A verdict before the observation answers 400 on both.
+
+The screens are generated from the template (`distribution/client/generated.tsx`): a
+contributor tab stacking the lanes the viewer is qualified for, a manager tab with the
+admin lane and the generated overview (counts, pool, participants, CSV export), and a
+rules drawer built from the lanes and params. Files are `blobs` (Postgres `bytea`),
+kept 12 months after the challenge closes by the core job `core.blobs.retention`.
+
+---
+
 ## Admin & manager oversight
 
 - `GET /api/challenges/:id/flow/runs` — every verdict cast on the challenge, metadata only.
@@ -243,6 +298,7 @@ An eligible validator (not the application's own author or group)
 
 ## Limitations (v1)
 
+- `endpoint-check` has no generated view of the individual cases and runs yet (counts and CSV export only), and no action to withdraw a reference case.
 - Reference-case mode only covers deliverables declaring the `endpoint` capability (MyTwin: ML `api_packaging`).
 - Reference cases are stored as bytes in Postgres (`bytea`), not in object storage.
 - Retention: the daily job `endpoint-validation.evidence.purge` (`content/flows/endpoint-validation/retention.ts`) purges stored inputs and responses 12 months after a validation challenge is closed. Nothing shorter applies.
@@ -257,7 +313,11 @@ An eligible validator (not the application's own author or group)
 
 | File | Purpose |
 |------|---------|
-| `content/flows/endpoint-validation/index.ts` | Flow definition: config schema, required capability, evidence purge job, actions |
+| `content/templates/endpoint-check/template.yaml` | The reference-case flow as a template (`template.source.ts` is generated by `npm run templates:build`) |
+| `content/templates/endpoint-check/reviewer.test.ts` | In-memory reviewer run: probe, observation, reveal, verdict, quorum pay |
+| `content/templates/endpoint-check/equivalence.integration.test.ts` | Same campaign on the template and on the retired hand-written flow, on Postgres |
+| `apps/leaderboard-client/src/distribution/client/generated.tsx` | Generated slots that render `endpoint-check` |
+| `content/flows/endpoint-validation/index.ts` | Retired flow definition: config schema, required capability, evidence purge job, actions |
 | `content/flows/endpoint-validation/actions/` | Reference cases, claims, verdicts, runs — the action handlers |
 | `content/flows/journey-validation/index.ts` | Flow definition: config schema (`eligible_roles`, `expert_comment_qualification`), required capability, actions |
 | `content/flows/journey-validation/actions/` | Scenario steps and runs; `errors.ts` maps the scenario error classes to HTTP statuses |
@@ -280,7 +340,7 @@ An eligible validator (not the application's own author or group)
 | `packages/services/challenge/scenario-steps.service.ts` | Step CRUD + reorder, the freeze check |
 | `packages/services/challenge/scenario-walkthrough.service.ts` | Open/resume a run, save a step, complete + pay — the group-aware ownership guard |
 | `packages/services/challenge/scenario-errors.ts` | The typed error classes both scenario services throw |
-| `apps/leaderboard-client/src/distribution/mytwin.platform.ts` | Installs both flows and the kit, with `medical_pro` as qualification default |
+| `apps/leaderboard-client/src/distribution/mytwin.platform.ts` | Installs the validation flows (`endpoint-validation` retired, `endpoint-check`, `journey-validation`) and the kit, with `medical_pro` as qualification default |
 | `apps/leaderboard-client/src/components/challenges/ValidationChallengeFlow.tsx` | Reviewer: claim → observe → reveal → vote (reference-case mode) |
 | `apps/leaderboard-client/src/components/challenges/ReferenceCaseAuthorPanel.tsx` | Reviewer: author a reference case |
 | `apps/leaderboard-client/src/components/challenges/ValidationOutputViewer.tsx` | Generic image/JSON/text renderer for the endpoint's response |

@@ -124,6 +124,10 @@ Since challenge 020, `db-apply-schema` also carries the data takeovers of the pl
 
 **The postdeploy runs while the previous release still serves traffic** — Scalingo only switches routing once it succeeds, and keeps the old release if it fails. Schema changes must therefore keep the old code working. The slug columns are the case in point: they are added nullable, backfilled under a write lock and set `NOT NULL` in one transaction per table, at the very end of `db-apply-schema`. Between that `NOT NULL` and the routing switch (seconds), the old release cannot create a challenge or a sandbox. If the postdeploy fails *after* it, the old release stays up in that state — roll back with `ALTER TABLE challenges ALTER COLUMN slug DROP NOT NULL` (and the same on `sandboxes`) while you fix the deploy. Before the first deploy of a data migration like this one, take a manual backup from the Scalingo dashboard, and preview what will be written with `npm run db:preview-slugs` through `scalingo db-tunnel`.
 
+**Challenge 021 (interpreter, templates in the database).** Every schema change of the challenge is additive and runs in `db-apply-schema`: the `blobs` and `resource_field_grants` tables; `resource_claims.scope_key`, `scope_exclusive` and `context`, with the scoped unique indexes created `CONCURRENTLY` before the former `idx_resource_claims_live` is dropped concurrently (the old release keeps drawing throughout); the `templates`, `template_versions` (with the `template_versions_guard` trigger) and `system_template_checksums` tables; `challenges.template_version` and `template_status` with their check and composite FK — all NULL on existing rows, so the FK validates instantly.
+
+At boot, `instrumentation.ts` loads every template version published in the database. Watch the logs for two structured warnings: `template_version_unservable` (a published version no longer compiles against this release — the boot goes on, its challenges answer 503) and `system_template_drift` (a file template changed since the last boot; it names the live challenges that now run the new text). Run `npm run templates:check` before deploying a change to `content/templates/`.
+
 ---
 
 ## Environment variables for production
@@ -188,7 +192,10 @@ The tick runs every job whose schedule has come due since its last start (UTC cr
 | `digest.generate` | module digest | daily, 05:00 UTC | Generate an activity digest when one is due (see [`digest.md`](./digest.md)) |
 | `core.refresh-tokens.cleanup` | core | daily, 05:00 UTC | Delete expired refresh tokens |
 | `sandbox.ip-hashes.purge` | module sandbox | daily, 05:00 UTC | Erase star IP hashes older than 30 days |
-| `endpoint-validation.evidence.purge` | flow endpoint-validation | daily, 05:00 UTC | Erase validation evidence 12 months after the challenge closed |
+| `endpoint-validation.evidence.purge` | flow endpoint-validation (retired) | daily, 05:00 UTC | Erase validation evidence 12 months after the challenge closed |
+| `core.blobs.retention` | core | daily, 03:30 UTC | Purge the bytes of blobs (template files, endpoint responses) past their retention after the challenge closed |
+| `data-annotation.audit` | template data-annotation | Mondays, 04:00 UTC | Sampled clawback audit (see [`data-annotation.md`](./data-annotation.md#audit)) |
+| `<key>.<lane>` | a template published in the database | as declared | Its cron lanes; the tick loads versions published since the instance booted before running jobs |
 
 A job with no row in `cron_runs` only catches an occurrence from the last 5 minutes: deploying a daily job at 14:00 runs it the next day, not immediately.
 

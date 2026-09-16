@@ -39,6 +39,8 @@ leaderboard/
 │       │   │       ├── integrations/       # generic connections: [key]/{connection,status,
 │       │   │       │                       # authorize,callback,extras/[action]}
 │       │   │       ├── github-oauth/       # legacy alias of the GitHub OAuth callback
+│       │   │       ├── templates/          # editor API for database templates: library, [key]/{draft,
+│       │   │       │                       # validate,publish,describe}
 │       │   │       ├── modules/            # module list + [key] settings and toggle
 │       │   │       ├── events/ui/          # browser-only UI events → outbox
 │       │   │       ├── cron/tick/          # the single scheduled entry point (the five
@@ -49,6 +51,7 @@ leaderboard/
 │       │   │   ├── admin/             # admin drawers, editors, lists
 │       │   │   ├── challenges/        # brief, detail and manage views, drawers
 │       │   │   ├── contributor/       # profile, task board, integration cards, modules panel
+│       │   │   ├── generated/         # the generated UI of a template: fields, values, lanes, overview
 │       │   │   ├── home/              # homepage sections
 │       │   │   ├── layout/            # navbar, footer, module nav links, session guard
 │       │   │   ├── leaderboard/       # podium, table, filters
@@ -59,10 +62,14 @@ leaderboard/
 │       │   ├── distribution/          # composition root — the only shell code that may import
 │       │   │   │                      # content/ and modules/
 │       │   │   ├── mytwin.platform.ts # flows, extensions, kits, modules installed
-│       │   │   ├── mytwin.server.ts   # connectors, integrations, bundle sources, providers, grids
+│       │   │   ├── mytwin.server.ts   # connectors, integrations, bundle sources, providers, grids;
+│       │   │   │                      # loadDatabaseTemplates (published versions, drift alert)
+│       │   │   ├── mytwin.templates.ts # text of the file templates (editor library)
 │       │   │   ├── mytwin.client.tsx  mytwin.forms.tsx  mytwin.activity.tsx  mytwin.integrations.tsx
 │       │   │   ├── mytwin.modules.tsx mytwin.proxy.ts
-│       │   │   └── client/  forms/  activity/  modules/   # per flow, connector and module
+│       │   │   └── client/  forms/  activity/  modules/   # per flow, connector and module;
+│       │   │                          # client/generated.tsx (generated and described slots),
+│       │   │                          # forms/template*.ts (database template form section)
 │       │   ├── lib/
 │       │   │   ├── auth.ts            # JWT helpers (sign, verify, cookies)
 │       │   │   ├── db.ts              # repository instances
@@ -84,11 +91,17 @@ leaderboard/
 │       └── next.config.ts
 │
 ├── packages/                          # CORE — imports nothing outside the core
-│   ├── registry/                      # PlatformRegistry + architecture, empty-distribution
+│   ├── registry/                      # PlatformRegistry (flows + database template versions,
+│   │                                  # flowFor) + flow catalog + architecture, empty-distribution
 │   │                                  # and example-flow tests
+│   ├── interpreter/                   # leaderboardos/1 templates: expr/ (parser, checker,
+│   │                                  # evaluator), format/ (schema), validate/ (salvage parse,
+│   │                                  # passes), compile/ (FlowDefinition, engine, generated
+│   │                                  # reads), describe.ts (client-safe surface), conformance/
 │   ├── capabilities/                  # evaluation + bundle, challenge-actions + challenge-hooks,
 │   │                                  # board, groups, qualifications, pool, economy, rewards,
 │   │                                  # cron, events, modules, crypto, credentials,
+│   │                                  # resources, blobs, templates (database templates),
 │   │                                  # identity/ (Google login), http-proxy/ (SSRF guard,
 │   │                                  # endpoint proxy), testing/
 │   ├── config/                        # env validation (Zod) + credential getters
@@ -102,7 +115,8 @@ leaderboard/
 │   │   │   └── mappers.ts             # DB rows ↔ domain entities
 │   │   ├── domain/                    # entities, Zod schemas, reward rule shapes,
 │   │   │                              # legacy column fallbacks
-│   │   └── repositories/              # one file per table/domain area
+│   │   ├── repositories/              # one file per table/domain area
+│   │   └── testing/integration.ts     # integrationScope: rows a Postgres test creates and deletes
 │   │
 │   ├── evaluator/                     # AI evaluation agent
 │   │   ├── evaluator.ts               # OpenAIAgentEvaluator class
@@ -120,8 +134,11 @@ leaderboard/
 │   └── slack-signal-agent/            # not yet sorted: AI detection of Slack signals
 │
 ├── content/                           # INSTALLED CONTENT — see writing-a-flow.md
-│   ├── flows/                         # code  ml  endpoint-validation  journey-validation
-│   ├── kits/validation/               # shared by the validation flows
+│   ├── flows/                         # code  ml  endpoint-validation (retired)  journey-validation
+│   │                                  # data-annotation (not installed: equivalence reference)
+│   ├── templates/                     # data-annotation  endpoint-check — template.yaml, generated
+│   │                                  # template.source.ts, descriptor.ts, index.ts, tests
+│   ├── kits/validation/               # shared by the hand-written validation flows
 │   ├── extensions/                    # slack-signals  compute (+ scaleway/)
 │   ├── connectors/                    # github  kaggle  slack
 │   ├── integrations/openai/
@@ -132,7 +149,7 @@ leaderboard/
 ├── modules/                           # PRODUCT MODULES — meetings  onboarding  digest  sandbox
 │
 ├── db_data/                           # seed data
-│   ├── seed.ts  seed-demo.ts  seed-sandbox.ts
+│   ├── seed.ts  seed-demo.ts  seed-sandbox.ts  seed-annotation.ts
 │   ├── seed-validation-mammo.ts  seed-validation-mykine.ts
 │   └── projects.json  users.json  challenges.json  contributions.json
 │
@@ -144,6 +161,7 @@ leaderboard/
 │   ├── db-seed-grids.ts               # insert missing evaluation grids (deploy postdeploy)
 │   ├── db-upgrade-flow-configs.ts     # bring flow_config up to the flows' versions (postdeploy)
 │   ├── db-preview-slugs.ts
+│   ├── templates-build.ts  templates-check.ts   # npm run templates:build / templates:check
 │   ├── prod.sh
 │   └── macos/  windows/               # init + launch helpers
 ├── docs/                              # this documentation
@@ -161,6 +179,11 @@ leaderboard/
 | API endpoints | `apps/leaderboard-client/src/app/api/**/route.ts` |
 | What is installed (flows, extensions, modules, connectors) | `apps/leaderboard-client/src/distribution/` |
 | A challenge flow (config, rules, actions, hooks) | `content/flows/<key>/index.ts` (see [`writing-a-flow.md`](./writing-a-flow.md)) |
+| A template flow | `content/templates/<key>/template.yaml`, or `template_versions` for one published from the editor (see [`packages.md`](./packages.md#packagesinterpreter)) |
+| The interpreter (validation, compilation, generated reads) | `packages/interpreter/` |
+| Templates in the database (loading, publication, diagnostics) | `packages/capabilities/templates.ts` + `apps/leaderboard-client/src/app/api/templates/` (see [`api.md`](./api.md#templates)) |
+| Generated UI | `apps/leaderboard-client/src/distribution/client/generated.tsx` + `apps/leaderboard-client/src/components/generated/` |
+| Files (blobs) | `packages/capabilities/blobs.ts` |
 | Flow action dispatch and access | `packages/capabilities/challenge-actions.ts` |
 | Import boundaries | `packages/registry/architecture.test.ts` |
 | Scheduled jobs | `packages/capabilities/cron.ts` + `/api/cron/tick` |
@@ -175,7 +198,8 @@ leaderboard/
 | Seed data | `db_data/seed.ts` + `db_data/*.json` |
 | AI evaluation (code challenges) | `packages/capabilities/evaluation.ts` + `packages/evaluator/` + `content/flows/code/` + `packages/services/challenge/code-rewards.service.ts` |
 | ML challenge rewards | `content/flows/ml/reward.ts` + `packages/services/challenge/ml-rewards.service.ts` (see [`ml-rewards.md`](./ml-rewards.md)) |
-| Validation challenges | `content/flows/endpoint-validation/` + `content/flows/journey-validation/` + `content/kits/validation/` + `packages/services/challenge/` (see [`validation-challenges.md`](./validation-challenges.md)) |
+| Validation challenges | `content/templates/endpoint-check/` (new ML validations) + `content/flows/endpoint-validation/` (retired) + `content/flows/journey-validation/` + `content/kits/validation/` + `packages/services/challenge/` (see [`validation-challenges.md`](./validation-challenges.md)) |
+| Data annotation | `content/templates/data-annotation/` (installed) + `content/flows/data-annotation/` (reference) (see [`data-annotation.md`](./data-annotation.md)) |
 | GPU compute | `content/extensions/compute/` + `packages/services/compute/` (see [`compute-power.md`](./compute-power.md)) |
 | Google login | `packages/capabilities/identity/google-auth.ts` |
 | Meetings | `modules/meetings/` + `packages/services/google-workspace/` + `packages/services/sync-meeting/` + `packages/sync-meeting-agent/` |
