@@ -11,6 +11,7 @@ import { ThemeSettings } from "@/components/contributor/ThemeSettings";
 import { fetchContributorProfile, fetchContributorSession } from "@/lib/contributor";
 import { LogoutButton } from "@/components/contributor/LogoutButton";
 import { AdminButton } from "@/components/contributor/AdminButton";
+import { TemplatesButton } from "@/components/contributor/TemplatesButton";
 import { ProfileEditForm } from "@/components/contributor/ProfileEditForm";
 import { ClickableAvatarUpload } from "@/components/contributor/ClickableAvatarUpload";
 import { IntegrationsPanel } from "@/components/contributor/IntegrationsPanel";
@@ -207,6 +208,7 @@ export default async function ContributorSelfPage({
         actions={
           <>
             {session.role === "admin" && <AdminButton />}
+            {session.role === "admin" && <TemplatesButton />}
             <LogoutButton />
           </>
         }

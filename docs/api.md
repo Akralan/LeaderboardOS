@@ -355,9 +355,10 @@ Templates written in the editor and stored in the database (see [`database.md`](
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/templates` | The library: `system` (the distribution's file templates, read-only, duplicable) and `templates` (database ones: published versions with their challenge counts, whether a draft exists, and the latest version's descriptor and surface). Archived templates are left out. | Admin |
+| `GET` | `/api/templates` | The library: `system` (the distribution's file templates, read-only, duplicable) and `templates` (database ones: published versions with their challenge counts, whether a draft exists and the version its YAML carries (`draft_version`), when a row was last written (`edited_at`), and the latest version's descriptor and surface). Archived templates are left out. | Admin |
 | `POST` | `/api/templates` | `{ key, name, yaml?, seed?: { key, version? } }` — create a template and its first draft, from a text or as a copy of a system template or a published version (the document's `template.id` is rewritten). `key` is kebab-case without dots; `409` when taken or served by an installed flow, `404` for an unknown seed. Returns the draft's diagnostics. | Admin |
 | `GET` | `/api/templates/:key` | Published versions (with usage and checksum) and the draft, with its diagnostics. | Admin |
+| `GET` | `/api/templates/:key/source` | The YAML of a published version (`?version=`, latest otherwise), which the graph editor opens read-only and "New version" starts from; for a system template, its distribution text. | Admin |
 | `PUT` | `/api/templates/:key/draft` | `{ yaml }` — save the draft, however holey; returns its diagnostics. | Admin |
 | `POST` | `/api/templates/:key/validate` | `{ yaml? }` — diagnostics of the given text, or of the saved draft. | Admin |
 | `POST` | `/api/templates/:key/publish` | No body: the version is read from the draft's `template.version`. `201 { version, published_at }`; `422 { diagnostics }` while the draft has errors; `409` when the version is not greater than the last published; `404` without a draft. The version is installed in this instance at once; other instances catch up on demand and at the cron tick. | Admin |

@@ -180,3 +180,22 @@ html[data-mode="light"] {
 .animate-slide-in-left {
   animation: slide-in-left 0.25s ease-out both;
 }
+
+/* Graph editor — a refused wire shakes once before it snaps back. */
+@keyframes gz-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+
+/* Graph editor — the error and advisory tints are written for the dark theme;
+   in light mode they take their deep tone so the messages stay legible. */
+html[data-mode="light"] .graph-editor :is(.text-red-200, .text-red-300, .text-red-400) {
+  color: #b91c1c !important;
+}
+html[data-mode="light"] .graph-editor :is(.text-amber-200, .text-amber-300) {
+  color: #92400e !important;
+}
+html[data-mode="light"] .graph-editor .text-sky-300 {
+  color: #0369a1 !important;
+}
