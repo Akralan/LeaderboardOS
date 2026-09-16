@@ -1,7 +1,8 @@
 import { db, sandbox_slug_redirects, sandboxes } from "../db/drizzle";
-import { and, desc, eq, gte, isNull, lt, ne } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, ne, sql } from "drizzle-orm";
 import { toDomainSandbox } from "../db/mappers";
 import type { Sandbox, SandboxEvaluationStatus, SandboxType } from "../domain/entities";
+import { proposalFieldsFromLegacyColumns, proposalFieldsPatch } from "../domain/legacyProposalFields";
 import { SLUG_FALLBACK, SlugTakenError } from "../domain/slug";
 import { availableSlug, claimSlug, isSlugTaken, isSlugUniqueViolation, type SlugOwners } from "./slugs";
 
@@ -21,6 +22,8 @@ export interface SandboxDraft {
   repo_url: string;
   model_url?: string | null;
   dataset_urls?: string[];
+  /** Les champs validés par le flow ; tirés des trois colonnes s'ils manquent. */
+  proposal_fields?: Record<string, unknown>;
 }
 
 /** Édition par l'auteur. Ni `type`, ni `status`, ni les champs d'évaluation : chacun a son chemin dédié. */
@@ -34,6 +37,8 @@ export interface SandboxPatch {
   repo_url?: string;
   model_url?: string | null;
   dataset_urls?: string[];
+  /** Les champs validés par le flow, fusionnés clé par clé ; tirés des colonnes éditées s'ils manquent. */
+  proposal_fields?: Record<string, unknown>;
 }
 
 /**
@@ -160,6 +165,7 @@ export class SandboxRepository {
           repo_url: draft.repo_url,
           model_url: draft.model_url ?? null,
           dataset_urls: draft.dataset_urls ?? [],
+          proposal_fields: draft.proposal_fields ?? proposalFieldsFromLegacyColumns(draft),
         })
         .returning();
       return toDomainSandbox(inserted);
@@ -185,6 +191,11 @@ export class SandboxRepository {
     if (patch.repo_url !== undefined) set.repo_url = patch.repo_url;
     if (patch.model_url !== undefined) set.model_url = patch.model_url;
     if (patch.dataset_urls !== undefined) set.dataset_urls = patch.dataset_urls;
+    // Fusion dans le jsonb, clé par clé, en miroir des colonnes jusqu'au lot L7.
+    const proposal = patch.proposal_fields ?? proposalFieldsPatch(patch);
+    if (Object.keys(proposal).length > 0) {
+      set.proposal_fields = sql`COALESCE(${sandboxes.proposal_fields}, '{}'::jsonb) || ${JSON.stringify(proposal)}::jsonb`;
+    }
 
     let change: { from: string; to: string } | null = null;
     if (patch.slug !== undefined) {

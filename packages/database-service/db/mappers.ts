@@ -23,7 +23,6 @@ import {
   sync_meetings,
   meeting_participants,
   meeting_analyses,
-  onboarding_progress,
   app_settings,
   challenge_documents,
   challenge_signals,
@@ -44,8 +43,7 @@ import {
   notifications,
   role_changes,
 } from "./drizzle.js";
-import { parseMlRewardRules } from "../domain/mlRewardRules.js";
-import { parseCodeRewardRules } from "../domain/codeRewardRules.js";
+import { flowConfigFromLegacyColumns, legacyChallengeColumns } from "../domain/legacyFlowConfig.js";
 import type {
   Project,
   Repo,
@@ -88,7 +86,6 @@ import type {
   MeetingParticipant,
   MeetingAnalysis,
   MeetingAnalysisStatus,
-  OnboardingProgress,
   AppSettings,
   ContributionEvaluationStatus,
   RewardEntry,
@@ -107,8 +104,8 @@ import type {
   SandboxRewardRuleKey,
   Notification,
   NotificationType,
-  SandboxStarTier,
 } from "../domain/entities.js";
+import { sandboxProposalOf } from "../domain/legacyProposalFields.js";
 
 // --- Types inférés depuis Drizzle ---
 type DbProject = InferSelectModel<typeof projects>;
@@ -172,12 +169,13 @@ export function toDomainChallenge(row: DbChallenge): Challenge {
     contribution_points_reward: row.contribution_points_reward ?? 0,
     completion: row.completion ?? 0,
     project_id: row.project_id ?? "",
-    reward_rules: parseMlRewardRules(row.reward_rules) ?? parseCodeRewardRules(row.reward_rules),
-    workspace_mode: (row.workspace_mode as Challenge["workspace_mode"]) ?? undefined,
+    reward_rules: row.reward_rules ?? null,
     source_challenge_id: row.source_challenge_id ?? null,
-    cp_per_validation: row.cp_per_validation ?? null,
-    required_validations: row.required_validations ?? null,
-    compute_enabled: row.compute_enabled ?? false,
+    // Une ligne écrite par l'ancien code n'a pas de flow_config : elle se
+    // reconstitue depuis les colonnes historiques (supprimées en L7).
+    flow_config: (row.flow_config as Record<string, unknown> | null)
+      ?? flowConfigFromLegacyColumns(row.type, row),
+    flow_config_version: row.flow_config_version ?? 1,
     created_at: new Date(row.created_at),
     closed_at: row.closed_at ? new Date(row.closed_at) : null,
   };
@@ -312,11 +310,11 @@ export function toDbChallenge(entity: Omit<Challenge, "uuid" | "created_at">): t
     completion: entity.completion ?? 0,
     project_id: entity.project_id || null,
     reward_rules: entity.reward_rules ?? null,
-    workspace_mode: entity.workspace_mode ?? null,
     source_challenge_id: entity.source_challenge_id ?? null,
-    cp_per_validation: entity.cp_per_validation ?? null,
-    required_validations: entity.required_validations ?? null,
-    compute_enabled: entity.compute_enabled ?? false,
+    flow_config: entity.flow_config ?? null,
+    flow_config_version: entity.flow_config_version ?? 1,
+    // Colonnes historiques écrites en miroir jusqu'au lot L7 (domain/legacyFlowConfig.ts).
+    ...legacyChallengeColumns(entity.flow_config),
   };
 }
 
@@ -398,11 +396,11 @@ export function toDbTask(entity: Omit<Task, "uuid" | "created_at">): typeof task
 export function toDomainEvaluationRun(row: DbEvaluationRun): EvaluationRun {
   return {
     uuid: row.uuid,
-    challenge_id: row.challengeId,
+    challenge_id: row.challengeId ?? undefined,
     trigger_type: row.triggerType as EvaluationRunTriggerType,
     trigger_payload: (row.triggerPayload as Record<string, unknown>) ?? undefined,
-    window_start: new Date(row.windowStart),
-    window_end: new Date(row.windowEnd),
+    window_start: row.windowStart ? new Date(row.windowStart) : undefined,
+    window_end: row.windowEnd ? new Date(row.windowEnd) : undefined,
     status: row.status as EvaluationRunStatus,
     started_at: row.startedAt ? new Date(row.startedAt) : undefined,
     finished_at: row.finishedAt ? new Date(row.finishedAt) : undefined,
@@ -417,11 +415,11 @@ export function toDbEvaluationRun(
   entity: Omit<EvaluationRun, 'uuid'>
 ): typeof evaluation_runs.$inferInsert {
   return {
-    challengeId: entity.challenge_id,
+    challengeId: entity.challenge_id ?? null,
     triggerType: entity.trigger_type,
     triggerPayload: entity.trigger_payload ?? null,
-    windowStart: entity.window_start,
-    windowEnd: entity.window_end,
+    windowStart: entity.window_start ?? null,
+    windowEnd: entity.window_end ?? null,
     status: entity.status,
     startedAt: entity.started_at ?? null,
     finishedAt: entity.finished_at ?? null,
@@ -639,26 +637,6 @@ export function toDbMeetingAnalysis(entity: Omit<MeetingAnalysis, "uuid" | "crea
     status: entity.status,
     processed_at: entity.processed_at ?? null,
     error_message: entity.error_message ?? null,
-  };
-}
-
-// ============================================================
-// ONBOARDING PROGRESS MAPPERS
-// ============================================================
-
-type DbOnboardingProgress = InferSelectModel<typeof onboarding_progress>;
-
-export function toDomainOnboardingProgress(row: DbOnboardingProgress): OnboardingProgress {
-  return {
-    user_id: row.user_id,
-    clicked_challenge: row.clicked_challenge,
-    assigned_task: row.assigned_task,
-    evaluated_contribution: row.evaluated_contribution,
-    validated_task: row.validated_task,
-    joined_meeting: row.joined_meeting,
-    completed_at: row.completed_at ?? undefined,
-    created_at: row.created_at!,
-    updated_at: row.updated_at!,
   };
 }
 
@@ -996,35 +974,6 @@ export function toDomainAppSettings(row: InferSelectModel<typeof app_settings>):
     background_color: row.background_color ?? null,
     theme_mode: row.theme_mode ?? "light",
     updated_at: row.updated_at ?? undefined,
-    github_org: row.github_org ?? null,
-    github_connected_at: row.github_connected_at ?? null,
-    github_connected_by: row.github_connected_by ?? null,
-    github_is_connected: !!row.github_token_enc,
-    kaggle_username: row.kaggle_username ?? null,
-    kaggle_connected_at: row.kaggle_connected_at ?? null,
-    kaggle_connected_by: row.kaggle_connected_by ?? null,
-    kaggle_is_connected: !!row.kaggle_key_enc,
-    openai_connected_at: row.openai_connected_at ?? null,
-    openai_connected_by: row.openai_connected_by ?? null,
-    openai_is_connected: !!row.openai_key_enc,
-    slack_team_name: row.slack_team_name ?? null,
-    slack_connected_at: row.slack_connected_at ?? null,
-    slack_connected_by: row.slack_connected_by ?? null,
-    slack_is_connected: !!row.slack_token_enc,
-    modules_meetings_enabled: row.modules_meetings_enabled ?? false,
-    modules_onboarding_enabled: row.modules_onboarding_enabled ?? false,
-    scaleway_project_id: row.scaleway_project_id ?? null,
-    scaleway_zone: row.scaleway_zone ?? null,
-    scaleway_connected_at: row.scaleway_connected_at ?? null,
-    scaleway_connected_by: row.scaleway_connected_by ?? null,
-    scaleway_is_connected: !!row.scaleway_secret_key_enc && !row.scaleway_disconnect_requested_at,
-    scaleway_disconnect_requested_at: row.scaleway_disconnect_requested_at ?? null,
-    digest_enabled: row.digest_enabled ?? false,
-    digest_frequency_days: row.digest_frequency_days ?? 7,
-    // Défauts inertes : une instance dont les colonnes viennent d'être ajoutées
-    // ne paie ni palier ni bonus tant que l'admin n'a rien saisi.
-    sandbox_star_tiers: (row.sandbox_star_tiers as SandboxStarTier[] | null) ?? [],
-    sandbox_promotion_bonus_cp: row.sandbox_promotion_bonus_cp ?? 0,
   };
 }
 
@@ -1044,6 +993,7 @@ export function toDomainDigest(row: DbDigest): Digest {
 // --- SANDBOX ---
 
 export function toDomainSandbox(row: DbSandbox): Sandbox {
+  const proposal = sandboxProposalOf(row);
   return {
     uuid: row.uuid,
     user_id: row.user_id,
@@ -1055,9 +1005,11 @@ export function toDomainSandbox(row: DbSandbox): Sandbox {
     // par un chemin qui ignorait la colonne remonterait null.
     goals: row.goals ?? [],
     why: row.why ?? null,
-    repo_url: row.repo_url,
-    model_url: row.model_url ?? null,
-    dataset_urls: row.dataset_urls ?? [],
+    // Lus dans `proposal_fields`, repli clé par clé sur les colonnes : domain/legacyProposalFields.ts.
+    repo_url: proposal.repo_url,
+    model_url: proposal.model_url,
+    dataset_urls: proposal.dataset_urls,
+    proposal_fields: proposal.proposal_fields,
     status: row.status as SandboxStatus,
     promoted_challenge_id: row.promoted_challenge_id ?? null,
     promoted_at: row.promoted_at ?? null,

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import {
+  InvalidProposalError,
+  InvalidRewardRulesError,
+  SandboxFlowUnavailableError,
   SandboxForbiddenError,
   SandboxNotFoundError,
   SandboxNotOpenError,
@@ -38,6 +41,20 @@ export function sandboxErrorResponse(error: unknown): NextResponse | null {
   // derrière une IP partagée (campus, entreprise) qui atteindrait le plafond.
   if (error instanceof StarRateLimitedError) {
     return NextResponse.json({ error: error.message }, { status: 429 });
+  }
+  // Promotion : des règles de reward que le flow du challenge ne sait pas lire.
+  if (error instanceof InvalidRewardRulesError) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+  // Création et édition : des champs que le flow de la proposition refuse,
+  // dans la même forme qu'un corps invalide.
+  if (error instanceof InvalidProposalError) {
+    return NextResponse.json({ error: "Invalid body", details: error.details }, { status: 400 });
+  }
+  // 409 : la proposition existe, mais son flow n'est plus installé ou n'en
+  // accepte plus — ni promotion, ni édition de ses champs.
+  if (error instanceof SandboxFlowUnavailableError) {
+    return NextResponse.json({ error: error.message }, { status: 409 });
   }
   // Création, édition et promotion : un slug pris répond comme sur les challenges.
   return slugTakenResponse(error);

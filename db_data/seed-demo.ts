@@ -14,6 +14,7 @@ import {
   ChallengeRepoRepository,
   ChallengeTeamRepository,
   UserRepository,
+  UserQualificationRepository,
   ContributionRepository,
   RewardEntryRepository,
   ValidationTargetRepository,
@@ -23,6 +24,12 @@ import {
 import type { RewardEntryDraft } from "../packages/database-service/repositories/index.js";
 import { ReferenceCaseService } from "../packages/services/challenge/reference-case.service.js";
 import { ValidationChallengeService } from "../packages/services/challenge/validation-challenge.service.js";
+import { PlatformRegistry } from "../packages/registry/platform.js";
+import { MEDICAL_PRO, platform } from "../apps/leaderboard-client/src/distribution/mytwin.platform";
+
+// Le ledger n'accepte que les clés déclarées par la plateforme installée, et
+// les services de validation lisent leur pool dans ces déclarations.
+PlatformRegistry.install(platform);
 
 /**
  * Demo seed — ML challenge + qualified validation challenge (challenge-014),
@@ -54,6 +61,7 @@ const challengeRepo = new ChallengeRepository();
 const challengeRepoRepo = new ChallengeRepoRepository();
 const challengeTeamRepo = new ChallengeTeamRepository();
 const userRepo = new UserRepository();
+const qualificationRepo = new UserQualificationRepository();
 const contributionRepo = new ContributionRepository();
 const rewardRepo = new RewardEntryRepository();
 const targetRepo = new ValidationTargetRepository();
@@ -69,18 +77,23 @@ function json(obj: unknown): Buffer {
 async function findOrCreateUser(profile: {
   full_name: string;
   role: string;
+  qualification?: string;
   bio?: string;
   github_username?: string | null;
 }) {
   const [existing] = await db.select({ uuid: users.uuid }).from(users).where(eq(users.full_name, profile.full_name)).limit(1);
-  if (existing) return existing.uuid;
-  const created = await userRepo.create({
+  const uuid = existing
+    ? existing.uuid
+    : (await userRepo.create({
     role: profile.role,
     full_name: profile.full_name,
     bio: profile.bio,
     github_username: profile.github_username ?? undefined,
-  });
-  return created.uuid;
+      })).uuid;
+  if (profile.qualification) {
+    await qualificationRepo.grant(uuid, profile.qualification, { changedBy: null, note: "Seed de démonstration" });
+  }
+  return uuid;
 }
 
 async function findOrCreateProject(title: string, description: string) {
@@ -152,25 +165,29 @@ async function main() {
   // --- Medical pros ---
   const drFerrandId = await findOrCreateUser({
     full_name: "Dr. Amélie Ferrand",
-    role: "medical_pro",
+    role: "contributor",
+    qualification: MEDICAL_PRO,
     bio: "Médecine physique et réadaptation — auteure des cas de référence",
   });
   const drHaddadId = await findOrCreateUser({
     full_name: "Dr. Karim Haddad",
-    role: "medical_pro",
+    role: "contributor",
+    qualification: MEDICAL_PRO,
     bio: "Radiologue",
   });
   const drLenoirId = await findOrCreateUser({
     full_name: "Dr. Sophie Lenoir",
-    role: "medical_pro",
+    role: "contributor",
+    qualification: MEDICAL_PRO,
     bio: "Chirurgienne orthopédiste",
   });
   const drRousselId = await findOrCreateUser({
     full_name: "Dr. Julien Roussel",
-    role: "medical_pro",
+    role: "contributor",
+    qualification: MEDICAL_PRO,
     bio: "Médecin du sport",
   });
-  console.log(`✓ 4 medical_pro users ready (1 author + 3 validators)`);
+  console.log(`✓ 4 health professionals ready (contributors with the medical_pro qualification: 1 author + 3 validators)`);
 
   // --- ML contributors ---
   const christylId = await findOrCreateUser({
@@ -205,7 +222,7 @@ async function main() {
       contribution_points_reward: 2200,
       completion: 0.55,
       project_id: projectId,
-      compute_enabled: true,
+      flow_config: { extensions: { compute: { enabled: true } } },
       start_date: new Date("2026-06-01"),
       reward_rules: {
         version: 1,
@@ -345,15 +362,14 @@ async function main() {
     async () => ({
       title: "Validation clinique qualifiée — API Lésion Ligamentaire",
       status: "active",
-      type: "validation",
+      type: "endpoint-validation",
       description:
         "Validation par des professionnels de santé qualifiés (medical_pro) des API de détection de lésion ligamentaire exposées par le challenge ML associé — voir challenges/challenge-014-qualified_validation/SPEC.md.",
       contribution_points_reward: 300,
       completion: 1.0,
       project_id: projectId,
       source_challenge_id: mlChallengeId,
-      cp_per_validation: 40,
-      required_validations: 3,
+      flow_config: { cp_per_validation: 40, required_validations: 3 },
     })
   );
   console.log(valCreated ? `✓ Validation challenge created` : `✓ Validation challenge already exists`);

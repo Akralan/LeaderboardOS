@@ -13,20 +13,16 @@ import { LogoutButton } from "@/components/contributor/LogoutButton";
 import { AdminButton } from "@/components/contributor/AdminButton";
 import { ProfileEditForm } from "@/components/contributor/ProfileEditForm";
 import { ClickableAvatarUpload } from "@/components/contributor/ClickableAvatarUpload";
-import { GitHubConnectionCard } from "@/components/contributor/GitHubConnectionCard";
-import { KaggleConnectionCard } from "@/components/contributor/KaggleConnectionCard";
-import { SlackConnectionCard } from "@/components/contributor/SlackConnectionCard";
-import { OpenAIConnectionCard } from "@/components/contributor/OpenAIConnectionCard";
-import { ScalewayConnectionCard } from "@/components/contributor/ScalewayConnectionCard";
+import { IntegrationsPanel } from "@/components/contributor/IntegrationsPanel";
 import { AppSettingsRepository, OnboardingProgressRepository, UserRepository } from "@packages/database-service/repositories";
 import { AccountMergePanel } from "@/components/contributor/AccountMergePanel";
 import { isValidThemeKey, DEFAULT_THEME_KEY } from "@/lib/themes";
-import { ModulesSettings } from "@/components/contributor/ModulesSettings";
+import { ModulesPanel } from "@/components/contributor/ModulesPanel";
+import { modules } from "@packages/capabilities/modules";
 import { OnboardingProgressTable } from "@/components/contributor/OnboardingProgressTable";
 import { EvaluationGridsTab } from "@/components/contributor/evaluation-grids/EvaluationGridsTab";
 import { DigestTab } from "@/components/contributor/DigestTab";
 import { NotificationsTab } from "@/components/contributor/NotificationsTab";
-import { SandboxSettings } from "@/components/contributor/SandboxSettings";
 
 export const metadata = {
   title: "Profile",
@@ -39,7 +35,7 @@ const userRepo = new UserRepository();
 export default async function ContributorSelfPage({
   searchParams,
 }: {
-  searchParams?: Promise<{ github_error?: string; tab?: string }>;
+  searchParams?: Promise<Record<string, string | undefined>>;
 }) {
   const session = await fetchContributorSession();
 
@@ -54,7 +50,12 @@ export default async function ContributorSelfPage({
   }
 
   const resolvedSearchParams = searchParams ? await searchParams : {};
-  const githubError = resolvedSearchParams.github_error ?? null;
+  // `<clé>_error` : le code d'un OAuth refusé (`github_error=no_org_admin`…).
+  const integrationErrors = Object.fromEntries(
+    Object.entries(resolvedSearchParams)
+      .filter((entry): entry is [string, string] => entry[0].endsWith("_error") && typeof entry[1] === "string")
+      .map(([name, code]) => [name.slice(0, -"_error".length), code]),
+  );
   const initialTab = resolvedSearchParams.tab ?? undefined;
 
   const [firstName, ...lastNameParts] = session.fullName.split(" ");
@@ -119,11 +120,17 @@ export default async function ContributorSelfPage({
   ];
 
   if (session.role === "admin") {
-    const [settings, onboardingRows, allUsers] = await Promise.all([
+    const [settings, moduleStates, onboardingRows, allUsers] = await Promise.all([
       appSettingsRepo.get(),
+      modules.all(),
       onboardingProgressRepo.findAllWithUsers(),
       userRepo.findAll(),
     ]);
+    // Les dates ne passent pas la frontière serveur/client : l'écran n'en a pas besoin.
+    const moduleEntries = moduleStates.map(({ key, label, description, enabled, settings: moduleSettings }) => ({
+      key, label, description, enabled, settings: moduleSettings,
+    }));
+    const digestEnabled = moduleStates.some((state) => state.key === "digest" && state.enabled);
     const unlinkedUsers = allUsers.filter((u) => !u.google_user_id);
     const linkedUsers = allUsers.filter((u) => u.google_user_id);
     const themeKey = isValidThemeKey(settings.theme_key) ? settings.theme_key : DEFAULT_THEME_KEY;
@@ -148,13 +155,7 @@ export default async function ContributorSelfPage({
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-white/30">
               Integrations
             </h2>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 lg:items-start">
-              <GitHubConnectionCard initialError={githubError} />
-              <KaggleConnectionCard />
-              <SlackConnectionCard />
-              <OpenAIConnectionCard />
-              <ScalewayConnectionCard />
-            </div>
+            <IntegrationsPanel errors={integrationErrors} />
           </div>
         </div>
       ),
@@ -170,36 +171,22 @@ export default async function ContributorSelfPage({
     tabs.push({
       label: "Modules",
       panel: (
-        <div className="mx-auto max-w-lg py-2">
-          <ModulesSettings
-            meetingsEnabled={settings.modules_meetings_enabled}
-            onboardingEnabled={settings.modules_onboarding_enabled}
-          />
-        </div>
-      ),
-    });
-    tabs.push({
-      label: "Digest",
-      panel: (
         <div className="mx-auto max-w-lg py-2 lg:max-w-4xl">
-          <DigestTab
-            enabled={settings.digest_enabled}
-            frequencyDays={settings.digest_frequency_days}
-          />
+          <ModulesPanel initialModules={moduleEntries} />
         </div>
       ),
     });
-    tabs.push({
-      label: "Sandbox",
-      panel: (
-        <div className="mx-auto max-w-lg py-2 lg:max-w-4xl">
-          <SandboxSettings
-            tiers={settings.sandbox_star_tiers ?? []}
-            promotionBonusCp={settings.sandbox_promotion_bonus_cp ?? 0}
-          />
-        </div>
-      ),
-    });
+    // Le digest désactivé n'a plus de routes : son onglet disparaît avec lui.
+    if (digestEnabled) {
+      tabs.push({
+        label: "Digest",
+        panel: (
+          <div className="mx-auto max-w-lg py-2 lg:max-w-4xl">
+            <DigestTab />
+          </div>
+        ),
+      });
+    }
     tabs.push({
       label: "Onboarding",
       panel: (

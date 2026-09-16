@@ -4,8 +4,10 @@ import type { Metadata, MetadataRoute } from "next";
 import { repositories } from "@/lib/db";
 import { challengePath, sandboxPath } from "@/lib/paths";
 import type { Challenge, Sandbox } from "../../../../../packages/database-service/domain/entities";
+import { flowCatalog } from "@/distribution/mytwin.flows";
 import { isPubliclyVisible } from "@/lib/public/challengeVisibility";
 import { canSeeSandbox, sandboxViewer } from "@/lib/server/sandboxAuth";
+import { modules } from "@packages/capabilities/modules";
 import {
   SITE_URL,
   breadcrumbJsonLd,
@@ -31,11 +33,6 @@ import {
  */
 const ANONYMOUS = sandboxViewer(null, null);
 
-const CHALLENGE_TYPE_LABELS: Record<string, string> = {
-  code: "Code",
-  ml: "Machine learning",
-};
-
 /**
  * Une lecture qui échoue (base indisponible, identifiant qui n'est pas un UUID)
  * ne doit pas faire tomber la page : elle retombe sur des métadonnées neutres.
@@ -56,7 +53,7 @@ async function safely<T>(read: () => Promise<T>): Promise<T | null> {
 export function challengeMetadata(challenge: Challenge): Metadata {
   if (!isPubliclyVisible(challenge)) return unindexedMetadata("Challenges");
 
-  const typeLabel = CHALLENGE_TYPE_LABELS[challenge.type] ?? "Open";
+  const typeLabel = flowCatalog.get(challenge.type)?.longLabel ?? "Open";
   return pageMetadata({
     title: challenge.title,
     description:
@@ -129,14 +126,17 @@ export async function contributorMetadata(userId: string): Promise<Metadata> {
 }
 
 export async function fetchSitemap(): Promise<MetadataRoute.Sitemap> {
-  const [challenges, sandboxes] = await Promise.all([
+  // Module sandbox désactivé : ses pages répondent 404, aucune n'est listée.
+  const [challenges, sandboxEnabled] = await Promise.all([
     repositories.challenge.findAll(),
-    repositories.sandbox.findAll(),
+    modules.enabled("sandbox"),
   ]);
+  const sandboxes = sandboxEnabled ? await repositories.sandbox.findAll() : [];
 
   return buildSitemap({
     baseUrl: SITE_URL,
     challenges: challenges.filter(isPubliclyVisible),
+    sandboxEnabled,
     sandboxes: sandboxes.filter((sandbox) => canSeeSandbox(sandbox, ANONYMOUS)),
   });
 }

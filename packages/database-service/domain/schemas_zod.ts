@@ -69,12 +69,12 @@ export const challengeSchema = z.object({
   contribution_points_reward: z.number().int().nonnegative(),
   completion: z.number().min(0).max(1).default(0),
   project_id: z.string().uuid(),
-  reward_rules: z.union([mlRewardRulesSchema, codeRewardRulesSchema]).nullish(),
-  workspace_mode: z.enum(['provided_repo', 'own_repo']).nullish(),
+  // La forme des règles et de la configuration appartient au flow, qui les
+  // valide avant l'écriture (capacité `flow-config`).
+  reward_rules: z.unknown().nullish(),
   source_challenge_id: z.string().uuid().nullish(),
-  cp_per_validation: z.number().int().nonnegative().nullish(),
-  required_validations: z.number().int().positive().nullish(),
-  compute_enabled: z.boolean().default(false),
+  flow_config: z.record(z.string(), z.unknown()).nullish(),
+  flow_config_version: z.number().int().positive().default(1),
   created_at: z.coerce.date(),
   closed_at: z.coerce.date().nullish(),
 });
@@ -121,26 +121,14 @@ export const contributionSchema = z.object({
   created_at: z.coerce.date(),
 });
 
-export const rewardRuleKeySchema = z.enum([
-  'dataset',
-  'model_metric',
-  'model_code',
-  'beat_best',
-  'api_packaging',
-  'reuse_dataset',
-  'reuse_model',
-  'slack_signal',
-  'validation',
-  'code_fixed',
-  'code_quality',
-]);
-
 export const rewardEntrySchema = z.object({
   uuid: z.string().uuid(),
   challenge_id: z.string().uuid(),
   user_id: z.string().uuid(),
   contribution_id: z.string().uuid().optional(),
-  rule_key: rewardRuleKeySchema,
+  // Liste ouverte : la clé est vérifiée contre les déclarations installées au
+  // moment de l'écriture (RewardEntryRepository).
+  rule_key: z.string().min(1),
   points: z.number().int(),
   source_user_id: z.string().uuid().optional(),
   meta: z.record(z.string(), z.any()).optional(),
@@ -260,7 +248,8 @@ export const computeRequestSchema = z.object({
  * Rôles acceptés en écriture par l'API. `userSchema.role` reste une chaîne
  * libre : il valide aussi des rows historiques qu'on ne veut pas rejeter.
  */
-export const userRoleSchema = z.enum(['admin', 'contributor', 'viewer', 'medical_pro']);
+// Des permissions seulement : une compétence reconnue est une qualification.
+export const userRoleSchema = z.enum(['admin', 'contributor', 'viewer']);
 
 export const userSchema = z.object({
   uuid: z.string().uuid(),
@@ -295,7 +284,8 @@ export const taskSchema = z.object({
 
 // --- EVALUATION RUNS ---
 
-export const evaluationRunTriggerTypeSchema = z.enum(['manual', 'sync', 'github_pr']);
+/** La clé du flow, de l'extension ou du module appelant. */
+export const evaluationRunTriggerTypeSchema = z.string().min(1).max(50);
 export const evaluationRunStatusSchema = z.enum(['pending', 'running', 'succeeded', 'failed', 'canceled']);
 
 export const evaluationRunMetaSchema = z.object({
@@ -307,18 +297,17 @@ export const evaluationRunMetaSchema = z.object({
 
 export const evaluationRunSchema = z.object({
   uuid: z.string().uuid(),
-  challenge_id: z.string().uuid(),
+  challenge_id: z.string().uuid().optional(),
   trigger_type: evaluationRunTriggerTypeSchema,
   trigger_payload: z.record(z.string(), z.unknown()).optional(),
-  window_start: z.coerce.date(),
-  window_end: z.coerce.date(),
+  window_start: z.coerce.date().optional(),
+  window_end: z.coerce.date().optional(),
   status: evaluationRunStatusSchema,
   started_at: z.coerce.date().optional(),
   finished_at: z.coerce.date().optional(),
   error_code: z.string().max(100).optional(),
   error_message: z.string().max(1000).optional(),
   created_by: z.string().uuid().optional(),
-  retry_of_run_id: z.string().uuid().optional(),
   meta: evaluationRunMetaSchema.optional(),
 });
 
@@ -440,28 +429,6 @@ export const meetingAnalysisSchema = z.object({
   created_at: z.coerce.date(),
 });
 
-// --- ONBOARDING PROGRESS ---
-
-export const onboardingStepSchema = z.enum([
-  'clicked_challenge',
-  'assigned_task',
-  'evaluated_contribution',
-  'validated_task',
-  'joined_meeting',
-]);
-
-export const onboardingProgressSchema = z.object({
-  user_id: z.string().uuid(),
-  clicked_challenge: z.boolean(),
-  assigned_task: z.boolean(),
-  evaluated_contribution: z.boolean(),
-  validated_task: z.boolean(),
-  joined_meeting: z.boolean(),
-  completed_at: z.coerce.date().optional(),
-  created_at: z.coerce.date(),
-  updated_at: z.coerce.date(),
-});
-
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 export const appSettingsSchema = z.object({
@@ -495,7 +462,7 @@ export const digestSchema = z.object({
  * qui accepte `mailto:` ou `ftp:` — un repo ou un dataset se visite dans un
  * navigateur.
  */
-const httpUrl = z
+export const httpUrlSchema = z
   .string()
   .trim()
   .url()
@@ -521,37 +488,29 @@ export const sandboxStarTiersSchema = z
     { message: "Les paliers doivent être ordonnés par seuil strictement croissant" }
   );
 
-/**
- * Création d'un sandbox. Le type pilote les champs requis :
- *   - `code` : un repo suffit ;
- *   - `ml`   : un repo et au moins un dataset ; le modèle reste optionnel,
- *              un sandbox ML pouvant démarrer avant d'avoir un artefact.
- */
-export const sandboxCreateSchema = z
-  .object({
-    type: z.enum(["code", "ml"]),
-    title: z.string().trim().min(3).max(255),
-    /** Absent : dérivé du titre par le repository. */
-    slug: slugSchema.optional(),
-    context: z.string().trim().max(20000).optional(),
-    goals: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
-    why: z.string().trim().max(20000).optional(),
-    repo_url: httpUrl,
-    model_url: httpUrl.optional(),
-    dataset_urls: z.array(httpUrl).max(10).default([]),
-  })
-  .refine((input) => input.type !== "ml" || input.dataset_urls.length > 0, {
-    message: "Un sandbox ML demande au moins une URL de dataset",
-    path: ["dataset_urls"],
-  })
-  .refine((input) => input.type !== "code" || (!input.model_url && input.dataset_urls.length === 0), {
-    message: "Modèle et datasets n'existent que sur un sandbox ML",
-    path: ["type"],
-  });
+/** Le bonus de promotion : plafonné, une faute de frappe crédite l'auteur d'un coup et rien ne la reprend. */
+export const sandboxPromotionBonusSchema = z.number().int().nonnegative().max(100000);
 
 /**
- * Édition par l'auteur. Le `type` n'y figure pas : il est figé à la création,
- * parce qu'il a déjà déterminé la grille d'évaluation et les champs saisis.
+ * Création d'un sandbox : ce que toutes les propositions partagent.
+ *
+ * `type` est la clé du flow proposé. Qu'il soit installé et proposable, et les
+ * champs propres à la proposition (`repo_url`, datasets…), c'est le schéma
+ * `proposable.fields` de ce flow qui le dit, lu par `SandboxService`.
+ */
+export const sandboxCreateSchema = z.object({
+  type: z.string().trim().min(1).max(64),
+  title: z.string().trim().min(3).max(255),
+  /** Absent : dérivé du titre par le repository. */
+  slug: slugSchema.optional(),
+  context: z.string().trim().max(20000).optional(),
+  goals: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
+  why: z.string().trim().max(20000).optional(),
+});
+
+/**
+ * Édition par l'auteur, hors champs du flow. Le `type` n'y figure pas : il est
+ * figé à la création, parce qu'il a déjà déterminé les champs et l'évaluation.
  */
 export const sandboxUpdateSchema = z.object({
   title: z.string().trim().min(3).max(255).optional(),
@@ -560,25 +519,10 @@ export const sandboxUpdateSchema = z.object({
   context: z.string().trim().max(20000).nullable().optional(),
   goals: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
   why: z.string().trim().max(20000).nullable().optional(),
-  repo_url: httpUrl.optional(),
-  model_url: httpUrl.nullable().optional(),
-  dataset_urls: z.array(httpUrl).max(10).optional(),
 });
+
+/** Les clés d'un corps de création ou d'édition qui ne sont pas des champs de proposition. */
+export const SANDBOX_COMMON_KEYS = ["type", "title", "slug", "context", "goals", "why", "status"] as const;
 
 export type SandboxCreateInput = z.infer<typeof sandboxCreateSchema>;
 export type SandboxUpdateInput = z.infer<typeof sandboxUpdateSchema>;
-
-/**
- * Réglages de l'économie sandbox, patch partiel façon `digest-settings`.
- *
- * Les deux champs sont indépendants : l'admin peut régler le bonus de promotion
- * sans toucher aux paliers, et inversement.
- */
-export const sandboxSettingsPatchSchema = z.object({
-  sandbox_star_tiers: sandboxStarTiersSchema.optional(),
-  // Plafonné : une faute de frappe sur ce champ crédite l'auteur d'un coup, et
-  // aucune reprise automatique n'existe pour la rattraper.
-  sandbox_promotion_bonus_cp: z.number().int().nonnegative().max(100000).optional(),
-});
-
-export type SandboxSettingsPatch = z.infer<typeof sandboxSettingsPatchSchema>;
