@@ -364,7 +364,7 @@ Templates written in the editor and stored in the database (see [`database.md`](
 | `PUT` | `/api/templates/:key/draft` | `{ yaml }` — save the draft, however holey; returns its diagnostics. | Admin |
 | `POST` | `/api/templates/:key/validate` | `{ yaml? }` — diagnostics of the given text, or of the saved draft. | Admin |
 | `POST` | `/api/templates/:key/publish` | No body: the version is read from the draft's `template.version`. `201 { version, published_at }`; `422 { diagnostics }` while the draft has errors; `409` when the version is not greater than the last published; `404` without a draft. The version is installed in this instance at once; other instances catch up on demand and at the cron tick. | Admin |
-| `GET` | `/api/templates/:key/describe` | The serializable surface of a published version — descriptor, lanes and their steps, typed fields, param declarations — from which the client generates a challenge's screens and the creation form's section. `?version=` (latest otherwise). `?draft=1` (admin) previews the draft, `422 { diagnostics }` when it cannot be described yet. | Signed in (published versions); admin for `?draft=1` |
+| `GET` | `/api/templates/:key/describe` | The serializable surface of a published version — descriptor, lanes and their steps, typed fields, param declarations, and the screens the template composes on the UI catalogue (`surface.ui`, when it writes a `ui` block) — from which the client generates a challenge's screens and the creation form's section. `?version=` (latest otherwise). `?draft=1` (admin) previews the draft, `422 { diagnostics }` when it cannot be described yet. | Signed in (published versions); admin for `?draft=1` |
 
 ---
 
