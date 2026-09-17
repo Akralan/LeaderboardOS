@@ -1,5 +1,8 @@
+import { templateSource as codeSource } from '../../../../content/templates/code/template.source';
 import { templateSource as dataAnnotationSource } from '../../../../content/templates/data-annotation/template.source';
 import { templateSource as endpointCheckSource } from '../../../../content/templates/endpoint-check/template.source';
+import { templateSource as journeyValidationSource } from '../../../../content/templates/journey-validation/template.source';
+import { templateSource as mlSource } from '../../../../content/templates/ml/template.source';
 
 /**
  * Distribution MyTwin — templates système
@@ -9,8 +12,11 @@ import { templateSource as endpointCheckSource } from '../../../../content/templ
  * de départ, et surveillés pour leur dérive au démarrage. Données pures.
  */
 export const systemTemplateSources: readonly { key: string; yaml: string }[] = [
+  { key: 'code', yaml: codeSource },
   { key: 'data-annotation', yaml: dataAnnotationSource },
   { key: 'endpoint-check', yaml: endpointCheckSource },
+  { key: 'journey-validation', yaml: journeyValidationSource },
+  { key: 'ml', yaml: mlSource },
 ];
 
 /**
