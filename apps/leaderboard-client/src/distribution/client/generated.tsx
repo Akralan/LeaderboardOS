@@ -113,20 +113,22 @@ function ComposedContributor({ ctx, description, screen }: { ctx: ContributorSlo
   const lanes = description.surface.lanes;
   const needsQualification = screen.blocks.some((block) => block.component === 'lane' && lanes.find((lane) => lane.id === block.props.lane)?.role);
   const held = useHeldQualifications(needsQualification);
+  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards };
   return (
     <GeneratedScreen
       blocks={screen.blocks}
-      runtime={{ screen: 'contributor', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held, contributor: ctx }}
+      runtime={{ screen: 'contributor', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held, contributor: ctx, data }}
     />
   );
 }
 
 function ComposedManage({ ctx, description, screen }: { ctx: ManageSlotContext; description: DescribedTemplate; screen: SurfaceScreen }) {
   const [version, setVersion] = useState(0);
+  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards };
   return (
     <GeneratedScreen
       blocks={screen.blocks}
-      runtime={{ screen: 'manage', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held: null, contributor: null }}
+      runtime={{ screen: 'manage', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held: null, contributor: null, data }}
     />
   );
 }

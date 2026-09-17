@@ -3,8 +3,11 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import type { SurfaceBlock, TemplateDescription } from '../../../../../packages/interpreter/describe';
 import type { UiScreen } from '../../../../../packages/interpreter/format/schema';
-import type { ContributorSlotContext, SlotChallenge } from '@/lib/flowSlots';
+import type { ChallengeRewards, ContributorSlotContext, SlotChallenge, SlotTeamMember } from '@/lib/flowSlots';
 import { ContributorTaskBoard } from '@/components/contributor/ContributorTaskBoard';
+import { ChallengeActivity } from '@/components/challenges/shared/ChallengeActivity';
+import { ChallengeMetrics } from '@/components/challenges/shared/ChallengeMetrics';
+import { ParticipantsProgress } from '@/components/challenges/shared/ParticipantsProgress';
 import { GeneratedLane } from './GeneratedLane';
 import { GeneratedOverview } from './GeneratedOverview';
 import { GeneratedMine, GeneratedResources } from './GeneratedResources';
@@ -24,6 +27,16 @@ import { fgAt } from './format';
 
 export type DescribedTemplate = Pick<TemplateDescription, 'descriptor' | 'surface'>;
 
+/** Ce que les écrans du shell chargent pour tout flow, et que les blocs génériques lisent tel quel. */
+export interface ScreenData {
+  team: SlotTeamMember[];
+  contributions: { uuid: string; type?: string; title?: string; description?: string; reward: number; user_id: string; submitted_at: string; evaluation?: { globalScore?: number } | null; evaluation_status?: string }[];
+  tasks: { uuid: string; user_id?: string | null; status: string; parent_task_id?: string }[];
+  participants: { user_id: string; workspace_status?: string | null; group_owner_id?: string | null }[];
+  repoActivity: Record<string, any> | null;
+  rewards: ChallengeRewards | null;
+}
+
 export interface ScreenRuntime {
   screen: UiScreen;
   challengeId: string;
@@ -36,6 +49,7 @@ export interface ScreenRuntime {
   held: string[] | null;
   /** Le contexte du contributeur ; absent sur l'écran manager. */
   contributor: Pick<ContributorSlotContext, 'isMember' | 'myTasks' | 'myParticipation' | 'reloadBoard'> | null;
+  data: ScreenData;
 }
 
 export function configOf(challenge: { flow_config?: unknown }): Record<string, unknown> {
@@ -81,6 +95,26 @@ function Missing({ what }: { what: string }) {
   return <p className="text-xs" style={{ color: fgAt(0.35) }}>{what}</p>;
 }
 
+/** Le pool : ce qu'il reste et ce qui a été distribué, quand l'écran l'a chargé. */
+function PoolCard({ rewards }: { rewards: ChallengeRewards | null }) {
+  if (!rewards || typeof rewards.pool !== 'number') return <Missing what="The pool is not loaded on this screen." />;
+  const remaining = rewards.remaining ?? 0;
+  const distributed = rewards.distributed ?? 0;
+  const width = rewards.pool > 0 ? `${Math.round((distributed / rewards.pool) * 100)}%` : '0%';
+  return (
+    <div className="space-y-2 rounded-[20px] border border-brandCP/[0.22] bg-white/[0.02] px-5 py-4">
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-2xl font-semibold tracking-tight text-white">{remaining.toLocaleString()}</span>
+        <span className="text-xs font-bold text-brandCP">CP left</span>
+        <span className="ml-auto text-xs" style={{ color: fgAt(0.4) }}>{distributed.toLocaleString()} / {rewards.pool.toLocaleString()} distributed</span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-white/10">
+        <div className="h-full rounded-full bg-brandCP/60" style={{ width }} />
+      </div>
+    </div>
+  );
+}
+
 type BlockRenderer = (block: SurfaceBlock, runtime: ScreenRuntime) => ReactNode;
 
 /** Le composant React de chaque nom du catalogue (`packages/interpreter/ui/catalog.ts`). `null` : rien à montrer à ce visiteur. */
@@ -107,6 +141,14 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   },
   overview: (_block, runtime) => <GeneratedOverview challengeId={runtime.challengeId} resources={runtime.description.surface.resources} />,
   resources: (_block, runtime) => <GeneratedResources challengeId={runtime.challengeId} resources={runtime.description.surface.resources} />,
+  pool: (_block, runtime) => <PoolCard rewards={runtime.data.rewards} />,
+  activity: (block, runtime) => (
+    <ChallengeActivity contributions={runtime.data.contributions} team={runtime.data.team} repoActivity={runtime.data.repoActivity} showRewardBreakdown={block.props.reward_breakdown === true} />
+  ),
+  metrics: (_block, runtime) => <ChallengeMetrics repoActivity={runtime.data.repoActivity} />,
+  participants: (block, runtime) => (
+    <ParticipantsProgress team={runtime.data.team} tasks={runtime.data.tasks} participants={runtime.data.participants} contributions={runtime.data.contributions} showWorkspaceStatus={block.props.workspace_status === true} />
+  ),
 };
 
 /** Les blocs dans l'ordre de lecture : la colonne d'un téléphone les empile ainsi. */

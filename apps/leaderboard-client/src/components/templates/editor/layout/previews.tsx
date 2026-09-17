@@ -172,8 +172,86 @@ function ResourcesPreview() {
   );
 }
 
+function PoolPreview() {
+  return (
+    <div className={`${card} border-brandCP/[0.22]`}>
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-xl font-semibold text-white">—</span>
+        <span className="text-[10px] font-bold text-brandCP">CP left</span>
+      </div>
+      <span className={`${skeleton} h-1 w-full`} />
+    </div>
+  );
+}
+
+function ActivityPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta={block.props.reward_breakdown === true ? 'with ledger lines' : undefined}>Contributions</Title>
+      {Array.from({ length: 3 }, (_, row) => (
+        <div key={row} className="flex items-center gap-2">
+          <span className={`${skeleton} h-6 w-6 shrink-0 rounded-full`} />
+          <div className="flex flex-1 flex-col gap-1">
+            <span className={`${skeleton} h-2.5 w-2/3`} />
+            <span className={`${skeleton} h-2 w-1/3`} />
+          </div>
+          <span className="text-[10px] font-semibold text-brandCP">+— CP</span>
+        </div>
+      ))}
+      <Title>Repository</Title>
+      <Rows count={2} columns={2} />
+    </div>
+  );
+}
+
+function MetricsPreview() {
+  const points = [0.42, 0.55, 0.61, 0.6, 0.72, 0.78];
+  const path = points.map((value, index) => `${index === 0 ? 'M' : 'L'} ${10 + index * 20} ${44 - value * 40}`).join(' ');
+  return (
+    <div className={card}>
+      <Title meta="version by version">Metrics</Title>
+      <svg viewBox="0 0 120 48" className="h-16 w-full text-white/20" preserveAspectRatio="none">
+        {[0.25, 0.5, 0.75].map((tick) => <line key={tick} x1={10} x2={110} y1={44 - tick * 40} y2={44 - tick * 40} stroke="currentColor" strokeWidth={0.5} strokeDasharray="2 3" />)}
+        <path d={path} fill="none" stroke="var(--color-brandCP, #6366f1)" strokeWidth={1.5} />
+      </svg>
+      <div className="grid grid-cols-2 gap-2">
+        {['Dataset', 'Model'].map((kind) => (
+          <div key={kind} className="flex flex-col gap-1 rounded-lg border border-white/[0.06] p-2">
+            <span className="text-[10px] text-white/45">{kind}</span>
+            <span className={`${skeleton} h-2 w-2/3`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ParticipantsPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta={block.props.workspace_status === true ? 'with workspace status' : undefined}>Participants</Title>
+      {Array.from({ length: 3 }, (_, row) => (
+        <div key={row} className="flex items-center gap-2">
+          <span className={`${skeleton} h-6 w-6 shrink-0 rounded-full`} />
+          <span className={`${skeleton} h-2.5 w-1/4`} />
+          <span className={`${skeleton} ml-auto h-1.5 w-1/3`} />
+          <span className="text-[10px] text-white/40">—%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function BlockPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
   switch (block.component) {
+    case 'pool':
+      return <PoolPreview />;
+    case 'activity':
+      return <ActivityPreview block={block} />;
+    case 'metrics':
+      return <MetricsPreview />;
+    case 'participants':
+      return <ParticipantsPreview block={block} />;
     case 'lane':
       return <LanePreview block={block} surface={surface} />;
     case 'text':
