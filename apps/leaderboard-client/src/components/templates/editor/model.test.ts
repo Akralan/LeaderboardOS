@@ -113,7 +113,9 @@ describe('the graph editor writes', () => {
 });
 
 describe('the composed screens', () => {
-  const composed = `${endpointCheck.trimEnd()}\nui:\n  contributor:\n    blocks:\n      - {id: review, component: lane, at: {x: 0, y: 0, w: 8, h: 6}, props: {lane: reviewer}}\n      - {id: mine, component: mine, at: {x: 8, y: 0, w: 4, h: 6}}\n`;
+  // Le template système compose ses propres écrans : le test pose les siens.
+  const bare = endpointCheck.replace(/\r\n/g, '\n').replace(/\nui:[\s\S]*$/, '\n');
+  const composed = `${bare.trimEnd()}\nui:\n  contributor:\n    blocks:\n      - {id: review, component: lane, at: {x: 0, y: 0, w: 8, h: 6}, props: {lane: reviewer}}\n      - {id: mine, component: mine, at: {x: 8, y: 0, w: 4, h: 6}}\n`;
 
   it('reads a composed screen as blocks, and leaves the other screen generated', () => {
     const model = buildModel(composed);
@@ -123,7 +125,9 @@ describe('the composed screens', () => {
       'ui.contributor.blocks.1 mine:mine@8,0 4x6',
     ]);
     expect(model.screens.contributor?.[0].props).toEqual({ lane: 'reviewer' });
-    expect(buildModel(endpointCheck).screens).toEqual({ contributor: null, manage: null });
+    expect(model.screens.contributor?.[0].selects).toBeNull();
+    expect(buildModel(bare).screens).toEqual({ contributor: null, manage: null });
+    expect(buildModel(endpointCheck).screens.contributor?.length).toBe(4);
   });
 
   it('locates a ui diagnostic on its block, or on its screen', () => {
