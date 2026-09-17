@@ -50,6 +50,8 @@ export interface SurfaceField {
   resource?: string;
   /** Conditionnel (\`when\`) : le serveur l'ignore quand sa condition est fausse. */
   conditional?: boolean;
+  /** Optionnel : absent, le serveur le lit à `null`. */
+  optional?: boolean;
 }
 
 export interface SurfaceSegment {
@@ -192,6 +194,7 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
               ...(type?.kind === "enum" && type.values ? { values: type.values } : {}),
               ...(type?.kind === "resource" ? { resource: type.name } : {}),
               ...(decl.when !== undefined ? { conditional: true } : {}),
+              ...(decl.optional ? { optional: true } : {}),
             };
           })
         ),

@@ -37,6 +37,10 @@ const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
  *   et ce que la lane en a gardé ;
  * - `GET <lane>/file?claim_id=&path=` et `GET file?resource_id=&field=` : les
  *   octets d'un fichier, sous la même règle de visibilité ; purgé, 410 ;
+ * - `GET mine` : les instances que l'appelant a créées, par type, projetées
+ *   pour lui — ce qu'un participant reprend (une walkthrough en cours) ;
+ * - `GET resources?type=` : toutes les instances d'un type pour un manager,
+ *   brouillons compris, avec leur auteur, leur état et leur résolution ;
  * - `GET <lane>/options?field=<geste>.<champ>` : les choix d'un champ `ref` ou
  *   `link` pour l'appelant — le `where` évalué côté serveur, les combinaisons
  *   qu'un claim désigné refuserait déjà retirées (les autres champs du geste en
@@ -46,7 +50,7 @@ const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
 
 const MANAGERS: ActionAccess = { roles: ["admin"], manager: true };
 const PARTICIPANTS: ActionAccess = { roles: ["admin"], manager: true, member: true };
-export const GENERATED_PATHS = ["progress", "overview", "export", "file"] as const;
+export const GENERATED_PATHS = ["progress", "overview", "export", "file", "mine", "resources"] as const;
 
 export function generatedActions(
   t: CompiledTemplate,
@@ -57,11 +61,15 @@ export function generatedActions(
 ): ChallengeActionDeclaration[] {
   const { shell } = t.model;
   // Ce qu'une lane lit, qui peut y entrer le lit : un relecteur qualifié n'a pas à être membre.
-  const laneAccess = (lane: LaneModel): ActionAccess => (lane.entry.trigger === "admin" ? MANAGERS : { ...PARTICIPANTS, ...entryAccess(lane) });
+  const laneAccess = (lane: LaneModel): ActionAccess =>
+    lane.entry.trigger === "admin" ? MANAGERS : lane.entry.access?.mode === "signed_in" ? {} : { ...PARTICIPANTS, ...entryAccess(lane) };
+  const signedInLanes = t.model.lanes.some((lane) => lane.entry.trigger === "user" && lane.entry.access?.mode === "signed_in");
   const qualifiedLanes = t.model.lanes.filter((lane) => lane.entry.trigger === "user" && entryAccess(lane).qualification);
-  const ANYONE_WHO_ENTERS: ActionAccess = qualifiedLanes.length
-    ? { ...PARTICIPANTS, qualification: (challenge) => entryAccess(qualifiedLanes[0]).qualification!(challenge) }
-    : PARTICIPANTS;
+  const ANYONE_WHO_ENTERS: ActionAccess = signedInLanes
+    ? {}
+    : qualifiedLanes.length
+      ? { ...PARTICIPANTS, qualification: (challenge) => entryAccess(qualifiedLanes[0]).qualification!(challenge) }
+      : PARTICIPANTS;
   const actions: ChallengeActionDeclaration[] = [];
   const valuesOr409 = (ctx: ActionContext) => params.valuesOf(ctx.challenge, flowConfigOf(ctx.challenge));
   const ruleKeys = new Set(t.ruleKeys.values());
@@ -256,7 +264,7 @@ export function generatedActions(
 
         const typeName = (ref.type as { name: string }).name;
         const decl = shell.resources[typeName];
-        const instances = await t.runtime.resources.list({ challengeId: ctx.challenge.uuid, type: typeName });
+        const instances = await engine.instancesOf(ctx.challenge.uuid, typeName);
         const hydrated = await Promise.all(instances.map((instance) => resourceValue(instance, t.runtime, t.resourceTypes)));
         let eligible = hydrated;
         if (ref.decl.where !== undefined) {
@@ -387,6 +395,65 @@ export function generatedActions(
       const view = await projectedFor(ctx, values, resourceId, claimant);
       if (!view) return jsonError(404, "Resource not found");
       return serveBlob(t, view.projected[field] ?? null);
+    },
+  });
+
+  // ── mine : ce que l'appelant a créé ───────────────────────────────────────
+  actions.push({
+    path: "mine",
+    method: "GET",
+    access: ANYONE_WHO_ENTERS,
+    async handle(ctx) {
+      const values = valuesOr409(ctx);
+      if (!values) return jsonError(409, "This challenge has no readable configuration or rules");
+      const viewer = participantViewer(ctx, values, false);
+      const resources: Record<string, Record<string, Value>[]> = {};
+      for (const [type, decl] of Object.entries(shell.resources)) {
+        const own = (await engine.instancesOf(ctx.challenge.uuid, type)).filter((instance) => instance.created_by === ctx.user.id);
+        if (own.length === 0) continue;
+        resources[type] = await Promise.all(
+          own.map(async (instance) => ({
+            ...(await project(await resourceValue(instance, t.runtime, t.resourceTypes), decl, viewer)),
+            open: instance.state === "open",
+            verdict: instance.verdict,
+            resolution: (instance.resolution ?? null) as Value,
+            created_at: instance.created_at.toISOString(),
+          }))
+        );
+      }
+      return { resources };
+    },
+  });
+
+  // ── resources : le navigateur d'un manager ───────────────────────────────
+  actions.push({
+    path: "resources",
+    method: "GET",
+    access: MANAGERS,
+    async handle(ctx) {
+      const values = valuesOr409(ctx);
+      if (!values) return jsonError(409, "This challenge has no readable configuration or rules");
+      const type = new URL(ctx.request.url).searchParams.get("type") ?? "";
+      const decl = shell.resources[type];
+      if (!decl) return jsonError(404, `No resource type ${type}`);
+      const viewer = adminViewer(ctx, values);
+      const instances = await engine.instancesOf(ctx.challenge.uuid, type);
+      const names = await t.runtime.names([...new Set(instances.map((instance) => instance.created_by).filter((id): id is string => Boolean(id)))]);
+      return {
+        type,
+        instances: await Promise.all(
+          instances.map(async (instance) => ({
+            id: instance.uuid,
+            author: instance.created_by,
+            author_name: instance.created_by ? names[instance.created_by] ?? null : null,
+            open: instance.state === "open",
+            verdict: instance.verdict,
+            resolution: (instance.resolution ?? null) as Value,
+            created_at: instance.created_at.toISOString(),
+            fields: await project(await resourceValue(instance, t.runtime, t.resourceTypes), decl, viewer),
+          }))
+        ),
+      };
     },
   });
 

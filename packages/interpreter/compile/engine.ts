@@ -82,6 +82,10 @@ export interface CompiledTemplate {
   groupLanes: ReadonlySet<string>;
   /** La description de la contribution, une expression sur `challenge`. */
   contributionDescription: ExprSource | null;
+  /** Les paramètres de type `role` : ce que `participation.qualified` lit. */
+  roleParams: readonly string[];
+  /** Une lane lit `participation.qualified` : les qualifications se vérifient avant chaque geste. */
+  readsQualified: boolean;
 }
 
 /** Le segment qui livre le travail d'un claim : l'Act qui l'a tiré, les gestes qui l'ont rempli, les nœuds à rejouer. */
@@ -122,6 +126,10 @@ export interface RunState {
   caller: string | null;
   /** Le groupe du porteur, dans une lane jouée en groupe. */
   group: ParticipationContext | null;
+  /** Par geste, les champs que la requête portait vraiment : ce qu'un `update from` réécrit. */
+  sent: Record<string, readonly string[]>;
+  /** Les instances qu'un `create` à `upsert` a créées ou retrouvées, par Act : ce que la réponse rend. */
+  created: Record<string, string>;
 }
 
 export function newState(challenge: Challenge, userId: string | null, params: Record<string, Value>): RunState {
@@ -136,6 +144,8 @@ export function newState(challenge: Challenge, userId: string | null, params: Re
     drawn: null,
     caller: userId,
     group: null,
+    sent: {},
+    created: {},
   };
 }
 
@@ -172,11 +182,20 @@ export class Engine {
     }
     for (const name of Object.keys(this.shell.resources)) {
       if (!(name in bindings) && readsRoot(ast, name)) {
-        const instances = await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type: name });
+        const instances = await this.instancesOf(state.challenge.uuid, name);
         bindings[name] = await Promise.all(instances.map((instance) => resourceValue(instance, this.t.runtime, this.t.resourceTypes)));
       }
     }
     return evaluate(ast, bindings, { now: this.t.runtime.now() });
+  }
+
+  /** Les instances d'un type, dans leur ordre : `ordered_by` quand le type en déclare un, la création sinon. */
+  async instancesOf(challengeId: string, type: string) {
+    const instances = await this.t.runtime.resources.list({ challengeId, type });
+    const field = this.shell.resources[type]?.ordered_by;
+    if (!field) return instances;
+    const position = (instance: { payload: Record<string, unknown> }) => (typeof instance.payload[field] === "number" ? (instance.payload[field] as number) : Number.MAX_SAFE_INTEGER);
+    return [...instances].sort((a, b) => position(a) - position(b) || a.created_at.getTime() - b.created_at.getTime());
   }
 
   private async number(source: ExprSource, state: RunState, extra?: Record<string, Value>): Promise<number> {
@@ -381,7 +400,19 @@ export class Engine {
     }
 
     if (body.create !== undefined) {
-      await this.create(body.create, body, state);
+      await this.create(node.id, body.create, body, state);
+      return;
+    }
+
+    if (body.update) {
+      await this.update(body.update, state);
+      return;
+    }
+
+    if (body.delete !== undefined) {
+      const instance = await this.designated(body.delete, state);
+      if (!(await this.t.runtime.resources.remove(instance.uuid))) throw new Refusal(404, `This ${instance.resource_type} no longer exists`);
+      if (this.shell.resources[instance.resource_type]?.ordered_by) await this.renumber(state.challenge.uuid, instance.resource_type, null);
       return;
     }
 
@@ -547,7 +578,86 @@ export class Engine {
     state.claim = { actId, claimId, resourceId, consumed: false };
   }
 
-  private async create(type: string, body: Extract<NodeModel, { family: "act" }>["body"], state: RunState): Promise<void> {
+  /** L'instance qu'une expression désigne, sur ce challenge ; 404 sinon. */
+  private async designated(source: ExprSource, state: RunState) {
+    const target = await this.eval(source, state);
+    const id = target && typeof target === "object" && !Array.isArray(target) ? target.id : null;
+    const instance = typeof id === "string" ? await this.t.runtime.resources.resource(id) : null;
+    if (!instance || instance.challenge_id !== state.challenge.uuid || !this.shell.resources[instance.resource_type]) {
+      throw new Refusal(404, "Resource not found");
+    }
+    return instance;
+  }
+
+  /** Une valeur de champ telle que la charge la garde : une ressource ou une contribution par son id. */
+  private stored(value: Value): unknown {
+    return value && typeof value === "object" && !Array.isArray(value) && "id" in value && !("blob_id" in value) ? (value as { id: unknown }).id : value;
+  }
+
+  /** Les erreurs d'une valeur de champ : requise sauf `optional`, de son type, conforme à son `check`. */
+  private async fieldErrors(type: string, name: string, value: unknown, state: RunState): Promise<string | null> {
+    const field = this.shell.resources[type].fields[name];
+    if (value === undefined || value === null) return field.optional ? null : `${name} is required`;
+    const parsed = zodOf((this.t.resourceTypes.get(type) ?? {})[name]).safeParse(value);
+    if (!parsed.success) return `${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`;
+    if (field.check !== undefined && (await this.checks(field.check, value as Value, state)) !== true) return `${name} fails its check`;
+    return null;
+  }
+
+  /**
+   * `update` : les champs qu'un geste a vraiment portés (`from`) puis `set`,
+   * validés comme à la création. Un champ `ordered_by` réécrit déplace
+   * l'instance à cet index (borné) et renumérote la fratrie.
+   */
+  private async update(body: NonNullable<Extract<NodeModel, { family: "act" }>["body"]["update"]>, state: RunState): Promise<void> {
+    const instance = await this.designated(body.resource, state);
+    const type = instance.resource_type;
+    const decl = this.shell.resources[type];
+    const patch: Record<string, unknown> = {};
+    if (body.from !== undefined) {
+      const gesture = state.bindings[body.from];
+      const values = gesture && typeof gesture === "object" && !Array.isArray(gesture) ? (gesture as Record<string, Value>) : {};
+      for (const name of state.sent[body.from] ?? []) if (name in decl.fields && name in values) patch[name] = this.stored(values[name]);
+    }
+    for (const [name, source] of Object.entries(body.set ?? {})) patch[name] = this.stored(await this.eval(source, state));
+
+    const errors: string[] = [];
+    for (const [name, value] of Object.entries(patch)) {
+      const error = await this.fieldErrors(type, name, value, state);
+      if (error) errors.push(error);
+    }
+    if (errors.length > 0) throw new Refusal(400, errors.join("; "));
+
+    const order = decl.ordered_by;
+    const move = order !== undefined && order in patch ? (patch[order] as number) : null;
+    if (order !== undefined) delete patch[order];
+    if (Object.keys(patch).length > 0 && !(await this.t.runtime.resources.update(instance.uuid, patch))) {
+      throw new Refusal(404, `This ${type} no longer exists`);
+    }
+    if (move !== null) await this.renumber(state.challenge.uuid, type, { id: instance.uuid, to: move });
+  }
+
+  /**
+   * Des positions denses (0..n-1) : l'instance déplacée réinsérée à son index
+   * borné, puis toute la fratrie réécrite là où elle diffère — deux positions
+   * égales laisseraient l'ordre à la date de création.
+   */
+  private async renumber(challengeId: string, type: string, moving: { id: string; to: number } | null): Promise<void> {
+    const field = this.shell.resources[type].ordered_by!;
+    const ordered = await this.instancesOf(challengeId, type);
+    let sequence = ordered;
+    if (moving) {
+      const moved = ordered.find((instance) => instance.uuid === moving.id);
+      const others = ordered.filter((instance) => instance.uuid !== moving.id);
+      const at = Math.max(0, Math.min(moving.to, others.length));
+      sequence = moved ? [...others.slice(0, at), moved, ...others.slice(at)] : others;
+    }
+    for (const [index, instance] of sequence.entries()) {
+      if (instance.payload[field] !== index) await this.t.runtime.resources.update(instance.uuid, { [field]: index });
+    }
+  }
+
+  private async create(actId: string, type: string, body: Extract<NodeModel, { family: "act" }>["body"], state: RunState): Promise<void> {
     const fields = Object.keys(this.shell.resources[type].fields);
     const base: Record<string, unknown> = {};
     for (const source of body.from === undefined ? [] : [body.from].flat()) {
@@ -580,25 +690,22 @@ export class Engine {
       rows.push(base);
     }
 
+    // `ordered_by` : une création s'ajoute à la fin, quelle que soit la position écrite.
+    const order = this.shell.resources[type].ordered_by;
+    if (order !== undefined) {
+      const count = (await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type })).length;
+      rows.forEach((row, index) => (row[order] = count + index));
+    }
+
     // Tout ou rien : une ligne qui ne tient pas son type ou son `check` refuse le lot entier.
     const errors: string[] = [];
-    const types = this.t.resourceTypes.get(type) ?? {};
     for (const [index, row] of rows.entries()) {
       const where = body.many ? `Row ${index + 1}: ` : "";
-      for (const [name, field] of Object.entries(this.shell.resources[type].fields)) {
-        const value = row[name];
-        if (value === undefined || value === null) {
-          errors.push(`${where}${name} is required`);
-          continue;
-        }
-        const parsed = zodOf(types[name]).safeParse(value);
-        if (!parsed.success) {
-          errors.push(`${where}${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-          continue;
-        }
-        if (field.check !== undefined && (await this.checks(field.check, value as Value, state)) !== true) {
-          errors.push(`${where}${name} fails its check`);
-        }
+      for (const name of Object.keys(this.shell.resources[type].fields)) {
+        const error = await this.fieldErrors(type, name, row[name], state);
+        if (error) errors.push(`${where}${error}`);
+        // Un champ optionnel absent se garde à `null` : la forme qu'un flow écrit à la main stocke.
+        else if (row[name] === undefined) row[name] = null;
       }
     }
     if (errors.length > 0) throw new Refusal(400, errors.slice(0, 50).join("; "));
@@ -627,6 +734,16 @@ export class Engine {
 
     // `class` vit dans sa colonne, que le tirage filtre ; jamais dans la charge.
     const items = rows.map(({ class: klass, ...payload }) => ({ payload, class: typeof klass === "string" ? klass : null }));
+    if (body.upsert) {
+      // Une par combinaison, sous verrou : un double clic retrouve l'instance au lieu d'en créer une seconde.
+      const { id } = await this.t.runtime.resources.upsert(state.challenge.uuid, type, items[0], {
+        createdBy: state.userId,
+        by: body.upsert.by,
+        overwrite: body.upsert.overwrite === true,
+      });
+      state.created[actId] = id;
+      return;
+    }
     await this.t.runtime.resources.createMany(state.challenge.uuid, type, items, { createdBy: state.userId });
   }
 
@@ -866,7 +983,9 @@ export class Engine {
 
     for (const { user: userId } of recipients) {
       // Une clé versée en différentiel n'a pas de clé naturelle : ce qui la distingue est ce qui est déjà versé.
-      const entryMeta: Record<string, Value> = body.basis === "delta" ? { ...written } : { ...meta, ...written };
+      // Une méta déclarée est la forme de la ligne (celle d'un flow repris) ; seule la clé naturelle d'un claim ou d'une ressource s'y ajoute.
+      const natural = Object.fromEntries(Object.entries(meta).filter(([key]) => key === "claim_id" || key === "resource_id" || key === "aggregate"));
+      const entryMeta: Record<string, Value> = body.basis === "delta" ? { ...written } : body.meta ? { ...natural, ...written } : { ...meta, ...written };
       // Rejouer le geste ne paie pas deux fois : même clé, même méta, même personne.
       // Sans clé naturelle (ni claim ni ressource), chaque geste paie.
       const keyed = Boolean(meta.claim_id || meta.resource_id);

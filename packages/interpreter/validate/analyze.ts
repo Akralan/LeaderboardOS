@@ -55,7 +55,7 @@ interface Segments {
   gapped: boolean;
 }
 
-const ENGINE_FIELD_NAMES =["author", "open", "closed", "verdict", "created_at"];
+const ENGINE_FIELD_NAMES = ["id", "author", "open", "closed", "verdict", "created_at"];
 
 export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   const issues: TemplateIssue[] = [];
@@ -250,6 +250,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const verdicts = resource.closure?.verdict;
     resourceFieldTypes.set(name, {
       ...fields,
+      id: T.string,
       author: T.user,
       open: T.bool,
       closed: T.bool,
@@ -268,6 +269,9 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       holder: T.user,
       group: T.record({ size: T.int, multiplier: T.number, members: T.list(T.user) }),
       workspace: T.record({ provider: T.string, url: T.string, ref: T.string, status: T.string, ready: T.bool }),
+      // Le rôle de plateforme de l'appelant (`contributor`, `admin`…), et, par paramètre `role`, s'il détient cette qualification.
+      role: T.string,
+      qualified: T.record(Object.fromEntries(Object.entries(paramTypes).filter(([, type]) => type.kind === "role").map(([name]) => [name, T.bool]))),
     }),
   };
   if (shell.presentation?.board) baseBindings.board = T.record({ total: T.int, done: T.int });
@@ -288,6 +292,12 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
       report("reference", [...path, index], `unknown visibility '${entry}'`);
     }
+  };
+
+  /** `trim` rogne une chaîne, `public` garde une URL : chacun sur son type. */
+  const checkFieldOptions = (field: FieldDecl, type: Type, path: TemplatePath, node?: string) => {
+    if (field.trim && type.kind !== "string" && type.kind !== "dyn") report("shape", [...path, "trim"], "trim applies to a string field", { node });
+    if (field.public && type.kind !== "url" && type.kind !== "dyn") report("shape", [...path, "public"], "public applies to a url field", { node });
   };
 
   const collectFieldTypes = (fields: Record<string, FieldDecl>, basePath: TemplatePath, scope: Scope, node?: string) => {
@@ -316,6 +326,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type: checkType } = expr(field.check, scope.with({ value: type }), [...path, "check"], node);
         expectType(checkType, isBool, "a field check must be bool", [...path, "check"], node);
       }
+      checkFieldOptions(field, type, path, node);
     }
     return types;
   };
@@ -331,6 +342,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(field.check, Scope.root({ params: T.record(paramTypes), value: resourceFieldTypes.get(name)![key] }), at);
         expectType(type, isBool, "a field check must be bool", at);
       }
+      if (field.public) report("shape", [...path, "fields", key, "public"], "public applies to a collected url field, checked when it is sent");
+      if (field.trim) report("shape", [...path, "fields", key, "trim"], "trim applies to a collected field");
       for (const misplaced of ["where", "when", "from"] as const) {
         if (field[misplaced] !== undefined && !(misplaced === "from" && field.type === "link")) {
           report("shape", [...path, "fields", key, misplaced], `${misplaced} applies to a collected field, not to a resource field`);
@@ -370,6 +383,14 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(claim.where, base.with({ self: T.resource(name) }), [...claimPath, "where"]);
         expectType(type, isBool, "a claim eligibility rule must be bool", [...claimPath, "where"]);
         gap("claim eligibility on a resource type", [...claimPath, "where"], "the resources capability filters draws by class only");
+      }
+    }
+    if (resource.ordered_by !== undefined) {
+      const orderType = resourceFieldTypes.get(name)![resource.ordered_by];
+      if (!orderType || ENGINE_FIELD_NAMES.includes(resource.ordered_by)) {
+        report("reference", [...path, "ordered_by"], `ordered_by '${resource.ordered_by}': no such field`);
+      } else if (orderType.kind !== "int" && orderType.kind !== "dyn") {
+        report("type", [...path, "ordered_by"], `ordered_by names an int field, got ${showType(orderType)}`);
       }
     }
     if (resource.cardinality) {
@@ -824,12 +845,13 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     segments: Segments
   ): Type | null {
     const { body, path, id } = node;
-    const operations = ["capability", "create", "transition", "grant", "match_or_create"].filter((key) => body[key as keyof typeof body] !== undefined);
+    const operations = ["capability", "create", "transition", "grant", "match_or_create", "update", "delete"].filter((key) => body[key as keyof typeof body] !== undefined);
     const args = Object.keys(body).filter((key) => !ACT_KEYS.has(key));
     let output: Record<string, Type> = {};
 
     if (operations.length > 1) report("shape", path, `an act does one thing, got ${operations.join(" and ")}`, { node: id });
-    if (operations.length === 0 && !body.claim) report("shape", path, "an act needs capability, create, claim, transition, grant or match_or_create", { node: id });
+    if (operations.length === 0 && !body.claim) report("shape", path, "an act needs capability, create, claim, transition, grant, match_or_create, update or delete", { node: id });
+    if (body.upsert && body.create === undefined) report("shape", [...path, "upsert"], "upsert applies to a create", { node: id });
     if (args.length > 0 && !body.capability) report("format", [...path, args[0]], `unknown act key '${args[0]}'`, { node: id });
 
     if (body.claim) {
@@ -922,10 +944,58 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(body.many.from_file, scope, [...path, "many", "from_file"], id);
         expectType(type, (t) => t.kind === "file" || t.kind === "dyn", "a batch is read from a file", [...path, "many", "from_file"], id);
       }
+      if (body.upsert) {
+        if (body.many) report("shape", [...path, "upsert"], "an upsert creates one instance, not a batch", { node: id });
+        body.upsert.by.forEach((key, i) => {
+          if (key !== "author" && (!fields[key] || ENGINE_FIELD_NAMES.includes(key))) {
+            report("reference", [...path, "upsert", "by", i], `${resource} has no field '${key}'`, { node: id });
+          }
+        });
+      }
       if (shell.resources[resource].match_or_create?.by === "human") {
         report("shape", [...path, "create"], `${resource} is matched by a human decision; use match_or_create`, { node: id });
       }
       return body.many ? T.list(T.resource(resource)) : T.resource(resource);
+    }
+
+    if (body.update) {
+      const at = [...path, "update"];
+      const { type } = expr(body.update.resource, scope, [...at, "resource"], id);
+      if (type.kind !== "resource") {
+        if (type.kind !== "dyn") report("type", [...at, "resource"], `an update takes a resource, got ${showType(type)}`, { node: id });
+        return T.record(output);
+      }
+      const fields = resourceFieldTypes.get(type.name) ?? {};
+      if (body.update.from === undefined && !body.update.set) report("shape", at, "an update writes from a gesture or set", { node: id });
+      if (body.update.from !== undefined) {
+        const gesture = ctx.index.get(body.update.from)?.[0]?.node;
+        const source = scope.lookup(body.update.from);
+        if (!gesture || gesture.family !== "collect") {
+          report("reference", [...at, "from"], `update from '${body.update.from}': not a collect of this lane`, { node: id });
+        } else if (source?.kind === "record") {
+          for (const [key, value] of Object.entries(source.fields)) {
+            if (fields[key] && !ENGINE_FIELD_NAMES.includes(key) && !assignable(fields[key], value)) {
+              report("type", [...at, "from"], `${type.name}.${key} expects ${showType(fields[key])}, got ${showType(value)}`, { node: id });
+            }
+          }
+        }
+      }
+      for (const [key, value] of Object.entries(body.update.set ?? {})) {
+        const where = [...at, "set", key];
+        if (!fields[key] || ENGINE_FIELD_NAMES.includes(key)) {
+          report("reference", where, `${type.name} has no field '${key}'`, { node: id });
+          continue;
+        }
+        const { type: valueType } = expr(value, scope, where, id);
+        if (!assignable(fields[key], valueType)) report("type", where, `${type.name}.${key} expects ${showType(fields[key])}, got ${showType(valueType)}`, { node: id });
+      }
+      return T.record(output);
+    }
+
+    if (body.delete !== undefined) {
+      const { type } = expr(body.delete, scope, [...path, "delete"], id);
+      if (type.kind !== "resource" && type.kind !== "dyn") report("type", [...path, "delete"], `a delete takes a resource, got ${showType(type)}`, { node: id });
+      return T.record(output);
     }
 
     if (body.transition) {

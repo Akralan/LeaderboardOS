@@ -52,7 +52,8 @@ export interface CheckEnv {
   resourceFields(name: string): Readonly<Record<string, Type>> | undefined;
 }
 
-const CONTRIBUTION_FIELDS: Record<string, Type> = { author: T.user, url: T.url, kind: T.string, metadata: T.dyn };
+// `members` : les membres du groupe qui la porte (`contribution_members`).
+const CONTRIBUTION_FIELDS: Record<string, Type> = { id: T.string, author: T.user, title: T.string, url: T.url, kind: T.string, members: T.list(T.user), metadata: T.dyn };
 const USER_FIELDS: Record<string, Type> = { id: T.string };
 
 export const BUILTINS = [

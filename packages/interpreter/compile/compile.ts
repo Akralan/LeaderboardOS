@@ -154,6 +154,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     participationContext: Boolean(shell.workspace || shell.presentation?.board || model.lanes.some((lane) => lane.entry.access?.group === true)),
     groupLanes: new Set(model.lanes.filter((lane) => lane.entry.access?.group === true).map((lane) => lane.id)),
     contributionDescription: shell.presentation?.contribution?.description ?? null,
+    roleParams: Object.entries(types.params).filter(([, type]) => type.kind === "role").map(([name]) => name),
+    readsQualified: model.lanes.some((lane) => expressionsOf(lane.nodes.map((node) => node.body)).some((ast) => readsQualified(ast))),
   };
   const evaluationHandler = shell.presentation?.evaluation_handler ?? CONTINUE_HANDLER;
   /** Le mode de workspace d'un challenge : l'expression du bloc sur ses paramètres, le mode historique sinon. */
@@ -310,6 +312,22 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   };
 }
 
+/** L'expression lit-elle `participation.qualified` ? */
+function readsQualified(ast: ReturnType<typeof parseExpr>): boolean {
+  let found = false;
+  const visit = (node: unknown) => {
+    if (found || !node || typeof node !== "object") return;
+    const candidate = node as { k?: string; name?: string; object?: { k?: string; name?: string } };
+    if (candidate.k === "member" && candidate.name === "qualified" && candidate.object?.k === "ident" && candidate.object.name === "participation") {
+      found = true;
+      return;
+    }
+    for (const value of Object.values(node)) Array.isArray(value) ? value.forEach(visit) : visit(value);
+  };
+  visit(ast);
+  return found;
+}
+
 function hasBackground(model: TemplateModel): boolean {
   return model.lanes.some((lane) => lane.nodes.some((node) => node.family === "assess" && Boolean(node.body.background)));
 }
@@ -368,6 +386,8 @@ function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]): s
 function accessOf(lane: LaneModel, params: CompiledParams): ActionAccess {
   if (lane.entry.trigger === "admin") return { roles: ["admin"], manager: true };
   const access = lane.entry.access!;
+  // Tout compte connecté : la lane affine elle-même (rôle de plateforme, qualification) par ses gates.
+  if (access.mode === "signed_in") return {};
   if (access.mode === "role") {
     const param = /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec(String(access.role))?.[1];
     // La qualification seule : un admin ou un manager ne relit ni ne vote à la place d'un qualifié.
@@ -411,6 +431,7 @@ async function runSegment(
 
   try {
     await engine.bindParticipation(state, call.lane.id);
+    await bindCaller(state, ctx, t, values);
     if (claimAct) {
       const claimId = typeof body.claim_id === "string" ? body.claim_id : null;
       const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
@@ -431,6 +452,7 @@ async function runSegment(
       const fields = gestureFields(gesture);
       const bound = await readGesture(fields, nodeFields.get(gesture) ?? {}, body, state, engine, t);
       state.bindings[gesture.id] = bound;
+      state.sent[gesture.id] = Object.keys(fields).filter((name) => name in body);
       Object.assign(state.result, bound);
     }
 
@@ -461,7 +483,31 @@ async function runSegment(
       },
     };
   }
-  return { ok: true, cp_awarded: state.awarded, ...(Object.keys(kept).length > 0 ? { context: kept } : {}) };
+  return {
+    ok: true,
+    cp_awarded: state.awarded,
+    ...(Object.keys(kept).length > 0 ? { context: kept } : {}),
+    ...(Object.keys(state.created).length > 0 ? { created: state.created } : {}),
+  };
+}
+
+/**
+ * Ce que la portée dit de l'appelant hors de sa participation : son rôle de
+ * plateforme, et — quand le template le lit — s'il détient la qualification
+ * de chaque paramètre `role` (`participation.qualified.<param>`).
+ */
+async function bindCaller(state: RunState, ctx: ActionContext, t: CompiledTemplate, values: Record<string, Value>): Promise<void> {
+  const participation = { ...((state.bindings.participation as Record<string, Value> | undefined) ?? { user: ctx.user.id }) };
+  participation.role = ctx.user.role;
+  if (t.readsQualified) {
+    const qualified: Record<string, Value> = {};
+    for (const name of t.roleParams) {
+      const key = values[name];
+      qualified[name] = typeof key === "string" && key.length > 0 && (await ctx.access.holds(key));
+    }
+    participation.qualified = qualified;
+  }
+  state.bindings.participation = participation;
 }
 
 /**
@@ -647,8 +693,14 @@ async function readGesture(
   const bound: Record<string, Value> = {};
   for (const [name, decl] of Object.entries(fields)) {
     const type = types[name];
-    const raw = body[name];
+    let raw = body[name];
     if (decl.when !== undefined && (await engine.eval(decl.when, state, bound)) !== true) {
+      bound[name] = null;
+      continue;
+    }
+    // `trim` : rogné ; vide, un champ optionnel vaut `null` — une chaîne vide n'est jamais un contenu.
+    if (decl.trim && typeof raw === "string") raw = raw.trim();
+    if (decl.optional && (raw === undefined || raw === null || (decl.trim && raw === ""))) {
       bound[name] = null;
       continue;
     }
@@ -661,6 +713,15 @@ async function readGesture(
     const parsed = zodOf(type).safeParse(raw);
     if (!parsed.success) throw new GestureError(`${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     let value = parsed.data as Value;
+    if (decl.public && typeof value === "string") {
+      // L'adresse sortira jusqu'aux navigateurs, ou sera appelée : publique seulement (garde SSRF du core).
+      const { assertPublicHttpUrl } = await import("../../capabilities/http-proxy/ssrf-guard.js");
+      try {
+        await assertPublicHttpUrl(value);
+      } catch (error) {
+        throw new GestureError(`${name} is not reachable/allowed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     if (type.kind === "contribution") {
       // Un `link` : une contribution du challenge source qui porte le livrable exigé.

@@ -35,6 +35,9 @@ export type RuntimeResources = Pick<
   | "consumedClaims"
   | "consumedBy"
   | "list"
+  | "upsert"
+  | "update"
+  | "remove"
 >;
 
 export interface RuntimeLedger {
@@ -137,6 +140,8 @@ export interface LinkedContribution {
   title: string | null;
   url: string | null;
   kind: string;
+  /** Les membres du groupe qui la porte (`contribution_members`) ; vide en solo. */
+  members: string[];
 }
 
 export interface RuntimeContributions {
@@ -232,6 +237,9 @@ export function defaultRuntime(
       consumedClaims: lazy("consumedClaims"),
       consumedBy: lazy("consumedBy"),
       list: lazy("list"),
+      upsert: lazy("upsert"),
+      update: lazy("update"),
+      remove: lazy("remove"),
     },
     blobs: {
       async store(input) {
@@ -246,8 +254,11 @@ export function defaultRuntime(
     contributions: {
       async find(contributionId) {
         const { ContributionRepository } = await repositories();
+        const { ContributionMemberRepository } = await repositories();
         const contribution = await new ContributionRepository().findById(contributionId);
-        return contribution ? linked(contribution) : null;
+        if (!contribution) return null;
+        const members = await new ContributionMemberRepository().findByContribution(contribution.uuid);
+        return linked(contribution, members.map((member) => member.user_id));
       },
       async eligible(challenge, capability) {
         if (!challenge.source_challenge_id) return [];
@@ -257,7 +268,7 @@ export function defaultRuntime(
         const deliverable = (source ? PlatformRegistry.flowFor(source) : undefined)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
         if (!source || !deliverable) return [];
         const contributions = await new ContributionRepository().findByChallenge(source.uuid);
-        return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map(linked);
+        return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map((contribution) => linked(contribution));
       },
     },
     ledger: {
@@ -409,12 +420,13 @@ async function httpProxy(args: Record<string, Value>, context: ObserveContext): 
   return { status: result.status, ok: result.status >= 200 && result.status < 300, content_type: result.contentType, response: response as unknown as Value };
 }
 
-function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }): LinkedContribution {
+function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }, members: string[] = []): LinkedContribution {
   return {
     id: contribution.uuid,
     author: contribution.user_id,
     title: contribution.title ?? null,
     url: contribution.live_endpoint_url ?? contribution.artifact_url ?? null,
     kind: contribution.type,
+    members,
   };
 }

@@ -27,6 +27,12 @@ export const fieldDecl = z.strictObject({
   deliverable: identifier.optional(),
   /** Deux instances ne portent jamais la même valeur de ce champ ; une seconde création est refusée (409). */
   unique: z.boolean().optional(),
+  /** Le champ peut manquer : `null`, jamais refusé (un commentaire, une instruction). */
+  optional: z.boolean().optional(),
+  /** Une chaîne collectée est rognée ; vide après rognage, un champ optionnel vaut `null`. */
+  trim: z.boolean().optional(),
+  /** Pour un champ `url` collecté : une adresse publique, vérifiée côté serveur (garde SSRF) avant d'être gardée. */
+  public: z.boolean().optional(),
   /** Pour un champ `file` : la conservation des octets, en jours après la fermeture du challenge. */
   retention: z.strictObject({ days_after_close: z.number().int().min(1) }).optional(),
   from: exprSource.optional(),
@@ -63,6 +69,12 @@ export const resourceDecl = z.strictObject({
     .optional(),
   cardinality: z.strictObject({ exactly: exprSource }).optional(),
   match_or_create: z.strictObject({ by: z.string() }).optional(),
+  /**
+   * Un champ `int` qui ordonne les instances, gardé dense (0..n-1) par le moteur :
+   * une création s'ajoute à la fin, un `update` qui le change déplace l'instance,
+   * un `delete` renumérote (les étapes d'un scénario).
+   */
+  ordered_by: identifier.optional(),
 });
 export type ResourceDecl = z.infer<typeof resourceDecl>;
 
@@ -140,6 +152,18 @@ export const actBody = z.looseObject({
   grant: z.strictObject({ field: exprSource, to: z.literal("participation") }).optional(),
   match_or_create: z.strictObject({ resource: identifier, decision: identifier }).optional(),
   attach: exprSource.optional(),
+  /**
+   * Avec `create` : une instance par combinaison de ces champs (`author` : le
+   * créateur). Déjà là, elle est rendue telle quelle, ou réécrite avec `overwrite`.
+   */
+  upsert: z.strictObject({ by: z.array(identifier).min(1), overwrite: z.boolean().optional() }).optional(),
+  /**
+   * Réécrit des champs d'une instance : `from` un geste (seulement les champs
+   * que la requête porte, `null` compris), `set` des expressions.
+   */
+  update: z.strictObject({ resource: exprSource, from: identifier.optional(), set: z.record(identifier, exprSource).optional() }).optional(),
+  /** Supprime une instance (et ses réclamations) ; les gardes s'écrivent en gates. */
+  delete: exprSource.optional(),
 });
 export type ActBody = z.infer<typeof actBody>;
 export const ACT_KEYS = new Set(Object.keys(actBody.shape));
@@ -190,7 +214,8 @@ export const NODE_FAMILIES = {
 export type NodeFamily = keyof typeof NODE_FAMILIES;
 
 export const accessDecl = z.strictObject({
-  mode: z.enum(["open", "role", "author_of"]),
+  /** `signed_in` : tout compte connecté, membre ou non (un validateur qui ne rejoint pas). */
+  mode: z.enum(["open", "role", "author_of", "signed_in"]),
   role: exprSource.optional(),
   resource: identifier.optional(),
   group: exprSource.optional(),

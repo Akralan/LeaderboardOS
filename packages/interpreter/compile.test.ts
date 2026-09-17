@@ -106,6 +106,8 @@ describe("compiling data-annotation", () => {
       "GET annotator/claim",
       "GET annotator/file",
       "GET file",
+      "GET mine",
+      "GET resources",
       "GET export",
     ]);
     expect(flow.jobs!.map((job) => [job.key, job.schedule])).toEqual([["data-annotation.audit", "0 4 * * 1"]]);

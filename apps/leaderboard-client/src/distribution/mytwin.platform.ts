@@ -3,7 +3,7 @@ import { codeFlow } from '../../../../content/flows/code';
 import { codeTemplateFlow } from '../../../../content/templates/code';
 import { mlFlow } from '../../../../content/flows/ml';
 import { endpointValidationFlow } from '../../../../content/flows/endpoint-validation';
-import { journeyValidationFlow } from '../../../../content/flows/journey-validation';
+import { journeyValidationTemplateFlow } from '../../../../content/templates/journey-validation';
 import { dataAnnotationTemplateFlow } from '../../../../content/templates/data-annotation';
 import { endpointCheckTemplateFlow } from '../../../../content/templates/endpoint-check';
 import { validationKit } from '../../../../content/kits/validation';
@@ -34,7 +34,10 @@ export const platform: PlatformDefinitions = {
     // Les validations MyTwin sont jugées par des professionnels de santé.
     // Retiré par attrition : il sert ses challenges existants, les nouveaux prennent endpoint-check.
     { ...endpointValidationFlow, retired: true, configDefaults: { reviewer_qualification: MEDICAL_PRO } },
-    { ...journeyValidationFlow, configDefaults: { expert_comment_qualification: MEDICAL_PRO } },
+    // Compilé depuis content/templates/journey-validation/template.yaml (parité P4), avec continuité : les données des
+    // challenges en cours sont copiées en ressources au déploiement (db:migrate-journey-resources). La clé de ledger et la
+    // contribution `validation` restent déclarées une fois, par le kit que la validation d'endpoints partage encore.
+    { ...journeyValidationTemplateFlow, ruleKeys: [], contributionTypes: [], configDefaults: { expert_comment_qualification: MEDICAL_PRO } },
     // Compilé depuis content/templates/data-annotation/template.yaml : le premier flow servi par l'interpréteur.
     dataAnnotationTemplateFlow,
     // Compilé depuis content/templates/endpoint-check/template.yaml : les validations d'endpoint nouvelles.

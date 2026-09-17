@@ -47,7 +47,7 @@ function bodyOf(segment: SurfaceSegment, values: Values, claimId: string | null)
   for (const field of segment.fields) {
     const value = values[field.name];
     if (value === undefined || value === '') {
-      if (field.conditional) continue;
+      if (field.conditional || field.optional) continue;
       return `${humanize(field.name)} is required`;
     }
     if (field.kind === 'json' && typeof value === 'string') {
@@ -70,7 +70,7 @@ function bodyOf(segment: SurfaceSegment, values: Values, claimId: string | null)
   return { body: form };
 }
 
-export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane: SurfaceLane }) {
+export function GeneratedLane({ challengeId, lane, onRecorded }: { challengeId: string; lane: SurfaceLane; onRecorded?: () => void }) {
   const [step, setStep] = useState(0);
   const [values, setValues] = useState<Values>({});
   const [claim, setClaim] = useState<ClaimView | null>(null);
@@ -144,6 +144,7 @@ export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane
       }
       const body = await res.json();
       setValues({});
+      onRecorded?.();
       if (res.status === 202 && body.scheduled) {
         setDone(null);
         setEvaluation((current) => ({ status: 'running', running: true, score: current?.score ?? null, cp: current?.cp ?? 0 }));

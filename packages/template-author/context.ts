@@ -36,11 +36,12 @@ presentation?:     {icon?, long_label?, join_caption?, brief_required?: bool, pu
 workspace?:        {mode: <expr: provided_repo | own_repo>}   # a branch per participant on the challenge repo, or their own GitHub repo (PATCH workspace)
 resources:         # shared work units
   <snake_name>:
-    fields: {<field>: {type: <type>, visibility?: [claimant | author | admin | "role(params.x)"], check?, from?, deliverable?, unique?, retention?: {days_after_close: N}}}
+    fields: {<field>: {type: <type>, visibility?: [claimant | author | admin | "role(params.x)"], check?, from?, deliverable?, unique?, optional?: bool, retention?: {days_after_close: N}}}
     created_by?: [<lane_id>.<act_id>]          # the ACT nodes that create it
     claim?: {mode: exclusive | k_bounded | unique_per | unbounded, k?: <expr>, ttl?: 48h | <expr in hours>, dimensions?: [self, <scope key>]}
     closure?: {by: aggregate | transition | admin_act | [..], verdict?: [<snake>...], permanent?: bool}
     cardinality?: {exactly: <expr>}
+    ordered_by?: <int field>                   # kept dense 0..n-1: create appends, an update of it moves, delete renumbers
 counters?:         # derived per-participant stats, updated by assess nodes
   <snake_name>: {type: int | number | ratio | points, lag?: N}
 lifecycle?:
@@ -54,17 +55,19 @@ lifecycle?:
   on_close?: [ effects ]
 lanes:             # at least one
   - id: <snake>
-    entry: {trigger: user | admin | cron, access?: {mode: open | role | author_of, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},
+    entry: {trigger: user | admin | cron, access?: {mode: open | role | author_of | signed_in, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},
             schedule?: "<cron>", over?: {resource: <type>, where?: <expr>, sample?: <expr>}, cursor?: engine}
     nodes: [ <node>, ... ]   # a strict top-down sequence; no cycles
 
 A node is a mapping with exactly ONE family key:
-- collect: {id, fields: {<field>: {type, when?: <expr>, check?: <expr>, where?: <expr>}}}      # a form the actor fills
+- collect: {id, fields: {<field>: {type, when?: <expr>, check?: <expr>, where?: <expr>, optional?: bool, trim?: bool, public?: bool}}}   # a form the actor fills; public: an url checked public (SSRF)
 - gate:    {id, all: ["<expr>", ...], refuse?: 400 | 403 | 409 | 422, message?: <text>, reason?: <snake>}   # blocking check
 - gate:    {id, branch: [ {when: "<expr>", nodes: [...]}, ..., {else: {nodes: [...]}} ]}        # routing; branches reconverge below the gate
 - act:     {id, kind?: effector | observer | grant, ...}
     claim: {resource: <type or ref field like pick.case>, where?: <expr>, scope?: {<key>: <expr>}, substitute?: {resource: <type>, rate: <expr>}}
-    create: <type>, from?: <collect id>, many?: {from_file: <expr>}, set?: {<field>: <expr>}
+    create: <type>, from?: <collect id>, many?: {from_file: <expr>}, set?: {<field>: <expr>}, upsert?: {by: [author | <field>...], overwrite?: bool}
+    update: {resource: <expr>, from?: <collect id: only the fields the request sent>, set?: {<field>: <expr>}}
+    delete: <expr of a resource>
     transition: {resource: <expr>, to: closed | open, verdict?: <expr or word>, from?: <verdict>, resolution?: {<key>: <expr>}}
     grant: {field: <resource field expr>, to: participation}
     capability: <catalog name>, store?: <snake>, <capability args>: <expr>
@@ -83,6 +86,7 @@ Expressions are a closed CEL-like subset, always YAML strings when they contain 
   Enum literals are quoted strings: 'judge.outcome == "failed"'. A bare word is a name.
 In scope: params.*, counters.*, challenge.state, challenge.title, participation.user, aggregates.<id>.inputs / .verdict,
   participation.holder, participation.group.{size, multiplier, members}, participation.workspace.{provider, url, ref, status, ready},
+  participation.role (platform role), participation.qualified.<role param> (bool), <resource>.id, link fields: .id .author .title .url .members,
   board.{total, done} (with presentation.board),
   every upstream node by id (collect fields: form.field; claim: draw.<type>, draw.substituted; stored observation: probe.<store>; assess: check.value; ai_grid: grade.score on 0..1),
   in a param check: value; in an aggregate: inputs, verdict.

@@ -24,7 +24,7 @@ export interface MemoryRuntime extends TemplateRuntime {
   claims: ResourceClaim[];
   grants: { resource_id: string; field: string; participation: string; granted_by: string }[];
   /** Les contributions des challenges sources : `challenge` est le challenge source, `capabilities` ce qu'elles livrent. */
-  contributionRows: { id: string; author: string; title?: string; url: string | null; kind: string; challenge: string; capabilities: string[] }[];
+  contributionRows: { id: string; author: string; title?: string; url: string | null; kind: string; challenge: string; capabilities: string[]; members?: string[] }[];
   blobRows: StoredBlob[];
   ledgerRows: RewardEntry[];
   challenges: Challenge[];
@@ -280,6 +280,35 @@ export function memoryRuntime(options: {
         return runtime.instances.find((instance) => instance.uuid === resourceId) ?? null;
       },
 
+      async upsert(challengeId, type, item, options) {
+        const same = (instance: ResourceInstance) =>
+          instance.challenge_id === challengeId && instance.resource_type === type &&
+          options.by.every((name) => (name === "author" ? instance.created_by === options.createdBy : JSON.stringify(instance.payload[name] ?? null) === JSON.stringify(item.payload[name] ?? null)));
+        const existing = runtime.instances.find(same);
+        if (existing) {
+          if (options.overwrite) Object.assign(existing, { payload: JSON.parse(JSON.stringify(item.payload)), class: item.class ?? null });
+          return { id: existing.uuid, created: false };
+        }
+        await runtime.resources.createMany(challengeId, type, [item], { createdBy: options.createdBy });
+        return { id: runtime.instances[runtime.instances.length - 1].uuid, created: true };
+      },
+
+      async update(resourceId, patch) {
+        const instance = runtime.instances.find((candidate) => candidate.uuid === resourceId);
+        if (!instance) return false;
+        instance.payload = { ...instance.payload, ...JSON.parse(JSON.stringify(patch)) };
+        return true;
+      },
+
+      async remove(resourceId) {
+        const index = runtime.instances.findIndex((candidate) => candidate.uuid === resourceId);
+        if (index < 0) return false;
+        runtime.instances.splice(index, 1);
+        runtime.claims = runtime.claims.filter((claim) => claim.resource_id !== resourceId);
+        runtime.grants = runtime.grants.filter((grant) => grant.resource_id !== resourceId);
+        return true;
+      },
+
       async claim(claimId) {
         return runtime.claims.find((claim) => claim.uuid === claimId) ?? null;
       },
@@ -328,12 +357,12 @@ export function memoryRuntime(options: {
     contributions: {
       async find(contributionId) {
         const row = runtime.contributionRows.find((candidate) => candidate.id === contributionId);
-        return row ? { id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind } : null;
+        return row ? { id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] } : null;
       },
       async eligible(challenge, capability) {
         return runtime.contributionRows
           .filter((row) => row.challenge === challenge.source_challenge_id && row.capabilities.includes(capability))
-          .map((row) => ({ id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind }));
+          .map((row) => ({ id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] }));
       },
     },
 

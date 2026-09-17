@@ -92,3 +92,18 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | `gate: {refuse: 400, message, reason}` | the code flow's refusals: `{error: "Cannot start evaluation", reason: "tasks_not_done"}` |
 | `grid: '"code"'` | a grid named by its slug literal |
 | `challenge.title` | a contribution description reads it |
+
+## Resource edits and signed-in lanes (template parity, milestone 4)
+
+| Addition | Why |
+|---|---|
+| `act: {update: {resource, from, set}}` | a scenario step is renamed, rewritten or moved; `from` writes only the fields the request carried (`instructions: null` clears, absent keeps) |
+| `act: {delete: <resource>}` | a step or an untouched app is removed; its guards are gates (the freeze) |
+| `act: {create, upsert: {by, overwrite}}` | one walkthrough per (validator, app), returned when opened again; one step result per (walkthrough, step), overwritten on revisit — under an advisory lock on the combination |
+| `resources.<type>.ordered_by: <int field>` | dense positions: create appends, an update of the field moves the instance to that index (bounded), delete renumbers |
+| field `optional`, `trim`, `public` | optional comments stored `null`; a trimmed title; an app URL checked public (the core's SSRF guard) at exposure |
+| `access: {mode: signed_in}` | validators walk through without joining; the platform role and qualifications are then read by gates |
+| `participation.role`, `participation.qualified.<role param>` | eligible roles (`viewer` refused) and the expert opinion reserved to a qualification |
+| `<resource>.id`, link `.id`, `.title`, `.members` | comparing references; excluding the author's group (`contribution_members`) |
+| declared `reward.meta` | is the shape of the ledger line (`{targetContributionId, runId}`), only the natural key of a claim or resource is added |
+| generated `GET mine`, `GET resources?type=` | what a participant resumes; every instance, drafts included, for a manager |
