@@ -111,6 +111,15 @@ export const rewardBody = z.strictObject({
   clamp: z.literal("pool").optional(),
   order: z.literal("commit_time").optional(),
   rule_key: z.string().regex(/^[a-z][a-z0-9_.]*$/).optional(),
+  /**
+   * `delta` : ne verse que ce qui dépasse ce que cette clé a déjà versé à ce
+   * destinataire sur le challenge — un montant rogné par le pool se complète
+   * plus tard, une baisse ne reprend rien (le challenge code).
+   */
+  basis: z.literal("delta").optional(),
+  /** Ce que la ligne de ledger garde, clé par clé (`agentScore`…). */
+  // Les clés sont celles que les flows écrits à la main posent (`agentScore`) : la forme de leurs données fait foi.
+  meta: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, "a meta key is an identifier"), exprSource).optional(),
 });
 export type RewardBody = z.infer<typeof rewardBody>;
 
@@ -142,6 +151,12 @@ export const assessBody = z.strictObject({
   input: z.array(exprSource).optional(),
   /** `ai_grid` sur un dépôt : son historique récent (défaut GitHub) ou son dernier état (défaut Kaggle). */
   snapshot: z.enum(["history", "latest"]).optional(),
+  /**
+   * `ai_grid` hors de la requête : le geste répond 202, l'évaluation tourne en
+   * arrière-plan (une à la fois par participation, reprise après 30 min), puis
+   * la lane reprend au nœud suivant. Rejouable par la relance d'un run échoué.
+   */
+  background: z.boolean().optional(),
   fields: fields.optional(),
   from: identifier.optional(),
   value: exprSource.optional(),

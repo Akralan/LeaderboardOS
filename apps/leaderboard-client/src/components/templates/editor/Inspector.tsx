@@ -127,6 +127,9 @@ function groupsOf(node: CanvasNode): Group[] {
             { path: ['kind'], label: 'Kind', control: 'enum', options: ['human', 'metric', 'ai_grid', 'self'] },
             { path: ['value'], label: 'Value', control: 'expr', show: (b) => b.kind === 'metric' || b.value !== undefined },
             { path: ['grid'], label: 'Grid', control: 'expr', show: (b) => b.kind === 'ai_grid' },
+            { path: ['input'], label: 'Inputs', control: 'yaml', hint: 'the artifact URL first', show: (b) => b.kind === 'ai_grid' },
+            { path: ['snapshot'], label: 'Snapshot', control: 'enum', options: ['', 'history', 'latest'], hint: 'branch history · latest state', show: (b) => b.kind === 'ai_grid' },
+            { path: ['background'], label: 'Run in background', control: 'bool', show: (b) => b.kind === 'ai_grid' },
             { path: ['from'], label: 'From form', control: 'text', hint: 'an upstream Collect id' },
             { path: ['gating'], label: 'Gating', control: 'bool' },
           ],
@@ -152,6 +155,8 @@ function groupsOf(node: CanvasNode): Group[] {
             { path: ['clamp'], label: 'Clamp to pool', control: 'bool', truthy: 'pool' },
             { path: ['order'], label: 'Order', control: 'enum', options: ['', 'commit_time'] },
             { path: ['rule_key'], label: 'Ledger key', control: 'text' },
+            { path: ['basis'], label: 'Basis', control: 'enum', options: ['', 'delta'], hint: 'delta: pay only the improvement' },
+            { path: ['meta'], label: 'Ledger meta', control: 'yaml', hint: 'key: expression' },
           ],
         },
       ];

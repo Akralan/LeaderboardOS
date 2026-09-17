@@ -379,6 +379,7 @@ Sources: `content/flows/journey-validation/**`, `packages/services/challenge/{sc
 | Milestone | Gaps | State |
 |---|---|---|
 | P1 — runtime bindings | A1, A2 | **Done** (Sept. 17): `packages/interpreter/compile/bindings.ts`; `ai_grid` scores on 0..1 with `snapshot: history \| latest`; `kaggle_metadata` and `github_fetch` typed; a test holds the catalog to its bindings. Verified live: Kaggle read, and a real `dataset` grid evaluation (62 s — synchronous inside the gesture, hence P2). |
+| P2 — background evaluation, delta pay | B3, D13 | **Done** (Sept. 17): `assess: {background: true}` (202, one run per participation, 30-min takeover, `continue` retry handler, `<lane>/evaluation` read, generated UI polling); `reward: {basis: delta, meta}`; equivalence with `computeCodeAward` run after run (`packages/interpreter/background.test.ts`). |
 
 ### A. Runtime (blocking)
 

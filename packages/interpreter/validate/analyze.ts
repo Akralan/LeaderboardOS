@@ -951,6 +951,10 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     }
 
     if (body.snapshot !== undefined && body.kind !== "ai_grid") report("shape", [...path, "snapshot"], "snapshot applies to an ai_grid assessment", { node: id });
+    if (body.background) checkBackground(node, ctx);
+    else if (body.kind === "ai_grid" && (ctx.lane.entry.trigger === "user" || ctx.lane.entry.trigger === "admin")) {
+      advise("shape", path, "an ai_grid evaluation takes a minute or more inside the request; background: true answers 202 and resumes the lane", id);
+    }
 
     switch (body.kind) {
       case "ai_grid":
@@ -1084,6 +1088,39 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     }
   }
 
+  /**
+   * Une évaluation en arrière-plan reprend la lane au nœud suivant, depuis ce
+   * que le run a gardé : ni claim à tenir, ni geste après elle, et une place au
+   * premier niveau de la lane pour que la reprise sache où continuer.
+   */
+  function checkBackground(node: Extract<NodeModel, { family: "assess" }>, ctx: NodeContext) {
+    const { body, path, id } = node;
+    const at = [...path, "background"];
+    if (body.kind !== "ai_grid") return report("shape", at, "background applies to an ai_grid assessment", { node: id });
+    if (ctx.lane.entry.trigger !== "user" && ctx.lane.entry.trigger !== "admin") {
+      return report("shape", at, "a background evaluation answers a gesture: its lane is triggered by a user or an admin", { node: id });
+    }
+    const index = ctx.lane.nodes.indexOf(node);
+    if (index < 0) return report("shape", at, "a background evaluation sits at the top level of its lane, not in a branch", { node: id });
+    const claims = (nodes: readonly NodeModel[]): boolean =>
+      nodes.some((candidate) =>
+        (candidate.family === "act" && Boolean(candidate.body.claim)) ||
+        (candidate.family === "assess" && Boolean(candidate.body.claim)) ||
+        (candidate.family === "gate" && (candidate.branches ?? []).some((branch) => claims(branch.nodes)))
+      );
+    if (claims(ctx.lane.nodes)) report("shape", at, "a background evaluation does not hold a claim across its run", { node: id });
+    const gestures = (nodes: readonly NodeModel[]): boolean =>
+      nodes.some((candidate) =>
+        candidate.family === "collect" ||
+        (candidate.family === "assess" && candidate.body.kind === "human" && Boolean(candidate.body.fields)) ||
+        (candidate.family === "gate" && (candidate.branches ?? []).some((branch) => gestures(branch.nodes)))
+      );
+    if (gestures(ctx.lane.nodes.slice(index + 1))) report("shape", at, "no gesture follows a background evaluation: the lane resumes without the participant", { node: id });
+    if (ctx.lane.nodes.slice(index + 1).some((candidate) => candidate.family === "assess" && candidate.body.background)) {
+      report("shape", at, "one background evaluation per lane", { node: id });
+    }
+  }
+
   function checkReward(
     body: RewardBody,
     scope: Scope,
@@ -1175,6 +1212,12 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
     }
     if (body.clamp === "pool" && body.pool === undefined) report("economy", [...path, "clamp"], "clamp: pool needs a pool", { node });
+    if (body.basis === "delta") {
+      if (typeof body.amount === "object") report("economy", [...path, "basis"], "a delta basis applies to an amount expression", { node });
+      if (negative) report("economy", [...path, "basis"], "a delta basis never pays back: its amount is not negative", { node });
+      if (where !== "lane") report("economy", [...path, "basis"], "a delta basis applies to a lane reward", { node });
+    }
+    for (const [key, source] of Object.entries(body.meta ?? {})) expr(source, scope, [...path, "meta", key], node);
     if (body.order === "commit_time" && where !== "aggregate") report("economy", [...path, "order"], "earliest-first ordering applies to an aggregate's payment", { node });
     if (negative && !body.rule_key) report("economy", [...path, "amount"], "a negative reward (clawback) declares its rule_key", { node });
     if (!negative && body.pool === undefined && !body.rule_key) {

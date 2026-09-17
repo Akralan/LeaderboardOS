@@ -17,7 +17,9 @@ import type { ExprSource, FieldDecl, RewardBody } from "../format/schema.js";
 import type { TemplateReport } from "../check.js";
 import { descriptorOf } from "../describe.js";
 import type { LaneModel, NodeModel, TemplateModel } from "../validate/format.js";
-import { Engine, Refusal, newState, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
+import { Deferred, Engine, Refusal, newState, scoreOf, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
+import { artifactOf } from "./bindings.js";
+import type { EvaluationDetail } from "./runtime.js";
 import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
 import { generatedActions, generatedPathConflicts, resourceCounts } from "./reads.js";
@@ -220,6 +222,28 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     },
     actions,
     jobs,
+    ...(hasBackground(model)
+      ? {
+          evaluationHandlers: [
+            {
+              key: CONTINUE_HANDLER,
+              // La relance d'un run échoué : reprendre l'évaluation (toujours une à la fois) et rejouer la suite.
+              async retry(payload: Record<string, unknown>) {
+                const continuation = payload as Continuation;
+                if (typeof continuation.contributionId !== "string" || typeof continuation.challengeId !== "string") {
+                  return { ok: false as const, reason: "invalid_payload" };
+                }
+                const artifact = (continuation.inputs ?? []).map((input) => artifactOf(input)).find(Boolean) ?? null;
+                if (!(await runtime.evaluations.claim(continuation.contributionId, artifact?.url ?? null))) {
+                  return { ok: false as const, reason: "already_running" };
+                }
+                runtime.evaluations.schedule(() => continueEvaluation(continuation, compiled, engine, params));
+                return { ok: true as const };
+              },
+            },
+          ],
+        }
+      : {}),
     hooks:
       lifecycleAggregates.length > 0
         ? {
@@ -234,6 +258,10 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
           }
         : undefined,
   };
+}
+
+function hasBackground(model: TemplateModel): boolean {
+  return model.lanes.some((lane) => lane.nodes.some((node) => node.family === "assess" && Boolean(node.body.background)));
 }
 
 function counterWritesOf(nodes: readonly NodeModel[]): { node: string; counter: string; add: ExprSource }[] {
@@ -359,6 +387,7 @@ async function runSegment(
     if (segment.final) await engine.deliver(state);
     else kept = await engine.persist(call.persist, state);
   } catch (error) {
+    if (error instanceof Deferred) return deferEvaluation(error, call.lane, state, t, engine, params);
     if (error instanceof Refusal) return jsonError(error.status, error.message);
     if (error instanceof GestureError) return jsonError(400, error.message);
     if (error instanceof EvalError) throw new Error(`[interpreter] ${t.flowKey}: ${error.message}`);
@@ -381,6 +410,103 @@ async function runSegment(
     };
   }
   return { ok: true, cp_awarded: state.awarded, ...(Object.keys(kept).length > 0 ? { context: kept } : {}) };
+}
+
+/**
+ * Ce qu'une évaluation en arrière-plan garde pour reprendre : où la lane
+ * s'est arrêtée, ce que les nœuds passés ont lié, ce qu'il faut noter. C'est
+ * aussi la charge du run d'évaluation, que la relance d'un run échoué rejoue.
+ */
+export interface Continuation {
+  [key: string]: unknown;
+  version: string | null;
+  challengeId: string;
+  userId: string;
+  lane: string;
+  node: string;
+  grid: string;
+  inputs: Value[];
+  bindings: Record<string, Value>;
+  contributionId: string;
+}
+
+export const CONTINUE_HANDLER = "continue";
+
+/** Ce qui ne se recalcule pas à la reprise : les liaisons des nœuds passés, sans les paramètres ni l'état du challenge. */
+function carried(bindings: Record<string, Value>): Record<string, Value> {
+  const { params: _params, challenge: _challenge, participation: _participation, counters: _counters, ...rest } = bindings;
+  return JSON.parse(JSON.stringify(rest)) as Record<string, Value>;
+}
+
+/** Le geste a passé tous ses contrôles : l'évaluation se prend (une à la fois), se planifie, et le geste répond 202. */
+async function deferEvaluation(deferred: Deferred, lane: LaneModel, state: RunState, t: CompiledTemplate, engine: Engine, params: CompiledParams): Promise<Response> {
+  const userId = state.userId!;
+  const contributionId = await t.runtime.ledger.contribution(state.challenge, userId, t.contribution);
+  const artifact = deferred.inputs.map((input) => artifactOf(input)).find(Boolean) ?? null;
+  if (!(await t.runtime.evaluations.claim(contributionId, artifact?.url ?? null))) {
+    return jsonError(409, "An evaluation is already running");
+  }
+  const continuation: Continuation = {
+    version: t.version,
+    challengeId: state.challenge.uuid,
+    userId,
+    lane: lane.id,
+    node: deferred.node.id,
+    grid: deferred.grid,
+    inputs: deferred.inputs,
+    bindings: carried(state.bindings),
+    contributionId,
+  };
+  t.runtime.evaluations.schedule(() => continueEvaluation(continuation, t, engine, params));
+  return Response.json({ scheduled: true }, { status: 202 });
+}
+
+/**
+ * La suite d'une évaluation en arrière-plan : noter, stocker le détail sur la
+ * contribution, puis reprendre la lane au nœud suivant avec les règles du
+ * moment — comme le challenge code recalcule son plan au lancement du run. Un
+ * refus plus loin (un plancher) termine le run sans paiement ; une erreur le
+ * marque en échec et le laisse rejouable.
+ */
+export async function continueEvaluation(continuation: Continuation, t: CompiledTemplate, engine: Engine, params: CompiledParams): Promise<void> {
+  const { runtime } = t;
+  const challenge = (await runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === continuation.challengeId);
+  const lane = t.model.lanes.find((candidate) => candidate.id === continuation.lane);
+  const index = lane ? lane.nodes.findIndex((node) => node.id === continuation.node) : -1;
+  const node = lane && index >= 0 ? lane.nodes[index] : null;
+  let evaluation: EvaluationDetail | undefined;
+  try {
+    if (!challenge || !lane || !node || node.family !== "assess") {
+      throw new Error(`[interpreter] ${t.flowKey}: nothing to continue at ${continuation.lane}.${continuation.node}`);
+    }
+    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+    if (!values) throw new Error(`[interpreter] ${t.flowKey}: challenge ${challenge.uuid} has no readable configuration`);
+
+    const result = scoreOf(
+      await runtime.evaluate({
+        challenge,
+        userId: continuation.userId,
+        grid: continuation.grid,
+        inputs: continuation.inputs,
+        ...(node.body.snapshot ? { snapshot: node.body.snapshot } : {}),
+        contributionId: continuation.contributionId,
+        origin: { handler: CONTINUE_HANDLER, payload: continuation },
+      })
+    );
+    evaluation = (result.evaluation as EvaluationDetail | null) ?? undefined;
+
+    const state = newState(challenge, continuation.userId, values);
+    Object.assign(state.bindings, continuation.bindings, { [node.id]: { score: result.score } });
+    try {
+      await engine.run(lane.nodes.slice(index + 1), state);
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+    }
+    await runtime.evaluations.finish(continuation.contributionId, { status: "done", ...(evaluation ? { evaluation } : {}) });
+  } catch (error) {
+    await runtime.evaluations.finish(continuation.contributionId, { status: "failed", ...(evaluation ? { evaluation } : {}) });
+    throw error;
+  }
 }
 
 function viewerOf(ctx: ActionContext, values: Record<string, Value>, claimant: boolean) {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Loader2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import type { SurfaceLane, SurfaceSegment } from '../../../../../packages/interpreter/describe';
 import { flowActionUrl } from '@/lib/challengeActions';
 import { GeneratedField, type FieldValue } from './GeneratedField';
@@ -26,6 +26,16 @@ interface ClaimView {
 }
 
 type Values = Record<string, FieldValue>;
+
+/** L'état d'une évaluation en arrière-plan, tel que `<lane>/evaluation` le rend. */
+interface EvaluationView {
+  status: 'running' | 'done' | 'failed' | 'pending' | 'skipped_reuse' | null;
+  running: boolean;
+  score: number | null;
+  cp: number;
+}
+
+const EVALUATION_POLL_MS = 3000;
 
 function hasFile(segment: SurfaceSegment, values: Values) {
   return segment.fields.some((field) => field.kind === 'file' && values[field.name] instanceof File);
@@ -67,6 +77,24 @@ export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane
   const [done, setDone] = useState<{ cp: number | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const evaluates = lane.segments.some((candidate) => candidate.evaluates);
+  const [evaluation, setEvaluation] = useState<EvaluationView | null>(null);
+
+  const readEvaluation = useCallback(async () => {
+    const res = await fetch(flowActionUrl(challengeId, `${lane.id}/evaluation`));
+    if (res.ok) setEvaluation(await res.json());
+  }, [challengeId, lane.id]);
+
+  // Une évaluation en arrière-plan se suit : lue à l'ouverture, relue tant qu'elle tourne.
+  useEffect(() => {
+    if (!evaluates) return;
+    void readEvaluation().catch(() => undefined);
+  }, [evaluates, readEvaluation]);
+  useEffect(() => {
+    if (!evaluation?.running) return;
+    const timer = setInterval(() => void readEvaluation().catch(() => undefined), EVALUATION_POLL_MS);
+    return () => clearInterval(timer);
+  }, [evaluation?.running, readEvaluation]);
 
   const readClaim = useCallback(async (claimId: string): Promise<ClaimView | null> => {
     const res = await fetch(flowActionUrl(challengeId, `${lane.id}/claim?claim_id=${encodeURIComponent(claimId)}`));
@@ -116,6 +144,13 @@ export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane
       }
       const body = await res.json();
       setValues({});
+      if (res.status === 202 && body.scheduled) {
+        setDone(null);
+        setEvaluation((current) => ({ status: 'running', running: true, score: current?.score ?? null, cp: current?.cp ?? 0 }));
+        setClaim(null);
+        setStep(0);
+        return;
+      }
       if (segment.final) {
         setDone({ cp: typeof body.cp_awarded === 'number' ? body.cp_awarded : null });
         setClaim(null);
@@ -170,6 +205,22 @@ export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane
         )}
       </div>
 
+      {evaluation?.running && (
+        <p className="flex items-center gap-2 text-sm" style={{ color: fgAt(0.6) }}>
+          <Loader2 className="h-4 w-4 animate-spin" /> Evaluation in progress…
+        </p>
+      )}
+      {evaluation && !evaluation.running && evaluation.status === 'done' && evaluation.score !== null && (
+        <p className="flex items-center gap-2 text-sm text-emerald-400">
+          <CheckCircle2 className="h-4 w-4" /> Score {(evaluation.score * 10).toFixed(1)}/10 · {evaluation.cp} CP earned
+        </p>
+      )}
+      {evaluation && !evaluation.running && (evaluation.status === 'failed' || evaluation.status === 'running') && (
+        <p className="flex items-center gap-2 text-sm text-amber-300">
+          <AlertTriangle className="h-4 w-4" /> Evaluation failed — check your repository and try again.
+        </p>
+      )}
+
       {done && step === 0 && (
         <p className="flex items-center gap-2 text-sm text-emerald-400">
           <CheckCircle2 className="h-4 w-4" /> Recorded{done.cp ? ` · +${done.cp} CP` : ''}
@@ -202,12 +253,14 @@ export function GeneratedLane({ challengeId, lane }: { challengeId: string; lane
         <div className="flex flex-wrap gap-2">
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || Boolean(evaluation?.running)}
             style={{ color: '#000' }}
             className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-semibold hover:bg-white/90 disabled:opacity-50"
           >
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {segment.fields.length === 0 ? 'Start' : segment.final ? 'Submit' : 'Continue'}
+            {segment.evaluates
+              ? evaluation?.running ? 'Evaluating…' : evaluation?.status === 'done' ? 'Re-evaluate' : 'Launch evaluation'
+              : segment.fields.length === 0 ? 'Start' : segment.final ? 'Submit' : 'Continue'}
           </button>
           {claim && (
             <button type="button" onClick={release} disabled={busy} className="rounded-full border border-white/10 px-4 py-2 text-xs text-white/60 hover:bg-white/5">

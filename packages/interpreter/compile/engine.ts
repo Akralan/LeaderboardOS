@@ -32,6 +32,25 @@ export class Refusal extends Error {
   }
 }
 
+/**
+ * Une évaluation en arrière-plan : le geste s'arrête là. Les nœuds déjà passés
+ * ont tout vérifié ; l'appelant prend l'évaluation, planifie la suite et répond 202.
+ */
+export class Deferred extends Error {
+  constructor(
+    readonly node: Extract<NodeModel, { family: "assess" }>,
+    readonly grid: string,
+    readonly inputs: Value[]
+  ) {
+    super(`[interpreter] ${node.id} continues in the background`);
+  }
+}
+
+/** Le score d'une liaison d'évaluation, avec son détail s'il est connu. */
+export function scoreOf(result: number | { score: number; evaluation: unknown }): { score: number; evaluation: unknown } {
+  return typeof result === "number" ? { score: result, evaluation: null } : result;
+}
+
 export interface CompiledTemplate {
   model: TemplateModel;
   flowKey: string;
@@ -607,9 +626,10 @@ export class Engine {
       case "ai_grid": {
         const grid = await this.eval(body.grid!, state);
         const inputs = await Promise.all((body.input ?? []).map((input) => this.eval(input, state)));
+        if (body.background) throw new Deferred(node, String(grid), inputs);
         let score: number;
         try {
-          score = await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs, ...(body.snapshot ? { snapshot: body.snapshot } : {}) });
+          score = scoreOf(await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs, ...(body.snapshot ? { snapshot: body.snapshot } : {}) })).score;
         } catch (error) {
           if (error instanceof ObserverRefusal) throw new Refusal(error.status, error.message);
           throw error;
@@ -775,8 +795,12 @@ export class Engine {
     let distributed = await runtime.ledger.distributed(challengeId);
     const drafts: RewardEntryDraft[] = [];
 
+    const written: Record<string, Value> = {};
+    for (const [key, source] of Object.entries(body.meta ?? {})) written[key] = await this.eval(source, state);
+
     for (const { user: userId } of recipients) {
-      const entryMeta = meta;
+      // Une clé versée en différentiel n'a pas de clé naturelle : ce qui la distingue est ce qui est déjà versé.
+      const entryMeta: Record<string, Value> = body.basis === "delta" ? { ...written } : { ...meta, ...written };
       // Rejouer le geste ne paie pas deux fois : même clé, même méta, même personne.
       // Sans clé naturelle (ni claim ni ressource), chaque geste paie.
       const keyed = Boolean(meta.claim_id || meta.resource_id);
@@ -785,10 +809,21 @@ export class Engine {
       );
       if (duplicate) continue;
 
-      let points = Math.round(await this.number(amount, state));
+      const raw = Math.round(await this.number(amount, state));
+      let points = raw;
+      if (body.basis === "delta") {
+        // Le challenge code : seul ce qui dépasse le déjà versé sur cette clé, jamais de reprise.
+        const paid = existing
+          .filter((entry) => entry.rule_key === ruleKey && entry.user_id === userId)
+          .reduce((sum, entry) => sum + entry.points, 0);
+        points = Math.max(0, raw - paid);
+        entryMeta.rawPoints = raw;
+      }
+      const due = points;
       if (body.clamp === "pool" && points > 0) {
         points = Math.min(points, Math.max(0, state.challenge.contribution_points_reward - distributed));
       }
+      if (body.basis === "delta" && points < due) entryMeta.clampedTo = points;
       if (points === 0) continue;
 
       const contributionId = await runtime.ledger.contribution(state.challenge, userId, this.t.contribution);

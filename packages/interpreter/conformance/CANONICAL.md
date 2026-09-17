@@ -69,3 +69,12 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | `kaggle_metadata` output `{ref, kind, url, title, versions, metrics: {auc, f1, accuracy}}` | typed; each metric is the latest model version that reports it, `0` when none does — the ML flow's `readKaggleMetric` |
 | `github_fetch` output `{slug, url, branch, commits, last_commit, last_commit_at}` | typed; up to 100 commits of the branch |
 | An evaluation or observer failure refuses the gesture (`502`), without effect | a failed agent call or connector read never writes a partial run |
+
+## Background evaluation and delta pay (template parity, milestone 2)
+
+| Addition | Why |
+|---|---|
+| `assess: {kind: ai_grid, background: true}` | the code flow's evaluation: the gesture answers `202 {scheduled: true}` once every node before passed; the evaluation is claimed on the participation's contribution (one at a time, taken over after 30 minutes, `409` otherwise), runs outside the request, stores `contributions.evaluation`, then the lane resumes at the next node with the rules in force. A failed run is replayed by the flow's `continue` evaluation handler (admin retry). Top level of a user or admin lane only, no claim, nothing interactive after it |
+| generated read `GET <lane>/evaluation` | `{status, running, started_at, score, evaluation, artifact_url, cp}` — what the generated UI polls; the surface marks the segment `evaluates` |
+| `reward: {basis: delta}` | `computeCodeAward`: pays `max(0, round(amount) − already paid on this rule key to the recipient)`, then clamps to the pool; a clamped remainder is paid by a later run, a lower amount pays nothing, nothing is taken back. Its ledger meta carries `rawPoints` and, when clamped, `clampedTo` |
+| `reward: {meta: {<key>: <expr>}}` | the ledger meta the hand-written flows write (`agentScore`); keys may be camelCase |

@@ -66,10 +66,10 @@ A node is a mapping with exactly ONE family key:
     transition: {resource: <expr>, to: closed | open, verdict?: <expr or word>, from?: <verdict>, resolution?: {<key>: <expr>}}
     grant: {field: <resource field expr>, to: participation}
     capability: <catalog name>, store?: <snake>, <capability args>: <expr>
-- assess:  {id, kind: human | metric | ai_grid | self, fields?: {...}, from?: <collect id>, value?: <expr>, grid?: <expr>, input?: [<artifact URL expr>, ...], snapshot?: history | latest,
+- assess:  {id, kind: human | metric | ai_grid | self, fields?: {...}, from?: <collect id>, value?: <expr>, grid?: <expr>, input?: [<artifact URL expr>, ...], snapshot?: history | latest, background?: bool,
             emit?: {to: lifecycle.<aggregate id>, scope: <expr of the resource>}, counters?: {<counter>: {add: "<expr>"}}, gating?: bool}
 - reward:  {id?, amount: "<expr>" | {reverse: <rule_key>} | {mapping: tiers, tiers, key, match: at_least | equals, input} | {mapping: rank, over, by, order: asc | desc, amounts},
-            to?: <expr>, pool?: params.pool, clamp?: pool, order?: commit_time, rule_key?: <snake>}
+            to?: <expr>, pool?: params.pool, clamp?: pool, order?: commit_time, rule_key?: <snake>, basis?: delta, meta?: {<key>: <expr>}}
 
 Types: string int number ratio points bool url file json date duration role capability grid_ref template_ref challenge_ref link,
        "enum(a, b)", "enum(params.x)", "ref(<resource>)", "list(<type>)", "{field: type, ...}" or a YAML mapping.
@@ -89,6 +89,8 @@ Conventions that validation enforces:
 - A node only reads nodes ABOVE it in its lane.
 - created_by names the creating act; an emitting assess needs an aggregate over the same resource.
 - Quote flow scalars that contain commas: {type: "enum(works, broken)"}.
+- An ai_grid evaluation in a user or admin lane runs with background: true (the gesture answers 202, the lane resumes after the grade); nothing interactive follows it.
+- basis: delta pays only what exceeds what that rule key already paid the recipient (re-evaluations pay the improvement, never take back).
 `.trim();
 
 function catalogText(catalog: CapabilityCatalog): string {

@@ -1,4 +1,5 @@
 import type { ActionAccess, ActionContext, ChallengeActionDeclaration } from "../../registry/platform.js";
+
 import { flowConfigOf } from "../../capabilities/flow-config.js";
 import { jsonError } from "./responses.js";
 import type { Value } from "../expr/evaluator.js";
@@ -8,6 +9,9 @@ import { Engine, newState, type CompiledTemplate } from "./engine.js";
 import type { CompiledParams } from "./params.js";
 import { scopeKeyOfFields } from "./scope.js";
 import { project, resourceValue, type Viewer } from "./values.js";
+
+/** Comme `contribution.repo.ts` : un run d'évaluation plus vieux se reprend. */
+const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
 
 /**
  * Les surfaces générées (compromis 10)
@@ -77,6 +81,35 @@ export function generatedActions(
         if (!claim || claim.user_id !== user.id || claim.challenge_id !== challenge.uuid) return jsonError(404, "Claim not found");
         if (!(await t.runtime.resources.release(claim.uuid, user.id))) return jsonError(409, "This claim is no longer active");
         return { released: true };
+      },
+    });
+  }
+
+  // ── evaluation : l'état d'une évaluation en arrière-plan ─────────────────
+  for (const lane of t.model.lanes) {
+    const background = lane.nodes.some((node) => node.family === "assess" && Boolean(node.body.background));
+    if (!background) continue;
+    actions.push({
+      path: `${lane.id}/evaluation`,
+      method: "GET",
+      access: laneAccess(lane),
+      async handle({ challenge, user }) {
+        const [state, entries] = await Promise.all([
+          t.runtime.evaluations.read(challenge.uuid, user.id, t.contribution.type),
+          t.runtime.ledger.entries(challenge.uuid),
+        ]);
+        const since = state?.since ?? null;
+        // Comme le challenge code : un run de plus de 30 minutes se reprend au prochain lancement.
+        const stale = state?.status === "running" && since !== null && t.runtime.now().getTime() - since.getTime() >= EVALUATION_STALE_AFTER_MS;
+        return {
+          status: state?.status ?? null,
+          running: state?.status === "running" && !stale,
+          started_at: since,
+          score: state?.evaluation ? Math.min(1, Math.max(0, state.evaluation.globalScore / 9)) : null,
+          evaluation: state?.evaluation ?? null,
+          artifact_url: state?.artifactUrl ?? null,
+          cp: entries.filter((entry) => entry.user_id === user.id && ruleKeys.has(entry.rule_key)).reduce((sum, entry) => sum + entry.points, 0),
+        };
       },
     });
   }
@@ -427,6 +460,7 @@ export function generatedPathConflicts(lanes: readonly LaneModel[], declared: re
     generated.add(`${lane.id}/release`);
     generated.add(`${lane.id}/claim`);
     generated.add(`${lane.id}/file`);
+    generated.add(`${lane.id}/evaluation`);
   }
   return declared.filter((path) => generated.has(path));
 }

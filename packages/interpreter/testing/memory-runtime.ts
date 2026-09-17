@@ -2,7 +2,7 @@ import type { Challenge, RewardEntry, RewardEntryDraft } from "../../database-se
 import { ClaimNotConsumableError, claimState, type ResourceClaim, type ResourceInstance } from "../../capabilities/resources.js";
 import { outOfPoolRuleKeys } from "../../capabilities/pool.js";
 import type { Value } from "../expr/evaluator.js";
-import type { EvaluateBinding, TemplateRuntime } from "../compile/runtime.js";
+import type { EvaluateBinding, EvaluateResult, EvaluationDetail, RuntimeEvaluations, TemplateRuntime } from "../compile/runtime.js";
 import { scopeKeyOf } from "../../capabilities/resources.js";
 import type { StoredBlob } from "../../capabilities/blobs.js";
 
@@ -30,11 +30,23 @@ export interface MemoryRuntime extends TemplateRuntime {
   clock: Date;
   /** Les tirages successifs de `random()`, puis 0.99. */
   dice: number[];
-  evaluations: EvaluateBinding[];
+  evaluations: RuntimeEvaluationsLog;
+}
+
+/**
+ * Les évaluations demandées, et l'état d'évaluation des contributions : ce
+ * que le port `evaluations` garantit — une à la fois, reprise après 30 minutes.
+ * Les tâches planifiées attendent `settle()`.
+ */
+export interface RuntimeEvaluationsLog extends Array<EvaluateBinding>, RuntimeEvaluations {
+  status: Map<string, { status: "running" | "done" | "failed"; since: Date; evaluation?: EvaluationDetail; artifactUrl: string | null }>;
+  pending: Promise<void>[];
+  errors: unknown[];
+  settle(): Promise<void>;
 }
 
 export function memoryRuntime(options: {
-  evaluate?: (request: EvaluateBinding) => Promise<number>;
+  evaluate?: (request: EvaluateBinding) => Promise<EvaluateResult>;
   observe?: (capability: string, args: Record<string, Value>, runtime: MemoryRuntime) => Promise<Value>;
 } = {}): MemoryRuntime {
   let sequence = 0;
@@ -50,7 +62,41 @@ export function memoryRuntime(options: {
     challenges: [],
     clock: new Date("2026-09-16T12:00:00Z"),
     dice: [],
-    evaluations: [],
+    // Le journal des demandes porte aussi le port `evaluations` : l'état des contributions, les tâches planifiées.
+    evaluations: Object.assign([] as EvaluateBinding[], {
+      status: new Map(),
+      pending: [] as Promise<void>[],
+      errors: [] as unknown[],
+      async settle(this: RuntimeEvaluationsLog) {
+        while (this.pending.length) await this.pending.shift();
+      },
+      async claim(contributionId: string, artifactUrl: string | null) {
+        const log = runtime.evaluations;
+        const current = log.status.get(contributionId);
+        if (current?.status === "running" && runtime.clock.getTime() - current.since.getTime() < 30 * 60 * 1000) return false;
+        log.status.set(contributionId, { ...current, status: "running", since: runtime.clock, artifactUrl });
+        return true;
+      },
+      async finish(contributionId: string, outcome: { status: "done" | "failed"; evaluation?: EvaluationDetail }) {
+        const log = runtime.evaluations;
+        const current = log.status.get(contributionId);
+        log.status.set(contributionId, {
+          since: current?.since ?? runtime.clock,
+          artifactUrl: current?.artifactUrl ?? null,
+          ...(current?.evaluation ? { evaluation: current.evaluation } : {}),
+          status: outcome.status,
+          ...(outcome.evaluation ? { evaluation: outcome.evaluation } : {}),
+        });
+      },
+      schedule(task: () => Promise<void>) {
+        const log = runtime.evaluations;
+        log.pending.push(task().catch((error) => void log.errors.push(error)));
+      },
+      async read(challengeId: string, userId: string, contributionType: string) {
+        const current = runtime.evaluations.status.get(`contribution-${challengeId}-${userId}-${contributionType}`);
+        return current ? { status: current.status, since: current.since, evaluation: current.evaluation ?? null, artifactUrl: current.artifactUrl } : null;
+      },
+    }) as RuntimeEvaluationsLog,
 
     resources: {
       async createMany(challengeId, type, items, opts) {

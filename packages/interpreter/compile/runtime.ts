@@ -53,6 +53,42 @@ export interface EvaluateBinding {
   inputs: Value[];
   /** Ce qui est noté d'un dépôt : son historique récent (défaut GitHub), ou son dernier état (défaut Kaggle). */
   snapshot?: "history" | "latest";
+  /** La contribution évaluée : le run s'y rattache. */
+  contributionId?: string;
+  /** Qui rejoue le run s'il échoue : le handler du flow et sa charge (une évaluation en arrière-plan). */
+  origin?: { handler: string; payload: Record<string, unknown> };
+}
+
+/** Ce que l'évaluation stocke sur la contribution : le détail des critères et le score brut sur 0–9. */
+export interface EvaluationDetail {
+  scores: unknown;
+  globalScore: number;
+}
+
+export interface EvaluationState {
+  status: "running" | "done" | "failed" | "pending" | "skipped_reuse" | null;
+  /** Le début du dernier run : un `running` plus vieux que 30 minutes se reprend. */
+  since: Date;
+  evaluation: EvaluationDetail | null;
+  artifactUrl: string | null;
+}
+
+/** Le score sur 0..1, avec son détail quand la liaison le connaît. */
+export type EvaluateResult = number | { score: number; evaluation: EvaluationDetail };
+
+/**
+ * L'évaluation d'une participation, hors de la requête (le challenge code) :
+ * une à la fois par contribution, reprise après 30 minutes, son statut et son
+ * détail écrits sur la contribution.
+ */
+export interface RuntimeEvaluations {
+  /** Prend l'évaluation : `false` quand une autre tourne depuis moins de 30 minutes. */
+  claim(contributionId: string, artifactUrl: string | null): Promise<boolean>;
+  finish(contributionId: string, outcome: { status: "done" | "failed"; evaluation?: EvaluationDetail }): Promise<void>;
+  /** L'état d'évaluation d'une participation, sans rien créer : `null` avant la première évaluation. */
+  read(challengeId: string, userId: string, contributionType: string): Promise<EvaluationState | null>;
+  /** Lance une tâche après la réponse ; ses erreurs sont journalisées, jamais renvoyées au geste. */
+  schedule(task: () => Promise<void>): void;
 }
 
 export type RuntimeBlobs = Pick<Blobs, "store" | "get">;
@@ -85,7 +121,8 @@ export interface TemplateRuntime {
   contributions: RuntimeContributions;
   ledger: RuntimeLedger;
   /** Le score d'une évaluation par grille, sur 0..1. */
-  evaluate(request: EvaluateBinding): Promise<number>;
+  evaluate(request: EvaluateBinding): Promise<EvaluateResult>;
+  evaluations: RuntimeEvaluations;
   /** Un observateur du catalogue (`http_proxy`, un connecteur…). */
   observe(capability: string, args: Record<string, Value>, context: ObserveContext): Promise<Value>;
   /** Les challenges d'un flow, pour ses jobs. */
@@ -116,7 +153,7 @@ export interface ObserveContext {
 
 /** Le port branché sur les capacités et les repositories du core. */
 export function defaultRuntime(
-  bindings: Partial<Pick<TemplateRuntime, "evaluate" | "observe" | "random" | "now" | "challengesOf">> = {}
+  bindings: Partial<Pick<TemplateRuntime, "evaluate" | "evaluations" | "observe" | "random" | "now" | "challengesOf">> = {}
 ): TemplateRuntime {
   const repositories = () => import("../../database-service/repositories/index.js");
   let resourcesCapability: Resources | null = null;
@@ -206,6 +243,33 @@ export function defaultRuntime(
     evaluate:
       bindings.evaluate ??
       (async (request) => (await import("./bindings.js")).evaluateGrid(request)),
+    evaluations: bindings.evaluations ?? {
+      async claim(contributionId, artifactUrl) {
+        const { ContributionRepository } = await repositories();
+        return (await new ContributionRepository().claimEvaluation(contributionId, { artifact_url: artifactUrl })) !== null;
+      },
+      async finish(contributionId, { status, evaluation }) {
+        const { ContributionRepository } = await repositories();
+        await new ContributionRepository().update(contributionId, { evaluation_status: status, ...(evaluation ? { evaluation: evaluation as never } : {}) });
+      },
+      schedule(task) {
+        void task().catch((error) => console.error("[interpreter] background evaluation failed:", error));
+      },
+      async read(challengeId, userId, contributionType) {
+        const { ContributionRepository } = await repositories();
+        const contribution = (await new ContributionRepository().findByChallenge(challengeId)).find(
+          (candidate) => candidate.user_id === userId && candidate.type === contributionType
+        );
+        if (!contribution) return null;
+        const evaluation = contribution.evaluation as EvaluationDetail | null | undefined;
+        return {
+          status: (contribution.evaluation_status as EvaluationState["status"]) ?? null,
+          since: contribution.submitted_at,
+          evaluation: evaluation && typeof evaluation === "object" && "globalScore" in evaluation ? evaluation : null,
+          artifactUrl: contribution.artifact_url ?? null,
+        };
+      },
+    },
     observe:
       bindings.observe ??
       (async (capability, args, context) => {

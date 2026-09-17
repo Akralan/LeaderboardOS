@@ -60,6 +60,8 @@ export interface SurfaceSegment {
   /** Le segment reprend un claim posé plus tôt : \`claim_id\` est requis. */
   needsClaim: boolean;
   final: boolean;
+  /** Le segment lance une évaluation en arrière-plan : il répond 202, `<lane>/evaluation` en suit l'état. */
+  evaluates?: boolean;
 }
 
 export interface SurfaceLane {
@@ -175,6 +177,7 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
         opensClaim: index === claimIndex,
         needsClaim: claimIndex >= 0 && index > claimIndex,
         final: segment.final,
+        ...(segment.nodes.some((node) => node.family === "assess" && node.body.background) ? { evaluates: true } : {}),
         fields: segment.gestures.flatMap((gesture) =>
           Object.entries(gestureFields(gesture)).map(([name, decl]): SurfaceField => {
             const type = types.nodeFields.get(gesture)?.[name];

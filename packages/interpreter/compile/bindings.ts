@@ -1,5 +1,5 @@
 import type { Value } from "../expr/evaluator.js";
-import { ObserverRefusal, type EvaluateBinding } from "./runtime.js";
+import { ObserverRefusal, type EvaluateBinding, type EvaluateResult } from "./runtime.js";
 
 /**
  * Les liaisons des capacités du catalogue
@@ -66,7 +66,7 @@ export function bundleOf(artifact: ArtifactRef, snapshot: "history" | "latest"):
  * run est tracé au nom du flow du challenge. Une évaluation qui échoue refuse le
  * geste (502), sans effet.
  */
-export async function evaluateGrid(request: EvaluateBinding): Promise<number> {
+export async function evaluateGrid(request: EvaluateBinding): Promise<EvaluateResult> {
   const artifact = firstArtifact(request.inputs);
   if (!artifact) throw new ObserverRefusal(422, `The ${request.grid} evaluation needs a GitHub or Kaggle URL`);
   const context = request.inputs.filter((value) => value !== artifact.url && value !== null && value !== undefined);
@@ -81,12 +81,13 @@ export async function evaluateGrid(request: EvaluateBinding): Promise<number> {
       hasPriorEvaluation: false,
       origin: {
         owner: request.challenge.type,
-        handler: "template.assess",
-        payload: { challengeId: request.challenge.uuid, userId: request.userId, grid: request.grid, url: artifact.url },
+        handler: request.origin?.handler ?? "template.assess",
+        payload: request.origin?.payload ?? { challengeId: request.challenge.uuid, userId: request.userId, grid: request.grid, url: artifact.url },
         challengeId: request.challenge.uuid,
+        ...(request.contributionId ? { contributionId: request.contributionId } : {}),
       },
     });
-    return scoreOf(evaluation.globalScore);
+    return { score: scoreOf(evaluation.globalScore), evaluation: { scores: evaluation.scores, globalScore: evaluation.globalScore } };
   } catch (error) {
     throw new ObserverRefusal(502, `The evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
   }
