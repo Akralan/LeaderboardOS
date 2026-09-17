@@ -865,6 +865,22 @@ export class PlatformRegistry {
     const versions = state.templateVersions.get(key) ?? new Map<string, FlowDefinition>();
     versions.set(version, flow);
     state.templateVersions.set(key, versions);
+    // Les relances d'évaluation d'un template en base : un seul propriétaire par clé, qui route vers la version du run.
+    if (flow.evaluationHandlers?.length && !state.evaluationHandlers.has(key)) {
+      const handlers = new Map<string, EvaluationHandlerDeclaration>();
+      for (const declaration of flow.evaluationHandlers) {
+        handlers.set(declaration.key, {
+          key: declaration.key,
+          async retry(payload) {
+            const all = state.templateVersions.get(key);
+            const target = (typeof payload.version === "string" ? all?.get(payload.version) : undefined) ?? flow;
+            const handler = target.evaluationHandlers?.find((candidate) => candidate.key === declaration.key);
+            return handler ? handler.retry(payload) : { ok: false, reason: "no_handler" };
+          },
+        });
+      }
+      state.evaluationHandlers.set(key, { owner, handlers });
+    }
   }
 
   static extension(key: string): ExtensionDefinition | undefined {

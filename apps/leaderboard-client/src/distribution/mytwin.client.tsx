@@ -2,15 +2,15 @@ import type { FlowUiSlots } from '@/lib/flowSlots';
 import { codeFlowDescriptor } from '../../../../content/flows/code/descriptor';
 import { mlFlowDescriptor } from '../../../../content/flows/ml/descriptor';
 import { endpointValidationFlowDescriptor } from '../../../../content/flows/endpoint-validation/descriptor';
-import { journeyValidationFlowDescriptor } from '../../../../content/flows/journey-validation/descriptor';
+import { journeyValidationTemplate } from '../../../../content/templates/journey-validation/descriptor';
 import { dataAnnotationFlowDescriptor } from '../../../../content/templates/data-annotation/descriptor';
 import { endpointCheckTemplate } from '../../../../content/templates/endpoint-check/descriptor';
 import { flowCatalog } from './mytwin.flows';
 import { codeSlots } from './client/code';
 import { mlSlots } from './client/ml';
 import { endpointValidationSlots } from './client/endpoint-validation';
-import { journeyValidationSlots } from './client/journey-validation';
 import { dataAnnotationSlots } from './client/data-annotation';
+import { journeyValidationSlots } from './client/journey-validation';
 import { describedSlots, generatedSlots } from './client/generated';
 
 /**
@@ -25,10 +25,11 @@ const SLOTS: Readonly<Record<string, FlowUiSlots>> = {
   [codeFlowDescriptor.key]: codeSlots,
   [mlFlowDescriptor.key]: mlSlots,
   [endpointValidationFlowDescriptor.key]: endpointValidationSlots,
-  [journeyValidationFlowDescriptor.key]: journeyValidationSlots,
   [dataAnnotationFlowDescriptor.key]: dataAnnotationSlots,
   // Aucun écran écrit à la main : l'UI que l'interpréteur génère du template (note §5).
   [endpointCheckTemplate.descriptor.key]: generatedSlots(endpointCheckTemplate),
+  // Le template journey-validation garde ses écrans de scénario, branchés sur ses routes.
+  [journeyValidationTemplate.descriptor.key]: journeyValidationSlots,
 };
 
 /**

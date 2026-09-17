@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Challenge } from "../../database-service/domain/entities.js";
 import { evaluate, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
-import type { Type } from "../expr/types.js";
+import { OPTIONAL_TYPES, type Type } from "../expr/types.js";
 import type { DocumentShell, RewardBody } from "../format/schema.js";
 import type { NodeModel, TemplateModel } from "../validate/format.js";
 
@@ -19,6 +19,11 @@ import type { NodeModel, TemplateModel } from "../validate/format.js";
 
 /** Le schéma zod d'une valeur d'un type déclaré. Une référence se transmet par son id. */
 export function zodOf(type: Type): z.ZodType {
+  const schema = baseZodOf(type);
+  return OPTIONAL_TYPES.has(type) ? schema.optional() : schema;
+}
+
+function baseZodOf(type: Type): z.ZodType {
   switch (type.kind) {
     case "int":
       return z.number().int();

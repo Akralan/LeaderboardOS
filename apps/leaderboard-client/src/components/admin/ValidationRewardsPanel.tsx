@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { flowActionUrl } from '@/lib/challengeActions';
 import { Coins, Loader2 } from 'lucide-react';
 
-interface RewardsState {
+export interface RewardsState {
   pool: number;
   distributed: number;
   remaining: number;
@@ -18,7 +18,12 @@ function fgAt(opacity: number) {
 }
 
 /** Admin-side pool summary for a validation challenge — pool/distributed/remaining and who earned what. */
-export function ValidationRewardsPanel({ challengeId, open }: { challengeId: string; open: boolean }) {
+export function ValidationRewardsPanel({ challengeId, open, load }: {
+  challengeId: string;
+  open: boolean;
+  /** Où lire l'état du pool ; par défaut l'action `rewards` du kit de validation. */
+  load?: () => Promise<RewardsState | null>;
+}) {
   const [data, setData] = useState<RewardsState | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -28,9 +33,9 @@ export function ValidationRewardsPanel({ challengeId, open }: { challengeId: str
     wasOpen.current = open;
     if (!justOpened) return;
     setLoading(true);
-    fetch(flowActionUrl(challengeId, 'rewards'))
-      .then(res => (res.ok ? res.json() : null))
+    (load ? load() : fetch(flowActionUrl(challengeId, 'rewards')).then(res => (res.ok ? res.json() : null)))
       .then(setData)
+      .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, [open, challengeId]);
 

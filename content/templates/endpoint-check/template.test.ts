@@ -29,6 +29,9 @@ describe("the endpoint-check template, as declared", () => {
       ["admin", "admin", null, false],
       ["author", "user", "reviewer_qualification", false],
       ["reviewer", "user", "reviewer_qualification", true],
+      ["withdraw_target", "admin", null, false],
+      ["withdraw_case", "admin", null, false],
+      ["withdraw_own_case", "user", "reviewer_qualification", false],
     ]);
     const reviewer = lanes[2];
     expect(reviewer.segments.map((segment) => [segment.path, segment.opensClaim, segment.needsClaim, segment.final])).toEqual([

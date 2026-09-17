@@ -50,6 +50,8 @@ export interface SurfaceField {
   resource?: string;
   /** Conditionnel (\`when\`) : le serveur l'ignore quand sa condition est fausse. */
   conditional?: boolean;
+  /** Optionnel : absent, le serveur le lit à `null`. */
+  optional?: boolean;
 }
 
 export interface SurfaceSegment {
@@ -60,6 +62,8 @@ export interface SurfaceSegment {
   /** Le segment reprend un claim posé plus tôt : \`claim_id\` est requis. */
   needsClaim: boolean;
   final: boolean;
+  /** Le segment lance une évaluation en arrière-plan : il répond 202, `<lane>/evaluation` en suit l'état. */
+  evaluates?: boolean;
 }
 
 export interface SurfaceLane {
@@ -100,6 +104,10 @@ export interface TemplateSurface {
   lanes: SurfaceLane[];
   resources: SurfaceResource[];
   params: SurfaceParam[];
+  /** Un board personnel par participant : l'UI générée affiche le kanban du porteur. */
+  board?: boolean;
+  /** Où le participant livre : le paramètre qui porte le mode (`provided_repo` | `own_repo`), ou le mode écrit. */
+  workspace?: { param: string | null; mode: string | null };
 }
 
 export function descriptorOf(shell: DocumentShell): FlowDescriptor {
@@ -175,6 +183,7 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
         opensClaim: index === claimIndex,
         needsClaim: claimIndex >= 0 && index > claimIndex,
         final: segment.final,
+        ...(segment.nodes.some((node) => node.family === "assess" && node.body.background) ? { evaluates: true } : {}),
         fields: segment.gestures.flatMap((gesture) =>
           Object.entries(gestureFields(gesture)).map(([name, decl]): SurfaceField => {
             const type = types.nodeFields.get(gesture)?.[name];
@@ -185,6 +194,7 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
               ...(type?.kind === "enum" && type.values ? { values: type.values } : {}),
               ...(type?.kind === "resource" ? { resource: type.name } : {}),
               ...(decl.when !== undefined ? { conditional: true } : {}),
+              ...(decl.optional ? { optional: true } : {}),
             };
           })
         ),
@@ -214,5 +224,13 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
       checks: Object.keys(decl.checks ?? {}),
     };
   });
-  return { lanes, resources, params };
+  const modeSource = model.shell.workspace?.mode;
+  const modeParam = typeof modeSource === "string" ? /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec(modeSource)?.[1] ?? null : null;
+  return {
+    lanes,
+    resources,
+    params,
+    ...(model.shell.presentation?.board ? { board: true } : {}),
+    ...(model.shell.workspace ? { workspace: { param: modeParam, mode: modeParam ? null : typeof modeSource === "string" ? modeSource.replace(/^"|"$/g, "") : null } } : {}),
+  };
 }

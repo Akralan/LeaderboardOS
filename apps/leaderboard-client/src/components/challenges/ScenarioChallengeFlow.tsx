@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, Coins, ListOrdered, MonitorSmartphone } from 'lucide-react';
-import { flowActionUrl } from '@/lib/challengeActions';
+import { JourneyApiError, listApps, listSteps, mine, poolState, walkthroughCounts } from '@/lib/journeyTemplateApi';
 import { ScenarioWalkthroughScreen } from './ScenarioWalkthroughScreen';
 
 interface TargetItem {
@@ -53,12 +53,20 @@ function stateOf(target: TargetItem, currentUserId: string | null): TargetState 
  *
  * Le pool est affiché avant le travail, pas après : un pool épuisé se voit
  * avant de parcourir sept étapes, pas au moment de conclure.
+ *
+ * Lu par les routes du template (`lib/journeyTemplateApi.ts`) ; le forfait et
+ * la qualification des avis experts viennent de la configuration du challenge.
  */
-export function ScenarioChallengeFlow({ challengeId }: { challengeId: string }) {
+export function ScenarioChallengeFlow({ challengeId, cpPerValidation, expertQualification }: {
+  challengeId: string;
+  cpPerValidation: number;
+  expertQualification: string | null;
+}) {
   const [targets, setTargets] = useState<TargetItem[]>([]);
   const [pool, setPool] = useState<PoolState | null>(null);
   const [steps, setSteps] = useState<ScenarioStep[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [qualifications, setQualifications] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<TargetItem | null>(null);
   const [error, setError] = useState('');
@@ -66,34 +74,34 @@ export function ScenarioChallengeFlow({ challengeId }: { challengeId: string }) 
   const fetchData = useCallback(async () => {
     setError('');
     try {
-      const [targetsRes, stepsRes] = await Promise.all([
-        fetch(flowActionUrl(challengeId, 'targets')),
-        fetch(flowActionUrl(challengeId, 'scenario-steps')),
+      const [apps, scenario, counts, own, rewards, me] = await Promise.all([
+        listApps(challengeId),
+        listSteps(challengeId).catch(() => []),
+        walkthroughCounts(challengeId).catch(() => ({} as Record<string, number>)),
+        mine(challengeId).catch(() => ({ walkthroughs: [], results: [] })),
+        poolState(challengeId).catch(() => null),
+        fetch('/api/contributors/me').then(res => (res.ok ? res.json() : null)).catch(() => null),
       ]);
+      setTargets(apps.map(app => {
+        const run = own.walkthroughs.find(walkthrough => walkthrough.app?.id === app.id);
+        return {
+          ...app,
+          walkthroughCount: counts[app.id] ?? 0,
+          myWalkthrough: run ? { runId: run.id, completedAt: run.open ? null : run.created_at } : null,
+        };
+      }));
+      setSteps(scenario);
+      setPool(rewards ? { pool: rewards.pool, distributed: rewards.distributed, remaining: rewards.remaining, cpPerValidation } : null);
+      setCurrentUserId(me?.user?.id ?? null);
+      setQualifications(Array.isArray(me?.qualifications) ? me.qualifications : []);
+    } catch (e) {
       // 401 is not "nothing exposed" — say so explicitly rather than falling
       // through to the empty state, which would read as "nothing to validate".
-      if (targetsRes.status === 401) {
-        setError('Sign in to see the applications waiting for validation.');
-      } else if (!targetsRes.ok) {
-        setError('Could not load the applications');
-      } else {
-        const d = await targetsRes.json();
-        setTargets(d.targets ?? []);
-        setPool(d.pool ?? null);
-        setCurrentUserId(d.currentUserId ?? null);
-      }
-      if (stepsRes.ok) {
-        const d = await stepsRes.json();
-        setSteps(d.steps ?? []);
-      }
-    } catch {
-      // fetch() rejects (network failure, CORS, abort) rather than resolving
-      // ok:false — without this, loading would never clear.
-      setError('Could not load the applications');
+      setError(e instanceof JourneyApiError && e.status === 401 ? 'Sign in to see the applications waiting for validation.' : 'Could not load the applications');
     } finally {
       setLoading(false);
     }
-  }, [challengeId]);
+  }, [challengeId, cpPerValidation]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -105,7 +113,9 @@ export function ScenarioChallengeFlow({ challengeId }: { challengeId: string }) 
     return (
       <ScenarioWalkthroughScreen
         challengeId={challengeId}
-        contributionId={active.contributionId}
+        appId={active.id}
+        cpPerValidation={cpPerValidation}
+        expertAllowed={!!expertQualification && qualifications.includes(expertQualification)}
         submitterName={active.submitterName}
         endpointUrl={active.endpointUrl}
         onClose={() => { setActive(null); fetchData(); }}

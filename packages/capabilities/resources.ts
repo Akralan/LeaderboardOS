@@ -47,6 +47,10 @@ export type ResourceStore = Pick<
   | "liveScopeClaims"
   | "grantField"
   | "grantsFor"
+  | "upsert"
+  | "updatePayload"
+  | "deleteResource"
+  | "claimCount"
 > & {
   inDrawTransaction<T>(run: (tx: DrawTransaction) => Promise<T>): Promise<T>;
 };
@@ -275,6 +279,32 @@ export function resources(store?: ResourceStore) {
 
     async resource(resourceId: string) {
       return (await storeOf()).findResource(resourceId);
+    },
+
+    /** Une instance par combinaison de clés (`author` : le créateur) : trouvée, réécrite avec `overwrite`, ou créée. */
+    async upsert(
+      challengeId: string,
+      type: string,
+      item: { payload: Record<string, unknown>; class?: string | null },
+      options: { createdBy: string | null; by: readonly string[]; overwrite: boolean }
+    ): Promise<{ id: string; created: boolean }> {
+      const { uuid, created } = await (await storeOf()).upsert(challengeId, type, item, options);
+      return { id: uuid, created };
+    },
+
+    /** Réécrit des champs de la charge ; `false` si l'instance n'existe plus. */
+    async update(resourceId: string, patch: Record<string, unknown>): Promise<boolean> {
+      return (await (await storeOf()).updatePayload(resourceId, patch)) !== null;
+    },
+
+    /** Les réclamations actives ou livrées d'une instance : ce qui la rend intouchable. */
+    async claimCount(resourceId: string): Promise<number> {
+      return (await storeOf()).claimCount(resourceId);
+    },
+
+    /** Supprime une instance avec ses réclamations ; `false` si elle n'existait plus. */
+    async remove(resourceId: string): Promise<boolean> {
+      return (await storeOf()).deleteResource(resourceId);
     },
 
     async claim(claimId: string) {

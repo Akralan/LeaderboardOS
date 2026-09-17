@@ -15,6 +15,7 @@ type NavItem = { href: string; label: string; exact?: boolean };
 const NAV_ITEMS: readonly NavItem[] = [
   { href: '/admin',             label: 'Overview',      exact: true },
   { href: '/admin/challenges',  label: 'Challenges' },
+  { href: '/admin/templates',   label: 'Templates' },
   { href: '/admin/projects',    label: 'Projects' },
   { href: '/admin/repos',       label: 'Repos' },
   { href: '/admin/users',       label: 'Users' },
@@ -30,6 +31,8 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
   const navItems: NavItem[] = [...NAV_ITEMS, ...slots.flatMap(slot => slot.adminNav ?? [])];
 
   const isChallengeDetail = /^\/admin\/challenges\/[^/]+$/.test(pathname);
+  // Le canevas de l'éditeur de templates prend toute la largeur de la fenêtre, sous la navigation.
+  const isTemplateEditor = /^\/admin\/templates\/[^/]+$/.test(pathname);
 
   const isActive = (item: NavItem) =>
     item.exact ? pathname === item.href : pathname.startsWith(item.href);
@@ -89,7 +92,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
           )}
 
           {/* ── Content ── */}
-          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
+          <main className={isTemplateEditor ? '' : 'mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8'}>
             {children}
           </main>
 

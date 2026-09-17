@@ -1,0 +1,256 @@
+# Journey validation as a template (template parity P4).
+#
+# Flipped with continuity: the hand-written flow (content/flows/journey-validation)
+# stays in the tree as the equivalence reference, and the challenges it served
+# switch to this template once scripts/db-migrate-journey-resources.ts has
+# copied their data into resources (same uuids, old tables kept):
+#   validation_targets        -> app          (payload: contribution, app_url)
+#   validation_scenario_steps -> step         (position, title, instructions)
+#   validation_scenario_runs  -> walkthrough  (closed "completed" once finished)
+#   validation_step_feedbacks -> step_result  (result, comment, medical_comment)
+#
+# The rules of the hand-written flow, kept:
+# - managers expose deployed apps of the source challenge and write one
+#   ordered scenario, frozen as soon as any walkthrough exists (409);
+# - any signed-in account whose platform role is eligible walks through an
+#   app, never their own nor their group's (403); opening twice returns the
+#   same walkthrough, completed or not;
+# - a step result is overwritten when revisited; an expert comment needs the
+#   configured qualification (403), a blank one is always accepted;
+# - completing needs an overall feedback and a result on every step, makes
+#   the walkthrough immutable and pays cp_per_validation to the validator,
+#   clamped to the pool: nothing is resolved, nothing is paid to the author.
+#
+# options, mine, resources, progress, overview and export are generated.
+
+format: leaderboardos/1
+
+template:
+  id: journey-validation
+  version: 1.0.0
+  name: Validation
+  summary: >
+    Validators walk through the same scenario, step by step, in every deployed
+    app of a source challenge, and close on an overall feedback.
+
+params:
+  pool:                         {type: points, mutable: false}
+  cp_per_validation:            {type: points, check: "value > 0", mutable: false}
+  eligible_roles:               {type: "list(string)", check: "size(value) >= 1", default: [contributor, admin], mutable: false}
+  expert_comment_qualification: {type: role, mutable: false}
+  source_challenge:             {type: challenge_ref, mutable: false}
+
+requires: {core: 1}
+
+presentation:
+  icon: shield
+  long_label: Journey validation
+  brief_required: false
+  public: false
+  contribution:
+    type: validation
+    title: Validations performed
+    description: '"Validations on " + challenge.title'
+
+resources:
+  app:
+    fields:
+      contribution: {type: link, from: params.source_challenge, deliverable: deployed_app, unique: true}
+      app_url:      {type: url}
+    created_by: [apps.expose_app]
+
+  step:
+    fields:
+      position:     {type: int}
+      title:        {type: string, check: "size(value) > 0 && size(value) <= 255"}
+      instructions: {type: string, optional: true}
+    ordered_by: position
+    created_by: [add_step.create_step]
+
+  walkthrough:
+    fields:
+      app: {type: "ref(app)"}
+    created_by: [open.open_run]
+    closure: {by: transition, verdict: [completed]}
+
+  step_result:
+    fields:
+      walkthrough:     {type: "ref(walkthrough)"}
+      step:            {type: "ref(step)"}
+      result:          {type: "enum(passed, failed, blocked)"}
+      comment:         {type: string, optional: true, visibility: [author, admin]}
+      medical_comment: {type: string, optional: true, visibility: [author, admin]}
+    created_by: [record.save_result]
+
+lanes:
+  # ── Managers: the apps under test ──────────────────────────────────────
+  - id: apps
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: expose
+          fields:
+            contribution: {type: link, from: params.source_challenge, deliverable: deployed_app}
+            app_url:      {type: url, public: true}
+      - act: {id: expose_app, create: app, from: expose}
+
+  - id: withdraw
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: withdraw_app
+          fields:
+            app: {type: "ref(app)"}
+      - gate:
+          id: untouched
+          refuse: 409
+          message: Cannot remove a target that already has walkthroughs
+          all: ["!walkthrough.exists(w, w.app.id == withdraw_app.app.id)"]
+      - act: {id: remove_app, delete: withdraw_app.app}
+
+  # ── Managers: the scenario, frozen by the first walkthrough ───────────
+  - id: add_step
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: new_step
+          fields:
+            title:        {type: string, trim: true, check: "size(value) > 0 && size(value) <= 255"}
+            instructions: {type: string, trim: true, optional: true}
+      - gate:
+          id: not_frozen
+          refuse: 409
+          message: A walkthrough has already started on this challenge - the scenario is frozen
+          all: ["size(walkthrough) == 0"]
+      - act: {id: create_step, create: step, from: new_step}
+
+  - id: edit_step
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: step_edit
+          fields:
+            step:         {type: "ref(step)"}
+            title:        {type: string, trim: true, optional: true, check: "size(value) > 0 && size(value) <= 255"}
+            instructions: {type: string, trim: true, optional: true}
+            position:     {type: int, optional: true, check: "value >= 0"}
+      - gate:
+          id: not_frozen
+          refuse: 409
+          message: A walkthrough has already started on this challenge - the scenario is frozen
+          all: ["size(walkthrough) == 0"]
+      - act: {id: update_step, update: {resource: step_edit.step, from: step_edit}}
+
+  - id: remove_step
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: step_removal
+          fields:
+            step: {type: "ref(step)"}
+      - gate:
+          id: not_frozen
+          refuse: 409
+          message: A walkthrough has already started on this challenge - the scenario is frozen
+          all: ["size(walkthrough) == 0"]
+      - act: {id: delete_step, delete: step_removal.step}
+
+  # ── Validators ─────────────────────────────────────────────────────────
+  - id: open
+    entry:
+      trigger: user
+      access: {mode: signed_in}
+    nodes:
+      - collect:
+          id: start
+          fields:
+            app: {type: "ref(app)"}
+      - gate:
+          id: eligible_role
+          refuse: 403
+          message: Your role cannot walk through this scenario
+          all: ["params.eligible_roles.exists(r, r == participation.role)"]
+      - gate:
+          id: has_steps
+          refuse: 400
+          message: This challenge has no scenario step yet
+          all: ["size(step) > 0"]
+      - gate:
+          id: not_own_app
+          refuse: 403
+          message: You cannot walk through your own application
+          all: ["start.app.contribution.author != participation.user"]
+      - gate:
+          id: not_own_group
+          refuse: 403
+          message: You cannot walk through your own group's application
+          all: ["!start.app.contribution.members.exists(m, m == participation.user)"]
+      - act: {id: open_run, create: walkthrough, from: start, upsert: {by: [author, app]}}
+
+  - id: record
+    entry:
+      trigger: user
+      access: {mode: signed_in}
+    nodes:
+      - collect:
+          id: feedback
+          fields:
+            walkthrough:     {type: "ref(walkthrough)", where: "walkthrough.author == participation.user && walkthrough.open"}
+            step:            {type: "ref(step)"}
+            result:          {type: "enum(passed, failed, blocked)"}
+            comment:         {type: string, trim: true, optional: true}
+            medical_comment: {type: string, trim: true, optional: true}
+      - gate:
+          id: expert_only
+          refuse: 403
+          message: Only qualified experts can leave an expert opinion
+          all: ["feedback.medical_comment == null || participation.qualified.expert_comment_qualification"]
+      - act: {id: save_result, create: step_result, from: feedback, upsert: {by: [walkthrough, step], overwrite: true}}
+
+  - id: complete
+    entry:
+      trigger: user
+      access: {mode: signed_in}
+    nodes:
+      - collect:
+          id: finish
+          fields:
+            walkthrough:     {type: "ref(walkthrough)", where: "walkthrough.author == participation.user && walkthrough.open"}
+            global_feedback: {type: string, trim: true, check: "size(value) > 0"}
+      - gate:
+          id: eligible_role
+          refuse: 403
+          message: Your role cannot walk through this scenario
+          all: ["params.eligible_roles.exists(r, r == participation.role)"]
+      - gate:
+          id: not_own_app
+          refuse: 403
+          message: You cannot walk through your own application
+          all: ["finish.walkthrough.app.contribution.author != participation.user"]
+      - gate:
+          id: not_own_group
+          refuse: 403
+          message: You cannot walk through your own group's application
+          all: ["!finish.walkthrough.app.contribution.members.exists(m, m == participation.user)"]
+      - gate:
+          id: every_step_answered
+          refuse: 400
+          message: Some steps still have no result
+          reason: incomplete
+          all: ["step.all(s, step_result.exists(r, r.walkthrough.id == finish.walkthrough.id && r.step.id == s.id))"]
+      - act:
+          id: complete_run
+          transition:
+            resource: finish.walkthrough
+            to: closed
+            verdict: completed
+            resolution: {global_feedback: finish.global_feedback}
+      - reward:
+          id: pay
+          amount:   params.cp_per_validation
+          pool:     params.pool
+          clamp:    pool
+          rule_key: validation
+          meta:
+            targetContributionId: finish.walkthrough.app.contribution.id
+            runId: finish.walkthrough.id

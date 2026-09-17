@@ -15,6 +15,8 @@ export type TypeNode =
   | { k: "enum_expr"; source: string }
   | { k: "ref"; resource: string }
   | { k: "list"; of: TypeNode }
+  /** Un champ d'enregistrement qui peut manquer : lu `null` (`blockThreshold`). */
+  | { k: "optional"; of: TypeNode }
   | { k: "record"; fields: Record<string, TypeNode> };
 
 export class TypeSyntaxError extends Error {}
@@ -49,6 +51,8 @@ function parseText(text: string): TypeNode {
         return { k: "ref", resource: body };
       case "list":
         return { k: "list", of: parseText(body) };
+      case "optional":
+        return { k: "optional", of: parseText(body) };
       default:
         throw new TypeSyntaxError(`unknown type constructor '${head}'`);
     }

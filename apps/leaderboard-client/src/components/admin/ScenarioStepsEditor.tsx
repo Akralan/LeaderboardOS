@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, ListOrdered, Loader2, Lock, Plus, Trash2 } from 'lucide-react';
-import { flowActionUrl } from '@/lib/challengeActions';
+import { addStep, editStep, managedScenario, removeStep } from '@/lib/journeyTemplateApi';
 
 interface StepItem {
   id: string;
@@ -20,9 +20,9 @@ function fgAt(opacity: number) {
  * ordonnée d'étapes que chaque validateur parcourra sur chaque application
  * exposée.
  *
- * Passe en lecture seule dès qu'une walkthrough existe — le serveur renvoie
- * `frozen`, donc l'éditeur l'affiche sans avoir à tenter une écriture pour
- * l'apprendre. Même geste que le bouton de suppression déjà désactivé sur un
+ * Passe en lecture seule dès qu'une walkthrough existe — lu avec le scénario
+ * (routes du template, `lib/journeyTemplateApi.ts`), donc l'éditeur l'affiche
+ * sans avoir à tenter une écriture pour l'apprendre. Même geste que le bouton de suppression déjà désactivé sur un
  * target qui porte des verdicts.
  */
 export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string; open: boolean }) {
@@ -46,16 +46,10 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'scenario-steps'));
-      if (res.ok) {
-        const d = await res.json();
-        setSteps(d.steps ?? []);
-        setFrozen(!!d.frozen);
-      } else {
-        const d = await res.json().catch(() => ({}));
-        setError(d.error || 'Failed to load the scenario');
-      }
-    } catch { setError('Network error'); }
+      const scenario = await managedScenario(challengeId);
+      setSteps(scenario.steps);
+      setFrozen(scenario.frozen);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load the scenario'); }
     finally { setLoading(false); }
   };
 
@@ -65,20 +59,11 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setAdding(true);
     setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'scenario-steps'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, instructions: draftInstructions.trim() || null }),
-      });
-      if (res.ok) {
-        setDraftTitle('');
-        setDraftInstructions('');
-        await fetchSteps();
-      } else {
-        const d = await res.json().catch(() => ({}));
-        setError(d.error || 'Failed to add the step');
-      }
-    } catch { setError('Network error'); }
+      await addStep(challengeId, title, draftInstructions.trim() || null);
+      setDraftTitle('');
+      setDraftInstructions('');
+      await fetchSteps();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to add the step'); }
     finally { setAdding(false); }
   };
 
@@ -86,14 +71,9 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setBusyId(id);
     setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, `scenario-steps/${id}`), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) await fetchSteps();
-      else { const d = await res.json().catch(() => ({})); setError(d.error || 'Failed to update the step'); }
-    } catch { setError('Network error'); }
+      await editStep(challengeId, id, body);
+      await fetchSteps();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to update the step'); }
     finally { setBusyId(null); }
   };
 
@@ -101,10 +81,9 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setBusyId(id);
     setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, `scenario-steps/${id}`), { method: 'DELETE' });
-      if (res.ok) await fetchSteps();
-      else { const d = await res.json().catch(() => ({})); setError(d.error || 'Failed to delete the step'); }
-    } catch { setError('Network error'); }
+      await removeStep(challengeId, id);
+      await fetchSteps();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to delete the step'); }
     finally { setBusyId(null); }
   };
 

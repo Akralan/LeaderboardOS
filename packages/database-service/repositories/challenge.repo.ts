@@ -46,6 +46,18 @@ export function closedAtPatch(
   return {};
 }
 
+/**
+ * Les champs d'un update, validés : seulement ceux que l'appelant a donnés.
+ * `.partial()` garde les défauts du schéma (zod 4) — sans ce filtre, un
+ * `update(id, { completion })` réécrivait `type: 'code'`, et tout update sans
+ * `completion` la remettait à 0.
+ */
+export function updatePatchOf(entity: Partial<Omit<Challenge, "uuid">>) {
+  const parsed = challengeSchema.omit({ uuid: true }).partial().parse(entity);
+  const given = new Set(Object.keys(entity));
+  return Object.fromEntries(Object.entries(parsed).filter(([key]) => given.has(key))) as typeof parsed;
+}
+
 export class ChallengeRepository {
   private readonly slugOwners: SlugOwners = {
     currentOwner: async (slug) => {
@@ -169,7 +181,7 @@ export class ChallengeRepository {
   }
 
   async update(uuid: string, entity: Partial<Omit<Challenge, "uuid">>): Promise<Challenge> {
-    const validated = challengeSchema.omit({ uuid: true }).partial().parse(entity);
+    const validated = updatePatchOf(entity);
     const dbData: any = {};
     if (validated.index !== undefined) dbData.index = validated.index;
     if (validated.title) dbData.title = validated.title;

@@ -1,0 +1,84 @@
+# The code flow as a template (template parity P3).
+#
+# Reconciled with the hand-written flow (content/flows/code), which stays in the
+# tree as the equivalence reference:
+# - a participant (or a group, through its holder) delivers on a workspace: a
+#   branch provisioned on the challenge repo (provided_repo) or their own public
+#   GitHub repository declared with PATCH workspace (own_repo);
+# - the evaluation waits for a board with at least one task, every task done;
+# - it runs in the background, one at a time, on the holder's `project`
+#   contribution, graded by the `code` grid on the branch's recent history;
+# - pay is `fixed` then `cap × score / 10`, both multiplied by the group bonus,
+#   paid as a delta over what each rule already paid, clamped to the pool;
+#   a group's delta is split between its members;
+# - the ledger keys are `code_fixed` and `code_quality`; a failed run replays
+#   under the `project` handler, legacy runs included.
+
+format: leaderboardos/1
+
+template:
+  id: code
+  version: 1.0.0
+  name: Code
+  summary: >
+    Each participant or group delivers a project on a personal branch or their
+    own repository, evaluated by the code grid once their board is done, and is
+    paid the improvement of each evaluation from the pool.
+
+params:
+  pool:           {type: points, mutable: false}
+  workspace_mode: {type: "enum(provided_repo, own_repo)", default: provided_repo, mutable: false}
+  # The rules keep the code flow's stored shape: {version: 1, delivery: {fixed, cap}}.
+  version:        {type: int, default: 1, check: "value == 1", mutable: true}
+  delivery:       {type: {fixed: points, cap: points}, mutable: true}
+
+requires: {core: 1}
+
+presentation:
+  icon: code
+  long_label: Code
+  join_caption: "Joining copies the template tasks onto your board and provisions your branch."
+  brief_required: true
+  public: true
+  board: true
+  evaluation_handler: project
+  contribution:
+    type: project
+    title: Project delivery
+    description: '"Global delivery for \"" + challenge.title + "\""'
+    deliverables: [deployed_app]
+
+workspace:
+  mode: params.workspace_mode
+
+lanes:
+  - id: project_evaluation
+    entry: {trigger: user, access: {mode: open, group: true}}
+    nodes:
+      - gate: {id: open, all: ['challenge.state == "open"'], refuse: 400, message: Cannot start evaluation, reason: challenge_closed}
+      - gate: {id: workspace_ready, all: [participation.workspace.ready], refuse: 400, message: Cannot start evaluation, reason: workspace_not_ready}
+      - gate: {id: has_tasks, all: ["board.total > 0"], refuse: 400, message: Cannot start evaluation, reason: no_tasks}
+      - gate: {id: board_done, all: ["board.done == board.total"], refuse: 400, message: Cannot start evaluation, reason: tasks_not_done}
+      - assess:
+          id: grade
+          kind: ai_grid
+          grid: '"code"'
+          input: [participation.workspace.url]
+          snapshot: history
+          background: true
+      - reward:
+          id: fixed
+          rule_key: code_fixed
+          amount: "params.delivery.fixed * participation.group.multiplier"
+          basis: delta
+          pool: params.pool
+          clamp: pool
+          meta: {agentScore: "grade.score * 10"}
+      - reward:
+          id: quality
+          rule_key: code_quality
+          amount: "params.delivery.cap * (grade.score * 10) * participation.group.multiplier / 10"
+          basis: delta
+          pool: params.pool
+          clamp: pool
+          meta: {agentScore: "grade.score * 10"}

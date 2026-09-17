@@ -182,12 +182,17 @@ export function templates(store?: Store) {
           const newest = published.at(-1);
           const usage = await repo.usage(template.key);
           const latestDescription = newest ? described(newest.yaml, template.key) : null;
+          const draft = rows.find((row) => row.status === "draft");
+          const edited = rows.map((row) => new Date(row.updated_at).getTime()).filter(Number.isFinite);
           return {
             key: template.key,
             name: template.name,
             origin: "database" as const,
             versions: published.map((row) => ({ version: row.version, published_at: row.published_at, challenges: usage[row.version] ?? 0 })),
-            draft: rows.some((row) => row.status === "draft"),
+            draft: !!draft,
+            /** La version que le brouillon porte dans son YAML, quand elle se lit. */
+            draft_version: draft ? (await headerOf(draft.yaml)).version ?? null : null,
+            edited_at: edited.length ? new Date(Math.max(...edited)) : template.created_at,
             latest: newest && latestDescription ? { version: newest.version, ...latestDescription } : null,
           };
         })

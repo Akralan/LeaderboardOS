@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, Loader2, Stethoscope } from 'lucide-react';
-import { flowActionUrl } from '@/lib/challengeActions';
+import { completeWalkthrough, JourneyApiError, openWalkthrough, saveStep as saveStepResult, walkthroughState } from '@/lib/journeyTemplateApi';
 import { RESULT_META, SCENARIO_RESULTS } from './scenarioResult';
 import {
   finishHint,
@@ -14,7 +14,11 @@ import {
 
 interface Props {
   challengeId: string;
-  contributionId: string;
+  /** L'application exposée (la ressource `app` du template). */
+  appId: string;
+  cpPerValidation: number;
+  /** L'appelant détient la qualification des avis experts. */
+  expertAllowed: boolean;
   submitterName: string;
   endpointUrl: string | null;
   onClose: () => void;
@@ -34,11 +38,11 @@ function fgAt(opacity: number) {
  * donnait gratuitement — savoir où on en est, et ce qu'il reste — revient par
  * la barre de progression.
  *
- * Chaque saisie émet son PUT, donc naviguer entre étapes ne perd rien, et
- * fermer l'onglet non plus.
+ * Chaque saisie émet son enregistrement, donc naviguer entre étapes ne perd
+ * rien, et fermer l'onglet non plus. Routes du template : `lib/journeyTemplateApi.ts`.
  */
 export function ScenarioWalkthroughScreen({
-  challengeId, contributionId, submitterName, endpointUrl, onClose,
+  challengeId, appId, cpPerValidation, expertAllowed, submitterName, endpointUrl, onClose,
 }: Props) {
   const [steps, setSteps] = useState<WalkthroughStepView[]>([]);
   // Le dernier snapshot qu'on sait confirmé par le serveur — pas un miroir de
@@ -50,8 +54,7 @@ export function ScenarioWalkthroughScreen({
   const [completedAt, setCompletedAt] = useState<string | null>(null);
   const [globalFeedback, setGlobalFeedback] = useState('');
   const [cpAwarded, setCpAwarded] = useState<number | null>(null);
-  const [cpPerValidation, setCpPerValidation] = useState(0);
-  const [expertComment, setExpertComment] = useState<{ allowed: boolean; label: string | null }>({ allowed: false, label: null });
+  const expertComment = { allowed: expertAllowed, label: null as string | null };
   const [current, setCurrent] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -68,53 +71,27 @@ export function ScenarioWalkthroughScreen({
     let cancelled = false;
     (async () => {
       try {
-        const [runRes, targetsRes] = await Promise.all([
-          fetch(flowActionUrl(challengeId, 'scenario-runs'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contribution_id: contributionId }),
-          }),
-          fetch(flowActionUrl(challengeId, 'targets')),
-        ]);
-        if (cancelled) return;
-
-        if (!runRes.ok) {
-          const d = await runRes.json().catch(() => ({}));
-          setError(d.error || 'Could not open this walkthrough');
-          return;
-        }
-        const run = await runRes.json();
+        // Ouvrir est idempotent : le brouillon laissé, ou la walkthrough terminée.
+        const openedRun = await openWalkthrough(challengeId, appId);
+        const run = await walkthroughState(challengeId, openedRun);
         if (cancelled) return;
         setRunId(run.runId);
-        setSteps(run.steps ?? []);
-        setConfirmedSteps(run.steps ?? []);
-        setCompletedAt(run.completedAt ?? null);
+        setSteps(run.steps);
+        setConfirmedSteps(run.steps);
+        setCompletedAt(run.completed ? new Date().toISOString() : null);
         setGlobalFeedback(run.globalFeedback ?? '');
-        setExpertComment(run.expertComment ?? { allowed: false, label: null });
         // Reprendre sur la première étape sans résultat, pas sur l'étape 1.
-        setCurrent(firstUnansweredIndex(run.steps ?? []));
-
-        // Le taux de CP est un à-côté facultatif : s'il échoue à se lire, la
-        // walkthrough a quand même bien ouvert. Son propre try/catch l'empêche
-        // de remonter dans le `error` partagé avec l'ouverture elle-même —
-        // sinon un JSON invalide ici afficherait "Could not open this
-        // walkthrough" alors que l'écran fonctionne très bien.
-        try {
-          if (targetsRes.ok) {
-            const d = await targetsRes.json();
-            if (!cancelled) setCpPerValidation(d.pool?.cpPerValidation ?? 0);
-          }
-        } catch { /* cpPerValidation reste à sa valeur par défaut */ }
-      } catch {
-        // fetch() rejette (panne réseau, CORS, abort) plutôt que de résoudre
-        // ok:false — sans ce filet l'écran resterait bloqué sur le squelette.
-        if (!cancelled) setError('Could not open this walkthrough');
+        setCurrent(firstUnansweredIndex(run.steps));
+      } catch (e) {
+        // Un refus du serveur (rôle, sa propre application) se lit tel quel ;
+        // une panne réseau ne doit pas laisser l'écran bloqué sur le squelette.
+        if (!cancelled) setError(e instanceof JourneyApiError ? e.message : 'Could not open this walkthrough');
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [challengeId, contributionId]);
+  }, [challengeId, appId]);
 
   const isReadOnly = !!completedAt;
   const step = steps[current];
@@ -139,21 +116,15 @@ export function ScenarioWalkthroughScreen({
     setSaving(true);
     setError('');
     try {
-      const res = await fetch(
-        flowActionUrl(challengeId, `scenario-runs/${runId}/steps/${step.stepId}`),
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            result: next.result,
-            comment: next.comment,
-            medical_comment: next.medicalComment,
-          }),
-        }
-      );
-      if (res.ok) {
-        const state = await res.json();
-        const serverSteps: WalkthroughStepView[] = state.steps ?? [];
+      let saved = true;
+      try {
+        await saveStepResult(challengeId, runId, next);
+      } catch (e) {
+        saved = false;
+        setError(e instanceof JourneyApiError ? e.message : 'Could not save this step');
+      }
+      if (saved) {
+        const serverSteps: WalkthroughStepView[] = (await walkthroughState(challengeId, runId)).steps;
         // Fusion étape par étape, pas un remplacement du tableau entier : une
         // autre étape peut porter une saisie locale (un commentaire tapé sans
         // résultat, donc jamais PUT) que ce snapshot n'a jamais vue et qui ne
@@ -165,8 +136,6 @@ export function ScenarioWalkthroughScreen({
         // est jamais parvenu.
         setUnsavedStepIds(prev => prev.filter(id => id !== step.stepId));
       } else {
-        const d = await res.json().catch(() => ({}));
-        setError(d.error || 'Could not save this step');
         // La saisie reste affichée telle quelle — on ne l'efface jamais —
         // mais Finish doit rester bloqué tant qu'elle n'a pas atteint le
         // serveur, sinon on paie sur la foi de ce que l'écran montre plutôt
@@ -185,25 +154,17 @@ export function ScenarioWalkthroughScreen({
     setFinishing(true);
     setError('');
     try {
-      const res = await fetch(
-        flowActionUrl(challengeId, `scenario-runs/${runId}/complete`),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ global_feedback: globalFeedback }),
-        }
-      );
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setCompletedAt(new Date().toISOString());
-        setCpAwarded(d.cpAwarded ?? 0);
-      } else {
-        setError(d.error || 'Could not finish this walkthrough');
-        // Le serveur nomme les étapes manquantes : on allume leurs points au
-        // lieu de laisser le validateur chercher lesquelles il a sautées.
-        setMissingStepIds(d.missingStepIds ?? []);
+      const awarded = await completeWalkthrough(challengeId, runId, globalFeedback);
+      setCompletedAt(new Date().toISOString());
+      setCpAwarded(awarded);
+    } catch (e) {
+      setError(e instanceof JourneyApiError ? e.message : 'Network error');
+      // Les étapes sans résultat : on allume leurs points au lieu de laisser le
+      // validateur chercher lesquelles il a sautées.
+      if (e instanceof JourneyApiError && e.reason === 'incomplete') {
+        setMissingStepIds(steps.filter(s => s.result === null).map(s => s.stepId));
       }
-    } catch { setError('Network error'); }
+    }
     finally { setFinishing(false); }
   };
 

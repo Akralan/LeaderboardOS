@@ -17,7 +17,12 @@ import type { ExprSource, FieldDecl, RewardBody } from "../format/schema.js";
 import type { TemplateReport } from "../check.js";
 import { descriptorOf } from "../describe.js";
 import type { LaneModel, NodeModel, TemplateModel } from "../validate/format.js";
-import { Engine, Refusal, newState, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
+import { Deferred, Engine, Refusal, newState, scoreOf, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
+import { artifactOf } from "./bindings.js";
+import { evaluate as evaluateExpr } from "../expr/evaluator.js";
+import { provisionWorkspace, reprotectGroupBranch, setOwnRepo, workspaceCreationRepos, workspaceModeOf, type WorkspaceMode } from "../../capabilities/workspaces.js";
+import type { EvaluationDetail } from "./runtime.js";
+import type { SubmissionTable } from "../../capabilities/submissions.js";
 import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
 import { generatedActions, generatedPathConflicts, resourceCounts } from "./reads.js";
@@ -116,13 +121,22 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   if (poolParam === undefined) throw new CompileError(`[interpreter] ${flowKey}: v1 compiles a single pool`);
 
   const ruleKeys: RuleKeyDeclaration[] = [];
-  for (const { body, key } of rewards) {
-    const declared = ruleKeys.find((ruleKey) => ruleKey.key === key);
-    const consumesPool = body.pool !== undefined;
-    if (declared && declared.consumesPool !== consumesPool) {
+  const transferKeys = new Map<object, string>();
+  const declareKey = (key: string, consumesPool: boolean, label: string | undefined) => {
+    const known = ruleKeys.find((ruleKey) => ruleKey.key === key);
+    if (known && known.consumesPool !== consumesPool) {
       throw new CompileError(`[interpreter] ${flowKey}: rule key ${key} is written both from and outside the pool`);
     }
-    if (!declared) ruleKeys.push({ key, consumesPool, label: key });
+    if (!known) ruleKeys.push({ key, consumesPool, label: label ?? key });
+  };
+  for (const { body, key } of rewards) {
+    declareKey(key, body.pool !== undefined, body.label);
+    // Un transfert suit le pool de sa récompense : sa paire prélèvement/crédit s'y annule.
+    for (const target of body.transfers?.to ?? []) {
+      const transferKey = declared(target.rule_key);
+      transferKeys.set(target, transferKey);
+      declareKey(transferKey, body.pool !== undefined, target.label);
+    }
   }
 
   const params = compileParams(shell, types.params, poolParam);
@@ -147,8 +161,31 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       ? { ...shell.presentation.contribution, type: declared(shell.presentation.contribution.type) }
       : { type: flowKey, title: shell.template.name },
     version: options.published?.version ?? null,
+    participationContext: Boolean(shell.workspace || shell.submissions || shell.presentation?.board || model.lanes.some((lane) => lane.entry.access?.group === true)),
+    // Une soumission se joue toujours pour le porteur : la contribution et le ledger d'un groupe sont les siens.
+    groupLanes: new Set(model.lanes.filter((lane) => lane.entry.access?.group === true || lane.entry.trigger === "submission").map((lane) => lane.id)),
+    contributionDescription: shell.presentation?.contribution?.description ?? null,
+    transferKeys,
+    roleParams: Object.entries(types.params).filter(([, type]) => type.kind === "role").map(([name]) => name),
+    readsQualified: model.lanes.some((lane) => expressionsOf(lane.nodes.map((node) => node.body)).some((ast) => readsQualified(ast))),
+  };
+  const evaluationHandler = shell.presentation?.evaluation_handler ?? CONTINUE_HANDLER;
+  /** Le mode de workspace d'un challenge : l'expression du bloc sur ses paramètres, le mode historique sinon. */
+  const workspaceModeFor = (challenge: Challenge): WorkspaceMode => {
+    if (!shell.workspace) return "provided_repo";
+    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+    if (!values) return workspaceModeOf(flowConfigOf(challenge)?.workspace_mode);
+    try {
+      const mode = shell.workspace.mode;
+      return workspaceModeOf(typeof mode === "string" ? evaluateExpr(parseExpr(mode), { params: values }, { now: new Date() }) : mode);
+    } catch {
+      return "provided_repo";
+    }
   };
   const engine = new Engine(compiled);
+  const submissionTable: SubmissionTable = Object.fromEntries(
+    Object.entries(shell.submissions?.steps ?? {}).map(([role, step]) => [role, { contributionType: declared(step.contribution), title: step.title, isArtifact: step.artifact === true }])
+  );
 
   // ── Actions ─────────────────────────────────────────────────────────────
   const actions: ChallengeActionDeclaration[] = [];
@@ -159,6 +196,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       jobs.push(cronJob(lane, compiled, engine, params));
       continue;
     }
+    // Jouée en arrière-plan après une soumission : aucune action à elle.
+    if (lane.entry.trigger === "submission") continue;
     const segments = segmentsOf(lane);
     const persisted = checkSegments(flowKey, lane, segments);
     const claimAct = lane.nodes.find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }> | undefined;
@@ -188,6 +227,60 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     });
   }
 
+  // ── Workspace : déclarer son propre dépôt ───────────────────────────────
+  if (shell.workspace) {
+    actions.push({
+      path: "workspace",
+      method: "PATCH",
+      access: { member: true },
+      async handle({ request, challenge, user }) {
+        const body = await request.json().catch(() => null);
+        return setOwnRepo(challenge.uuid, user.id, body, workspaceModeFor(challenge));
+      },
+    });
+  }
+
+  // ── Soumissions : les dépôts d'étape, lus et soumis ─────────────────────
+  const submissions = shell.submissions;
+  if (submissions) {
+    if (shell.workspace) throw new CompileError(`[interpreter] ${flowKey}: workspace and submissions both serve PATCH workspace`);
+    // Pas de join préalable : lire et soumettre restent ouverts à tout compte connecté, soumettre fait entrer.
+    actions.push({
+      path: "workspace",
+      method: "GET",
+      access: {},
+      handle: ({ challenge, user }) => runtime.submissions.read(challenge.uuid, user.id),
+    });
+    actions.push({
+      path: "workspace",
+      method: "PATCH",
+      access: {},
+      async handle({ request, challenge, user }) {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json({ error: "Invalid JSON" }, { status: 400 });
+        }
+        const values = params.valuesOf(challenge, flowConfigOf(challenge));
+        const result = await runtime.submissions.submit(challenge, user.id, body, submissionTable, {
+          selectionRole: submissions.selection ?? null,
+          async closed(role) {
+            const open = submissions.steps[role]?.open;
+            if (open === undefined || !values) return null;
+            return (await engine.eval(open, newState(challenge, user.id, values))) === true ? null : submissions.closed_message ?? "This step is closed";
+          },
+        });
+        if (result instanceof Response) return result;
+        if (result.submission) {
+          const event = { challengeId: challenge.uuid, userId: user.id, repoId: result.submission.repoId, url: result.submission.url };
+          runtime.evaluations.schedule(() => runSubmission(event, compiled, engine, params, submissionTable));
+        }
+        return { repo: result.repo };
+      },
+    });
+  }
+
   // ── Surfaces générées : release, progress, overview, export ─────────────
   const conflicts = generatedPathConflicts(model.lanes, actions.map((action) => action.path));
   if (conflicts.length > 0) {
@@ -209,8 +302,9 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     config: { version: 1, schema: params.configSchema },
     rules: { parse: (raw) => (params.rulesSchema.safeParse(raw ?? {}).success ? params.rulesSchema.parse(raw ?? {}) : null) },
     ruleKeys,
-    contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
-    uses: { board: false, groups: false },
+    contributionTypes: contributionTypesOf(shell, compiled, declared),
+    uses: { board: Boolean(shell.presentation?.board), groups: compiled.groupLanes.size > 0 },
+    ...(deliverablesOf(shell, compiled, declared).length ? { deliverables: deliverablesOf(shell, compiled, declared) } : {}),
     ...(deliverableOf(shell) ? { requires: { deliverableCapability: deliverableOf(shell)! } } : {}),
     rewards: {
       // L'avancement du challenge, comme `overview.resources` : le hero le lit.
@@ -220,20 +314,199 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     },
     actions,
     jobs,
+    ...(hasBackground(model) || submissions
+      ? {
+          evaluationHandlers: [
+            ...(submissions
+              ? [
+                  {
+                    key: submissions.evaluation_handler ?? SUBMISSION_HANDLER,
+                    // Un run échoué rejoue la soumission : sa lane reprend depuis le début, sur l'état du moment.
+                    async retry(payload: Record<string, unknown>) {
+                      const { challengeId, userId, repoId, url } = payload;
+                      if ([challengeId, userId, repoId, url].some((value) => typeof value !== "string")) return { ok: false as const, reason: "invalid_payload" };
+                      const event = { challengeId: challengeId as string, userId: userId as string, repoId: repoId as string, url: url as string };
+                      runtime.evaluations.schedule(() => runSubmission(event, compiled, engine, params, submissionTable));
+                      return { ok: true as const };
+                    },
+                  },
+                ]
+              : []),
+            ...(hasBackground(model) ? [{
+              key: evaluationHandler,
+              // La relance d'un run échoué : reprendre l'évaluation (toujours une à la fois) et rejouer la suite.
+              async retry(payload: Record<string, unknown>) {
+                if (typeof payload.challengeId === "string" && typeof payload.userId === "string" && typeof payload.lane !== "string") {
+                  // Un run du flow écrit à la main que ce template remplace : `{challengeId, userId}`, re-planifié.
+                  return replayLegacyRun(payload.challengeId, payload.userId, compiled, engine, params);
+                }
+                const continuation = payload as Continuation;
+                if (typeof continuation.contributionId !== "string" || typeof continuation.challengeId !== "string") {
+                  return { ok: false as const, reason: "invalid_payload" };
+                }
+                const artifact = (continuation.inputs ?? []).map((input) => artifactOf(input)).find(Boolean) ?? null;
+                if (!(await runtime.evaluations.claim(continuation.contributionId, artifact?.url ?? null))) {
+                  return { ok: false as const, reason: "already_running" };
+                }
+                runtime.evaluations.schedule(() => continueEvaluation(continuation, compiled, engine, params));
+                return { ok: true as const };
+              },
+            }] : []),
+          ],
+        }
+      : {}),
     hooks:
-      lifecycleAggregates.length > 0
+      lifecycleAggregates.length > 0 || shell.workspace || submissions
         ? {
-            async onClose(challenge) {
-              const values = params.valuesOf(challenge, flowConfigOf(challenge));
-              if (!values) return;
-              for (const aggregate of lifecycleAggregates) {
-                const open = await runtime.resources.list({ challengeId: challenge.uuid, type: aggregate.decl.over, state: "open" });
-                for (const instance of open) await engine.resolve(aggregate.decl.id, instance.uuid, challenge, values, true);
-              }
-            },
+            ...(lifecycleAggregates.length > 0
+              ? {
+                  async onClose(challenge: Challenge) {
+                    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+                    if (!values) return;
+                    for (const aggregate of lifecycleAggregates) {
+                      const open = await runtime.resources.list({ challengeId: challenge.uuid, type: aggregate.decl.over, state: "open" });
+                      for (const instance of open) await engine.resolve(aggregate.decl.id, instance.uuid, challenge, values, true);
+                    }
+                  },
+                }
+              : {}),
+            ...(shell.workspace
+              ? {
+                  // La capacité `workspaces` : le dépôt du challenge à sa création, la branche perso au join, sa reprotection en groupe.
+                  onCreate: ({ challenge, input }) => ({ repos: workspaceCreationRepos(challenge, input, workspaceModeFor(challenge)) }),
+                  onJoin: (ctx) => provisionWorkspace(ctx, workspaceModeFor(ctx.challenge)),
+                  onGroupJoin: (ctx) => reprotectGroupBranch(ctx),
+                }
+              : {}),
+            ...(submissions
+              ? {
+                  // Un dépôt par étape, avec son rôle ; une étape se retire par un champ de création à `false`.
+                  onCreate: ({ challenge, input }: { challenge: Challenge; input: Readonly<Record<string, unknown>> }) => ({
+                    repos: Object.entries(submissions.steps)
+                      .filter(([, step]) => !(step.unless_input && input[step.unless_input] === false))
+                      .map(([role, step]) => ({ title: `${challenge.title} — ${step.repo_title}`, type: step.repo, role: role as never })),
+                  }),
+                }
+              : {}),
           }
         : undefined,
   };
+}
+
+/** L'expression lit-elle `participation.qualified` ? */
+function readsQualified(ast: ReturnType<typeof parseExpr>): boolean {
+  let found = false;
+  const visit = (node: unknown) => {
+    if (found || !node || typeof node !== "object") return;
+    const candidate = node as { k?: string; name?: string; object?: { k?: string; name?: string } };
+    if (candidate.k === "member" && candidate.name === "qualified" && candidate.object?.k === "ident" && candidate.object.name === "participation") {
+      found = true;
+      return;
+    }
+    for (const value of Object.values(node)) Array.isArray(value) ? value.forEach(visit) : visit(value);
+  };
+  visit(ast);
+  return found;
+}
+
+/** Les types de contribution : ceux des étapes soumises, sinon celui de `presentation.contribution`. */
+function contributionTypesOf(shell: TemplateModel["shell"], t: CompiledTemplate, declared: (key: string) => string) {
+  if (!shell.submissions) return [{ key: t.contribution.type, countsAsContribution: true }];
+  const types = new Set(Object.values(shell.submissions.steps).map((step) => declared(step.contribution)));
+  if (shell.presentation?.contribution) types.add(t.contribution.type);
+  return [...types].map((key) => ({ key, countsAsContribution: true }));
+}
+
+/** Ce que les contributions livrent à une validation : celle de `presentation`, et celles des étapes. */
+function deliverablesOf(shell: TemplateModel["shell"], t: CompiledTemplate, declared: (key: string) => string) {
+  const deliverables: { contributionType: string; capabilities: string[] }[] = [];
+  if (shell.presentation?.contribution?.deliverables?.length) {
+    deliverables.push({ contributionType: t.contribution.type, capabilities: shell.presentation.contribution.deliverables });
+  }
+  for (const step of Object.values(shell.submissions?.steps ?? {})) {
+    if (step.deliverables?.length) deliverables.push({ contributionType: declared(step.contribution), capabilities: step.deliverables });
+  }
+  return deliverables;
+}
+
+export const SUBMISSION_HANDLER = "submission";
+
+/** Une soumission acceptée : qui, pour quel dépôt d'étape, avec quelle URL. */
+export interface SubmissionEvent {
+  challengeId: string;
+  /** L'appelant ; le porteur se résout au moment du run. */
+  userId: string;
+  repoId: string;
+  url: string;
+}
+
+/**
+ * La lane d'une étape soumise, en arrière-plan : la contribution de l'étape du
+ * porteur, sa lignée, puis les nœuds. Les gates de tête passent avant que
+ * l'évaluation ne soit marquée `running` ; un refus qui porte une raison
+ * (`skipped_reuse`) devient le statut de la contribution, sans rien écrire
+ * d'autre ; une erreur la marque `failed` et laisse le run rejouable. Le
+ * challenge ML (`MlRewardsService.award`), compilé.
+ */
+export async function runSubmission(event: SubmissionEvent, t: CompiledTemplate, engine: Engine, params: CompiledParams, table: SubmissionTable): Promise<void> {
+  const { runtime } = t;
+  const decl = t.model.shell.submissions;
+  const challenge = (await runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === event.challengeId);
+  if (!decl || !challenge) return;
+  const values = params.valuesOf(challenge, flowConfigOf(challenge));
+  if (!values) {
+    console.warn(`[interpreter] ${t.flowKey}: challenge ${challenge.uuid} has no readable rules — submission not scored`);
+    return;
+  }
+  const role = await runtime.submissions.role(challenge.uuid, event.repoId);
+  const lane = role ? t.model.lanes.find((candidate) => candidate.entry.trigger === "submission" && candidate.entry.step === role) : undefined;
+  if (!role || !lane || !table[role]) return;
+
+  const state = newState(challenge, event.userId, values);
+  await engine.bindParticipation(state, lane.id);
+  const holder = state.userId!;
+  const contribution = await runtime.submissions.contribution(challenge.uuid, holder, table[role].contributionType);
+  if (!contribution) return;
+  const lineage = await runtime.submissions.lineage(challenge.uuid, holder, table, decl.selection ?? null);
+  state.submission = {
+    contributionId: contribution.id,
+    origin: { handler: decl.evaluation_handler ?? SUBMISSION_HANDLER, payload: { ...event } },
+  };
+  state.bindings.submission = {
+    step: role,
+    url: event.url,
+    repo: event.repoId,
+    contribution: contribution.id,
+    lineage: { artifacts: lineage.artifacts as unknown as Value, selection: lineage.selection as unknown as Value },
+  };
+
+  const lead = lane.nodes.findIndex((node) => !(node.family === "gate" && node.body.all));
+  const head = lead < 0 ? lane.nodes : lane.nodes.slice(0, lead);
+  const rest = lead < 0 ? [] : lane.nodes.slice(lead);
+  try {
+    await engine.run(head, state);
+  } catch (error) {
+    if (error instanceof Refusal && error.reason) {
+      await runtime.evaluations.finish(contribution.id, { status: error.reason as "skipped_reuse" });
+      return;
+    }
+    throw error;
+  }
+
+  await runtime.evaluations.finish(contribution.id, { status: "running" });
+  try {
+    await engine.run(rest, state);
+    await engine.settleShares(state);
+    await runtime.evaluations.finish(contribution.id, { status: "done", ...(state.evaluation ? { evaluation: state.evaluation } : {}) });
+    await runtime.ledger.syncCompletion(challenge);
+  } catch (error) {
+    await runtime.evaluations.finish(contribution.id, { status: "failed", ...(state.evaluation ? { evaluation: state.evaluation } : {}) });
+    throw error;
+  }
+}
+
+function hasBackground(model: TemplateModel): boolean {
+  return model.lanes.some((lane) => lane.nodes.some((node) => node.family === "assess" && Boolean(node.body.background)));
 }
 
 function counterWritesOf(nodes: readonly NodeModel[]): { node: string; counter: string; add: ExprSource }[] {
@@ -290,6 +563,8 @@ function checkSegments(flowKey: string, lane: LaneModel, segments: Segment[]): s
 function accessOf(lane: LaneModel, params: CompiledParams): ActionAccess {
   if (lane.entry.trigger === "admin") return { roles: ["admin"], manager: true };
   const access = lane.entry.access!;
+  // Tout compte connecté : la lane affine elle-même (rôle de plateforme, qualification) par ses gates.
+  if (access.mode === "signed_in") return {};
   if (access.mode === "role") {
     const param = /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec(String(access.role))?.[1];
     // La qualification seule : un admin ou un manager ne relit ni ne vote à la place d'un qualifié.
@@ -332,6 +607,8 @@ async function runSegment(
   let kept: Record<string, Value> = {};
 
   try {
+    await engine.bindParticipation(state, call.lane.id);
+    await bindCaller(state, ctx, t, values);
     if (claimAct) {
       const claimId = typeof body.claim_id === "string" ? body.claim_id : null;
       const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
@@ -352,14 +629,17 @@ async function runSegment(
       const fields = gestureFields(gesture);
       const bound = await readGesture(fields, nodeFields.get(gesture) ?? {}, body, state, engine, t);
       state.bindings[gesture.id] = bound;
+      state.sent[gesture.id] = Object.keys(fields).filter((name) => name in body);
       Object.assign(state.result, bound);
     }
 
     await engine.run(segment.nodes, state);
     if (segment.final) await engine.deliver(state);
     else kept = await engine.persist(call.persist, state);
+    await engine.settleShares(state);
   } catch (error) {
-    if (error instanceof Refusal) return jsonError(error.status, error.message);
+    if (error instanceof Deferred) return deferEvaluation(error, call.lane, state, t, engine, params);
+    if (error instanceof Refusal) return refusalResponse(error);
     if (error instanceof GestureError) return jsonError(400, error.message);
     if (error instanceof EvalError) throw new Error(`[interpreter] ${t.flowKey}: ${error.message}`);
     throw error;
@@ -380,7 +660,188 @@ async function runSegment(
       },
     };
   }
-  return { ok: true, cp_awarded: state.awarded, ...(Object.keys(kept).length > 0 ? { context: kept } : {}) };
+  return {
+    ok: true,
+    cp_awarded: state.awarded,
+    ...(Object.keys(kept).length > 0 ? { context: kept } : {}),
+    ...(Object.keys(state.created).length > 0 ? { created: state.created } : {}),
+  };
+}
+
+/**
+ * Ce que la portée dit de l'appelant hors de sa participation : son rôle de
+ * plateforme, et — quand le template le lit — s'il détient la qualification
+ * de chaque paramètre `role` (`participation.qualified.<param>`).
+ */
+async function bindCaller(state: RunState, ctx: ActionContext, t: CompiledTemplate, values: Record<string, Value>): Promise<void> {
+  const participation = { ...((state.bindings.participation as Record<string, Value> | undefined) ?? { user: ctx.user.id }) };
+  participation.role = ctx.user.role;
+  if (t.readsQualified) {
+    const qualified: Record<string, Value> = {};
+    for (const name of t.roleParams) {
+      const key = values[name];
+      qualified[name] = typeof key === "string" && key.length > 0 && (await ctx.access.holds(key));
+    }
+    participation.qualified = qualified;
+  }
+  state.bindings.participation = participation;
+}
+
+/**
+ * Ce qu'une évaluation en arrière-plan garde pour reprendre : où la lane
+ * s'est arrêtée, ce que les nœuds passés ont lié, ce qu'il faut noter. C'est
+ * aussi la charge du run d'évaluation, que la relance d'un run échoué rejoue.
+ */
+export interface Continuation {
+  [key: string]: unknown;
+  version: string | null;
+  challengeId: string;
+  /** Le porteur : sa contribution, son ledger. */
+  userId: string;
+  /** Qui a lancé l'évaluation. */
+  caller: string;
+  lane: string;
+  node: string;
+  grid: string;
+  inputs: Value[];
+  bindings: Record<string, Value>;
+  contributionId: string;
+}
+
+export const CONTINUE_HANDLER = "continue";
+
+/** Ce qui ne se recalcule pas à la reprise : les liaisons des nœuds passés, sans les paramètres ni l'état du challenge. */
+function carried(bindings: Record<string, Value>): Record<string, Value> {
+  const { params: _params, challenge: _challenge, participation: _participation, counters: _counters, group: _group, board: _board, ...rest } = bindings;
+  return JSON.parse(JSON.stringify(rest)) as Record<string, Value>;
+}
+
+/** Le geste a passé tous ses contrôles : l'évaluation se prend (une à la fois), se planifie, et le geste répond 202. */
+async function deferEvaluation(deferred: Deferred, lane: LaneModel, state: RunState, t: CompiledTemplate, engine: Engine, params: CompiledParams): Promise<Response> {
+  const outcome = await scheduleContinuation(deferred, lane, state, t, engine, params);
+  if (!outcome.ok) return Response.json({ error: "Cannot start evaluation", reason: outcome.reason }, { status: 409 });
+  // Un lancement accepté, jamais un refus ; hors transaction : un événement perdu coûte une quête, pas le lancement.
+  try {
+    const { events } = await import("../../capabilities/events.js");
+    await events.emit("evaluation.requested", { challengeId: state.challenge.uuid, userId: state.caller });
+  } catch (error) {
+    console.warn(`[interpreter] ${t.flowKey}: evaluation.requested not recorded:`, error);
+  }
+  return Response.json({ scheduled: true }, { status: 202 });
+}
+
+/** Prendre l'évaluation sur la contribution du porteur (une à la fois), puis planifier la suite. */
+async function scheduleContinuation(
+  deferred: Deferred,
+  lane: LaneModel,
+  state: RunState,
+  t: CompiledTemplate,
+  engine: Engine,
+  params: CompiledParams
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const userId = state.userId!;
+  const contributionId = await engine.contributionFor(state, userId);
+  const artifact = deferred.inputs.map((input) => artifactOf(input)).find(Boolean) ?? null;
+  if (!(await t.runtime.evaluations.claim(contributionId, artifact?.url ?? null))) return { ok: false, reason: "already_running" };
+  const continuation: Continuation = {
+    version: t.version,
+    challengeId: state.challenge.uuid,
+    userId,
+    caller: state.caller ?? userId,
+    lane: lane.id,
+    node: deferred.node.id,
+    grid: deferred.grid,
+    inputs: deferred.inputs,
+    bindings: carried(state.bindings),
+    contributionId,
+  };
+  t.runtime.evaluations.schedule(() => continueEvaluation(continuation, t, engine, params));
+  return { ok: true };
+}
+
+/**
+ * Un run échoué du flow écrit à la main que ce template remplace, rejoué comme
+ * lui : sans les préconditions du geste (board, statut), l'évaluation reprise
+ * pour le porteur puis la lane rejouée. Seule une lane sans geste avant son
+ * évaluation se re-planifie ainsi.
+ */
+async function replayLegacyRun(challengeId: string, userId: string, t: CompiledTemplate, engine: Engine, params: CompiledParams) {
+  const challenge = (await t.runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === challengeId);
+  if (!challenge) return { ok: false as const, reason: "not_found" };
+  const values = params.valuesOf(challenge, flowConfigOf(challenge));
+  if (!values) return { ok: false as const, reason: "no_rules" };
+  for (const lane of t.model.lanes) {
+    const index = lane.nodes.findIndex((node) => node.family === "assess" && Boolean(node.body.background));
+    if (index < 0) continue;
+    const before = lane.nodes.slice(0, index);
+    if (before.some((node) => node.family !== "gate")) return { ok: false as const, reason: "not_replayable" };
+    const node = lane.nodes[index] as Extract<NodeModel, { family: "assess" }>;
+    const state = newState(challenge, userId, values);
+    await engine.bindParticipation(state, lane.id);
+    const grid = String(await engine.eval(node.body.grid!, state));
+    const inputs = await Promise.all((node.body.input ?? []).map((input) => engine.eval(input, state)));
+    if (!inputs.some((input) => artifactOf(input))) return { ok: false as const, reason: "workspace_not_ready" };
+    return scheduleContinuation(new Deferred(node, grid, inputs), lane, state, t, engine, params);
+  }
+  return { ok: false as const, reason: "no_handler" };
+}
+
+/** Un refus du moteur : son statut, son message, et sa raison quand la lane en donne une. */
+function refusalResponse(error: Refusal): Response {
+  return Response.json({ error: error.message, ...(error.reason ? { reason: error.reason } : {}) }, { status: error.status });
+}
+
+/**
+ * La suite d'une évaluation en arrière-plan : noter, stocker le détail sur la
+ * contribution, puis reprendre la lane au nœud suivant avec les règles du
+ * moment — comme le challenge code recalcule son plan au lancement du run. Un
+ * refus plus loin (un plancher) termine le run sans paiement ; une erreur le
+ * marque en échec et le laisse rejouable.
+ */
+export async function continueEvaluation(continuation: Continuation, t: CompiledTemplate, engine: Engine, params: CompiledParams): Promise<void> {
+  const { runtime } = t;
+  const challenge = (await runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === continuation.challengeId);
+  const lane = t.model.lanes.find((candidate) => candidate.id === continuation.lane);
+  const index = lane ? lane.nodes.findIndex((node) => node.id === continuation.node) : -1;
+  const node = lane && index >= 0 ? lane.nodes[index] : null;
+  let evaluation: EvaluationDetail | undefined;
+  try {
+    if (!challenge || !lane || !node || node.family !== "assess") {
+      throw new Error(`[interpreter] ${t.flowKey}: nothing to continue at ${continuation.lane}.${continuation.node}`);
+    }
+    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+    if (!values) throw new Error(`[interpreter] ${t.flowKey}: challenge ${challenge.uuid} has no readable configuration`);
+
+    const result = scoreOf(
+      await runtime.evaluate({
+        challenge,
+        userId: continuation.userId,
+        grid: continuation.grid,
+        inputs: continuation.inputs,
+        ...(node.body.snapshot ? { snapshot: node.body.snapshot } : {}),
+        contributionId: continuation.contributionId,
+        origin: { handler: t.model.shell.presentation?.evaluation_handler ?? CONTINUE_HANDLER, payload: continuation },
+      })
+    );
+    evaluation = (result.evaluation as EvaluationDetail | null) ?? undefined;
+
+    // Le groupe se relit au moment du run : les membres présents partagent ce qu'il verse.
+    const state = newState(challenge, continuation.caller ?? continuation.userId, values);
+    await engine.bindParticipation(state, lane.id);
+    state.userId = continuation.userId;
+    Object.assign(state.bindings, continuation.bindings, { [node.id]: { score: result.score } });
+    try {
+      await engine.run(lane.nodes.slice(index + 1), state);
+      await engine.settleShares(state);
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+    }
+    await runtime.evaluations.finish(continuation.contributionId, { status: "done", ...(evaluation ? { evaluation } : {}) });
+    await runtime.ledger.syncCompletion(challenge);
+  } catch (error) {
+    await runtime.evaluations.finish(continuation.contributionId, { status: "failed", ...(evaluation ? { evaluation } : {}) });
+    throw error;
+  }
 }
 
 function viewerOf(ctx: ActionContext, values: Record<string, Value>, claimant: boolean) {
@@ -409,8 +870,14 @@ async function readGesture(
   const bound: Record<string, Value> = {};
   for (const [name, decl] of Object.entries(fields)) {
     const type = types[name];
-    const raw = body[name];
+    let raw = body[name];
     if (decl.when !== undefined && (await engine.eval(decl.when, state, bound)) !== true) {
+      bound[name] = null;
+      continue;
+    }
+    // `trim` : rogné ; vide, un champ optionnel vaut `null` — une chaîne vide n'est jamais un contenu.
+    if (decl.trim && typeof raw === "string") raw = raw.trim();
+    if (decl.optional && (raw === undefined || raw === null || (decl.trim && raw === ""))) {
       bound[name] = null;
       continue;
     }
@@ -423,6 +890,15 @@ async function readGesture(
     const parsed = zodOf(type).safeParse(raw);
     if (!parsed.success) throw new GestureError(`${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     let value = parsed.data as Value;
+    if (decl.public && typeof value === "string") {
+      // L'adresse sortira jusqu'aux navigateurs, ou sera appelée : publique seulement (garde SSRF du core).
+      const { assertPublicHttpUrl } = await import("../../capabilities/http-proxy/ssrf-guard.js");
+      try {
+        await assertPublicHttpUrl(value);
+      } catch (error) {
+        throw new GestureError(`${name} is not reachable/allowed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     if (type.kind === "contribution") {
       // Un `link` : une contribution du challenge source qui porte le livrable exigé.

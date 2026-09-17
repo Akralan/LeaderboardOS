@@ -1,0 +1,216 @@
+# The ML challenge as a template (template parity P5).
+#
+# Flipped with continuity: the challenges the hand-written flow (content/flows/ml)
+# served switch to this template as they are. The template keeps the flow's
+# data shapes — the step repos and their workspace_meta (userUrls, datasetUrls),
+# the dataset / model / api_packaging contributions, the same ledger keys and
+# meta — through the core `submissions` capability, and a sandbox promotion
+# keeps writing them as before.
+#
+# The rules of the hand-written flow, kept:
+# - four steps, each a repo created with the challenge (API optional); submitting
+#   a step's URL joins the challenge and scores it in the background;
+# - a URL belongs to whoever submitted it first; a reused dataset is not scored
+#   and pays nothing (skipped_reuse);
+# - dataset, model code and API packaging are graded by an AI grid; the model is
+#   paid by the metric its Kaggle card reports, normalized over the baseline,
+#   with a bonus for taking the lead from every other contributor;
+# - every payment is clamped to the pool in arrival order; a group's payment is
+#   multiplied by its bonus and split between members;
+# - the model step's payments credit the authors of the reused datasets
+#   (1/N of the selection each) and model, off pool, keeping min_keep_share;
+# - once the best metric reaches blockThreshold, dataset and model submissions close.
+#
+# The rules params keep the names reward_rules already stores.
+
+format: leaderboardos/1
+
+template:
+  id: ml
+  version: 1.0.0
+  name: ML
+  summary: >
+    Contributors submit a dataset, a model, its training code and an API, each
+    scored as it arrives and paid from the pool, with credit to the authors of
+    what they reuse.
+
+params:
+  pool:    {type: points, mutable: false}
+  version: {type: int, default: 1, check: "value == 1", mutable: true}
+  dataset:
+    type: {cap: int}
+    check: "value.cap >= 0"
+    mutable: true
+  model:
+    type:
+      cap: int
+      kaggleShare: number
+      metric: {name: "enum(auc, f1, accuracy)", baseline: number, blockThreshold: "optional(number)"}
+      beatBestBonus: int
+    checks:
+      cap_is_positive: "value.cap >= 0 && value.beatBestBonus >= 0"
+      shares_are_ratios: "value.kaggleShare >= 0 && value.kaggleShare <= 1 && value.metric.baseline >= 0 && value.metric.baseline <= 1"
+    mutable: true
+  apiPackaging:
+    type: {cap: int}
+    check: "value.cap >= 0"
+    mutable: true
+  reuse:
+    type: {datasetShare: number, modelShare: number, minKeepShare: number}
+    check: "value.datasetShare >= 0 && value.datasetShare <= 1 && value.modelShare >= 0 && value.modelShare <= 1 && value.minKeepShare >= 0 && value.minKeepShare <= 1"
+    mutable: true
+
+requires: {core: 1}
+
+presentation:
+  icon: brain
+  long_label: Machine learning
+  join_caption: Joining adds you to this challenge - you can then submit your dataset and model.
+  brief_required: true
+  public: true
+
+submissions:
+  selection: dataset
+  evaluation_handler: submission
+  closed_message: Metric threshold reached - dataset and model submissions are closed, only API packaging is accepted
+  steps:
+    dataset:
+      repo: kaggle_dataset
+      repo_title: Dataset
+      contribution: dataset
+      title: Dataset Submission
+      artifact: true
+      open: &open 'params.model.metric.blockThreshold == null || best("model_metric", "metricValue") == null || best("model_metric", "metricValue") < params.model.metric.blockThreshold'
+    model:
+      repo: kaggle_model
+      repo_title: Model
+      contribution: model
+      title: Model Submission
+      artifact: true
+      open: *open
+    model_code:
+      repo: github
+      repo_title: Model Code
+      contribution: model
+      title: Model Submission
+      open: *open
+    api:
+      repo: github
+      repo_title: API
+      contribution: api_packaging
+      title: API Packaging Submission
+      artifact: true
+      deliverables: [endpoint]
+      unless_input: api_packaging_enabled
+
+lanes:
+  - id: dataset
+    entry: {trigger: submission, step: dataset}
+    nodes:
+      # Réutiliser le dataset d'un autre ne rapporte rien : rien n'a été produit, rien n'est noté.
+      - gate:
+          id: not_reused
+          reason: skipped_reuse
+          all: ["submission.lineage.artifacts.dataset == null"]
+      - assess: {id: grade, kind: ai_grid, grid: '"dataset"', input: [submission.url], snapshot: latest}
+      - reward:
+          id: dataset_pay
+          rule_key: dataset
+          label: Dataset quality
+          amount: "params.dataset.cap * grade.score"
+          multiplier: participation.group.multiplier
+          pool: params.pool
+          clamp: pool
+          record_clamp: true
+          meta: {agentScore: grade.score}
+
+  - id: model
+    entry: {trigger: submission, step: model}
+    nodes:
+      - act: {id: card, capability: kaggle_metadata, url: submission.url}
+      - assess:
+          id: metric
+          kind: metric
+          value: "card.metrics[params.model.metric.name]"
+      - assess:
+          id: normalized
+          kind: metric
+          value: "params.model.metric.baseline >= 1 ? 0.0 : max(0, min(1, (metric.value - params.model.metric.baseline) / (1 - params.model.metric.baseline)))"
+      # Lu avant de payer : prendre la tête sur les autres, jamais se dépasser soi-même.
+      - assess:
+          id: lead
+          kind: metric
+          value: 'params.model.beatBestBonus > 0 && normalized.value > 0 && (best_of_others("model_metric", "metricValue") == null || metric.value > best_of_others("model_metric", "metricValue")) && !(best_of_mine("model_metric", "metricValue") != null && (best_of_others("model_metric", "metricValue") == null || best_of_mine("model_metric", "metricValue") > best_of_others("model_metric", "metricValue")))'
+      - assess:
+          id: previous_best
+          kind: metric
+          value: 'best_of_others("model_metric", "metricValue")'
+      - reward:
+          id: metric_pay
+          rule_key: model_metric
+          label: Model metric
+          amount: "params.model.cap * params.model.kaggleShare * normalized.value"
+          multiplier: participation.group.multiplier
+          pool: params.pool
+          clamp: pool
+          record_clamp: true
+          meta: {metricValue: metric.value, normalizedMetric: normalized.value}
+          transfers: &reuse
+            floor: params.reuse.minKeepShare
+            to:
+              - rule_key: reuse_dataset
+                label: Dataset reuse
+                from: "size(submission.lineage.selection) > 0 ? submission.lineage.selection : (submission.lineage.artifacts.dataset == null ? [] : [submission.lineage.artifacts.dataset])"
+                share: params.reuse.datasetShare
+              - rule_key: reuse_model
+                label: Model reuse
+                from: "submission.lineage.artifacts.model == null ? [] : [submission.lineage.artifacts.model]"
+                share: params.reuse.modelShare
+      - gate:
+          id: takes_the_lead
+          branch:
+            - when: lead.value
+              nodes:
+                - reward:
+                    id: beat_best
+                    rule_key: beat_best
+                    label: Best model bonus
+                    amount: params.model.beatBestBonus
+                    multiplier: participation.group.multiplier
+                    pool: params.pool
+                    clamp: pool
+                    record_clamp: true
+                    meta: {metricValue: metric.value, previousBest: previous_best.value}
+                    transfers: *reuse
+            - else: {nodes: []}
+
+  - id: model_code
+    entry: {trigger: submission, step: model_code}
+    nodes:
+      - assess: {id: grade, kind: ai_grid, grid: '"code"', input: [submission.url], snapshot: latest}
+      - reward:
+          id: code_pay
+          rule_key: model_code
+          label: Model code
+          amount: "params.model.cap * (1 - params.model.kaggleShare) * grade.score"
+          multiplier: participation.group.multiplier
+          pool: params.pool
+          clamp: pool
+          record_clamp: true
+          meta: {agentScore: grade.score}
+          transfers: *reuse
+
+  - id: api
+    entry: {trigger: submission, step: api}
+    nodes:
+      - assess: {id: grade, kind: ai_grid, grid: '"code"', input: [submission.url], snapshot: latest}
+      - reward:
+          id: api_pay
+          rule_key: api_packaging
+          label: API packaging
+          amount: "params.apiPackaging.cap * grade.score"
+          multiplier: participation.group.multiplier
+          pool: params.pool
+          clamp: pool
+          record_clamp: true
+          meta: {agentScore: grade.score}

@@ -46,16 +46,25 @@ export const DEFAULT_CATALOG: CapabilityCatalog = {
     output: T.record({ status: T.int, ok: T.bool, content_type: T.string, response: T.file }),
     v1: true,
   },
+  // Liées par compile/bindings.ts, sur les connecteurs GitHub et Kaggle.
   github_fetch: {
     kind: "observer",
-    args: { url: { form: "expr", type: T.url } },
-    output: T.dyn,
+    args: { url: { form: "expr", type: T.url, required: true } },
+    output: T.record({ slug: T.string, url: T.url, branch: T.string, commits: T.int, last_commit: T.string, last_commit_at: T.string }),
     v1: true,
   },
   kaggle_metadata: {
     kind: "observer",
-    args: { url: { form: "expr", type: T.url } },
-    output: T.dyn,
+    args: { url: { form: "expr", type: T.url, required: true } },
+    // Les métriques d'un modèle : la dernière version qui publie chacune, 0 sinon — comme le flow ML.
+    output: T.record({
+      ref: T.string,
+      kind: T.enum(["dataset", "model"]),
+      url: T.url,
+      title: T.string,
+      versions: T.int,
+      metrics: T.record({ auc: T.number, f1: T.number, accuracy: T.number }),
+    }),
     v1: true,
   },
   social_metadata: {

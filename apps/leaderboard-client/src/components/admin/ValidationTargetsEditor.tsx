@@ -23,6 +23,55 @@ interface TargetItem {
   walkthroughCount?: number;
 }
 
+/**
+ * Où l'éditeur lit et écrit ses cibles. Par défaut les actions du kit de
+ * validation (`targets`) ; un parcours servi par son template passe les siennes
+ * (`lib/journeyTemplateApi.ts`). Une écriture refusée rejette avec le message du serveur.
+ */
+export interface TargetsSource {
+  list(): Promise<TargetItem[]>;
+  eligible(): Promise<EligibleSubmission[]>;
+  add(contributionId: string, url: string): Promise<unknown>;
+  remove(targetId: string): Promise<unknown>;
+}
+
+async function orThrow(res: Response, fallback: string) {
+  if (res.ok) return res.json().catch(() => ({}));
+  const d = await res.json().catch(() => ({}));
+  throw new Error(d.error || fallback);
+}
+
+function kitTargets(challengeId: string): TargetsSource {
+  return {
+    async list() {
+      const d = await orThrow(await fetch(flowActionUrl(challengeId, 'targets')), 'Failed to load');
+      return (d.targets ?? []).map((t: any) => ({
+        id: t.id,
+        contributionId: t.contributionId,
+        submitterName: t.submitterName,
+        verdictCount: t.verdictCount ?? 0,
+        outcome: t.outcome ?? 'pending',
+        worksCount: t.worksCount,
+        brokenCount: t.brokenCount,
+        walkthroughCount: t.walkthroughCount,
+      }));
+    },
+    async eligible() {
+      return (await orThrow(await fetch(flowActionUrl(challengeId, 'targets?eligible=true')), 'Failed to load')).eligible ?? [];
+    },
+    async add(contributionId, url) {
+      return orThrow(await fetch(flowActionUrl(challengeId, 'targets'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contribution_id: contributionId, live_endpoint_url: url }),
+      }), 'Failed to add');
+    },
+    async remove(targetId) {
+      return orThrow(await fetch(flowActionUrl(challengeId, `targets/${targetId}`), { method: 'DELETE' }), 'Failed to remove');
+    },
+  };
+}
+
 function fgAt(opacity: number) {
   return `color-mix(in srgb, var(--foreground) ${Math.round(opacity * 100)}%, transparent)`;
 }
@@ -33,7 +82,8 @@ function fgAt(opacity: number) {
  * independent CRUD — each add/remove hits the API immediately, not on the
  * challenge's "Save changes".
  */
-export function ValidationTargetsEditor({ challengeId, open }: { challengeId: string; open: boolean }) {
+export function ValidationTargetsEditor({ challengeId, open, source }: { challengeId: string; open: boolean; source?: TargetsSource }) {
+  const api = source ?? kitTargets(challengeId);
   const [targets, setTargets] = useState<TargetItem[]>([]);
   const [eligible, setEligible] = useState<EligibleSubmission[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,28 +103,10 @@ export function ValidationTargetsEditor({ challengeId, open }: { challengeId: st
     setLoading(true);
     setError('');
     try {
-      const [targetsRes, eligibleRes] = await Promise.all([
-        fetch(flowActionUrl(challengeId, 'targets')),
-        fetch(flowActionUrl(challengeId, 'targets?eligible=true')),
-      ]);
-      if (targetsRes.ok) {
-        const d = await targetsRes.json();
-        setTargets((d.targets ?? []).map((t: any) => ({
-          id: t.id,
-          contributionId: t.contributionId,
-          submitterName: t.submitterName,
-          verdictCount: t.verdictCount ?? 0,
-          outcome: t.outcome ?? 'pending',
-          worksCount: t.worksCount,
-          brokenCount: t.brokenCount,
-          walkthroughCount: t.walkthroughCount,
-        })));
-      }
-      if (eligibleRes.ok) {
-        const d = await eligibleRes.json();
-        setEligible(d.eligible ?? []);
-      }
-    } catch { setError('Network error'); }
+      const [listed, exposable] = await Promise.all([api.list(), api.eligible().catch(() => [])]);
+      setTargets(listed);
+      setEligible(exposable);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Network error'); }
     finally { setLoading(false); }
   };
 
@@ -84,29 +116,19 @@ export function ValidationTargetsEditor({ challengeId, open }: { challengeId: st
     setAddingId(contributionId);
     setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'targets'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contribution_id: contributionId, live_endpoint_url: url }),
-      });
-      if (res.ok) {
-        setUrlDrafts(d => { const next = { ...d }; delete next[contributionId]; return next; });
-        await fetchAll();
-      } else {
-        const d = await res.json().catch(() => ({}));
-        setError(d.error || 'Failed to add');
-      }
-    } catch { setError('Network error'); }
+      await api.add(contributionId, url);
+      setUrlDrafts(d => { const next = { ...d }; delete next[contributionId]; return next; });
+      await fetchAll();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to add'); }
     finally { setAddingId(null); }
   };
 
   const handleRemove = async (targetId: string) => {
     setDeletingId(targetId);
     try {
-      const res = await fetch(flowActionUrl(challengeId, `targets/${targetId}`), { method: 'DELETE' });
-      if (res.ok) await fetchAll();
-      else { const d = await res.json().catch(() => ({})); setError(d.error || 'Failed to remove'); }
-    } catch { setError('Network error'); }
+      await api.remove(targetId);
+      await fetchAll();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to remove'); }
     finally { setDeletingId(null); }
   };
 

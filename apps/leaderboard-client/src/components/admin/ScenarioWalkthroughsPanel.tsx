@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Stethoscope } from 'lucide-react';
-import { flowActionUrl } from '@/lib/challengeActions';
+import { managedRuns } from '@/lib/journeyTemplateApi';
 import { RESULT_META, type ScenarioResult } from '@/components/challenges/scenarioResult';
 
 interface ScenarioStep { id: string; position: number; title: string }
@@ -150,22 +150,15 @@ export function ScenarioWalkthroughsPanel({ challengeId, open }: { challengeId: 
     if (!justOpened) return;
     setLoading(true);
     setError('');
-    fetch(flowActionUrl(challengeId, 'scenario-runs'))
-      .then(async res => {
-        if (!res.ok) {
-          // Avec zéro quorum ce panneau EST le contrôle qualité : un 403/500
-          // qui se lit "No walkthrough yet" est la seule mauvaise réponse
-          // possible à donner à un manager qui inspecte le travail des
-          // validateurs.
-          const d = await res.json().catch(() => ({}));
-          setError(d.error || 'Could not load the walkthroughs');
-          return;
-        }
-        const d = await res.json();
-        setSteps(d.steps ?? []);
-        setRuns(d.runs ?? []);
+    // Avec zéro quorum ce panneau EST le contrôle qualité : un 403/500 qui se
+    // lit "No walkthrough yet" est la seule mauvaise réponse possible à donner
+    // à un manager qui inspecte le travail des validateurs.
+    managedRuns(challengeId)
+      .then(d => {
+        setSteps(d.steps);
+        setRuns(d.runs);
       })
-      .catch(() => setError('Network error'))
+      .catch(e => setError(e instanceof Error ? e.message : 'Could not load the walkthroughs'))
       .finally(() => setLoading(false));
   }, [open, challengeId]);
 

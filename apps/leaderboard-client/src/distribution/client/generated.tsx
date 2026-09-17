@@ -6,6 +6,9 @@ import type { HeroStat } from '@/components/challenges/HeroStats';
 import type { ChallengeRewards, FlowUiSlots, RulesChallenge, SlotChallenge } from '@/lib/flowSlots';
 import { GeneratedLane } from '@/components/generated/GeneratedLane';
 import { GeneratedOverview } from '@/components/generated/GeneratedOverview';
+import { GeneratedMine, GeneratedResources } from '@/components/generated/GeneratedResources';
+import { GeneratedWorkspace } from '@/components/generated/GeneratedWorkspace';
+import { ContributorTaskBoard } from '@/components/contributor/ContributorTaskBoard';
 import { FlowArrow, FlowBox, SectionLabel } from '@/components/challenges/rules/RuleFlow';
 import { fgAt, humanize } from '@/components/generated/format';
 
@@ -107,6 +110,17 @@ function rulesOf(description: DescribedTemplate) {
   };
 }
 
+/** Les lanes d'un participant, puis ce qu'il y a déjà créé, relu après chaque geste. */
+function ContributorLanes({ challenge, challengeId, description, lanes }: { challenge: SlotChallenge; challengeId: string; description: DescribedTemplate; lanes: DescribedTemplate['surface']['lanes'] }) {
+  const [version, setVersion] = useState(0);
+  return (
+    <>
+      <QualifiedLanes challenge={challenge} lanes={lanes} render={(lane) => <GeneratedLane challengeId={challengeId} lane={lane} onRecorded={() => setVersion((current) => current + 1)} />} />
+      <GeneratedMine challengeId={challengeId} resources={description.surface.resources} version={version} />
+    </>
+  );
+}
+
 export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
   const userLanes = description.surface.lanes.filter((lane) => lane.trigger === 'user');
   const adminLanes = description.surface.lanes.filter((lane) => lane.trigger === 'admin');
@@ -117,7 +131,21 @@ export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
     contributorTabs: (ctx) => [
       {
         label: description.descriptor.label,
-        panel: <QualifiedLanes challenge={ctx.challenge} lanes={userLanes} render={(lane) => <GeneratedLane challengeId={ctx.challengeId} lane={lane} />} />,
+        panel: (
+          <div className="space-y-4">
+            {/* Le workspace et le board du porteur (capacités `workspaces` et `board`), avant les lanes qui les lisent. */}
+            {ctx.isMember && description.surface.workspace && (
+              <GeneratedWorkspace
+                challengeId={ctx.challengeId}
+                mode={(description.surface.workspace.param ? configOf(ctx.challenge)[description.surface.workspace.param] : description.surface.workspace.mode) === 'own_repo' ? 'own_repo' : 'provided_repo'}
+                participation={ctx.myParticipation}
+                onSaved={ctx.reloadBoard}
+              />
+            )}
+            {ctx.isMember && description.surface.board && <ContributorTaskBoard challengeId={ctx.challengeId} tasks={ctx.myTasks} onReload={ctx.reloadBoard} />}
+            <ContributorLanes challenge={ctx.challenge} challengeId={ctx.challengeId} description={description} lanes={userLanes} />
+          </div>
+        ),
       },
     ],
     contributorHeroStat: (ctx) => heroStat(description, ctx.rewards, ctx.contributions.length),
@@ -134,6 +162,7 @@ export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
           <div className="space-y-4">
             {adminLanes.map((lane) => <GeneratedLane key={lane.id} challengeId={ctx.challengeId} lane={lane} />)}
             <GeneratedOverview challengeId={ctx.challengeId} resources={description.surface.resources} />
+            <GeneratedResources challengeId={ctx.challengeId} resources={description.surface.resources} />
           </div>
         ),
       },

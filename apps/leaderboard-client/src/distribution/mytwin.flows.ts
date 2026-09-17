@@ -2,7 +2,7 @@ import { createFlowCatalog } from '../../../../packages/registry/flows';
 import { codeFlowDescriptor } from '../../../../content/flows/code/descriptor';
 import { mlFlowDescriptor } from '../../../../content/flows/ml/descriptor';
 import { endpointValidationFlowDescriptor } from '../../../../content/flows/endpoint-validation/descriptor';
-import { journeyValidationFlowDescriptor } from '../../../../content/flows/journey-validation/descriptor';
+import { journeyValidationTemplate } from '../../../../content/templates/journey-validation/descriptor';
 import { dataAnnotationFlowDescriptor } from '../../../../content/templates/data-annotation/descriptor';
 import { endpointCheckFlowDescriptor } from '../../../../content/templates/endpoint-check/descriptor';
 
@@ -20,7 +20,7 @@ export const flowCatalog = createFlowCatalog(
     codeFlowDescriptor,
     mlFlowDescriptor,
     endpointValidationFlowDescriptor,
-    journeyValidationFlowDescriptor,
+    journeyValidationTemplate.descriptor,
     dataAnnotationFlowDescriptor,
     endpointCheckFlowDescriptor,
   ],

@@ -55,7 +55,7 @@ interface Segments {
   gapped: boolean;
 }
 
-const ENGINE_FIELD_NAMES =["author", "open", "closed", "verdict", "created_at"];
+const ENGINE_FIELD_NAMES = ["id", "author", "open", "closed", "verdict", "created_at"];
 
 export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   const issues: TemplateIssue[] = [];
@@ -72,6 +72,18 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   };
   const gap = (feature: string, path: TemplatePath, message: string, node?: string) => {
     gaps.push({ feature, path, message, node });
+  };
+
+  // ── Workspace ───────────────────────────────────────────────────────────
+  const checkWorkspace = (scope: Scope) => {
+    if (!shell.workspace) return;
+    const { type } = expr(shell.workspace.mode, scope, ["workspace", "mode"]);
+    const modes = type.kind === "enum" && type.values ? type.values : null;
+    if (modes && modes.some((mode) => mode !== "provided_repo" && mode !== "own_repo")) {
+      report("type", ["workspace", "mode"], `a workspace mode is provided_repo or own_repo, got ${showType(type)}`);
+    } else if (!(type.kind === "enum" || type.kind === "string" || type.kind === "dyn")) {
+      report("type", ["workspace", "mode"], `a workspace mode is provided_repo or own_repo, got ${showType(type)}`);
+    }
   };
 
   // ── Header ──────────────────────────────────────────────────────────────
@@ -179,6 +191,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         return T.resource(node.resource);
       case "list":
         return T.list(resolveType(node.of, path, paramsScope));
+      case "optional":
+        return T.optional(resolveType(node.of, path, paramsScope));
       case "record": {
         const fields: Record<string, Type> = {};
         for (const [key, value] of Object.entries(node.fields)) fields[key] = resolveType(value, path, paramsScope);
@@ -238,6 +252,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     const verdicts = resource.closure?.verdict;
     resourceFieldTypes.set(name, {
       ...fields,
+      id: T.string,
       author: T.user,
       open: T.bool,
       closed: T.bool,
@@ -249,12 +264,56 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   const baseBindings: Record<string, Type> = {
     params: T.record(paramTypes),
     counters: T.record(counterTypes),
-    challenge: T.record({ state: T.enum(["draft", "open", "closed"]) }),
-    participation: T.record({ user: T.user }),
+    challenge: T.record({ state: T.enum(["draft", "open", "closed"]), title: T.string }),
+    // Le porteur, le groupe et le workspace de l'appelant (capacités `groups` et `workspaces`) ; en solo, le porteur est l'appelant.
+    participation: T.record({
+      user: T.user,
+      holder: T.user,
+      group: T.record({ size: T.int, multiplier: T.number, members: T.list(T.user) }),
+      workspace: T.record({ provider: T.string, url: T.string, ref: T.string, status: T.string, ready: T.bool }),
+      // Le rôle de plateforme de l'appelant (`contributor`, `admin`…), et, par paramètre `role`, s'il détient cette qualification.
+      role: T.string,
+      qualified: T.record(Object.fromEntries(Object.entries(paramTypes).filter(([, type]) => type.kind === "role").map(([name]) => [name, T.bool]))),
+    }),
   };
+  if (shell.presentation?.board) baseBindings.board = T.record({ total: T.int, done: T.int });
   for (const name of resourceNames) baseBindings[name] = T.list(T.resource(name));
   for (const name of brokenResources) baseBindings[name] = T.dyn;
   const base = Scope.root(baseBindings);
+  checkWorkspace(base);
+
+  // ── Soumissions ─────────────────────────────────────────────────────────
+  /** Les rôles de dépôt que le core connaît (`challenge_repos.role`). */
+  const SUBMISSION_ROLES = ["dataset", "model", "model_code", "api"];
+  const author = T.record({ author: T.user, contribution: T.string, weight: T.number });
+  const submissionType = shell.submissions
+    ? T.record({
+        step: T.string,
+        url: T.url,
+        repo: T.string,
+        contribution: T.string,
+        lineage: T.record({
+          artifacts: T.record(Object.fromEntries(Object.values(shell.submissions.steps).filter((step) => step.artifact).map((step) => [step.contribution, author]))),
+          selection: T.list(author),
+        }),
+      })
+    : null;
+  if (shell.submissions) {
+    const steps = shell.submissions.steps;
+    for (const [role, step] of Object.entries(steps)) {
+      const at = ["submissions", "steps", role];
+      if (!SUBMISSION_ROLES.includes(role)) report("reference", at, `a submission step is a repo role: ${SUBMISSION_ROLES.join(", ")}`);
+      if (step.open !== undefined) {
+        const { type } = expr(step.open, base, [...at, "open"]);
+        expectType(type, isBool, "a step's open condition must be bool", [...at, "open"]);
+      }
+    }
+    if (shell.submissions.selection !== undefined && !steps[shell.submissions.selection]) {
+      report("reference", ["submissions", "selection"], `selection names no step '${shell.submissions.selection}'`);
+    }
+    if (shell.workspace) report("shape", ["submissions"], "a template declares workspace or submissions, not both: both serve PATCH workspace");
+  }
+  const submissionLanes = new Map<string, string>();
 
   /** Les règles de visibilité : `author`, `admin`, `claimant`, `everyone`, `role(params.x)`. */
   const checkVisibility = (entries: readonly string[] | undefined, path: TemplatePath) => {
@@ -268,6 +327,12 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
       report("reference", [...path, index], `unknown visibility '${entry}'`);
     }
+  };
+
+  /** `trim` rogne une chaîne, `public` garde une URL : chacun sur son type. */
+  const checkFieldOptions = (field: FieldDecl, type: Type, path: TemplatePath, node?: string) => {
+    if (field.trim && type.kind !== "string" && type.kind !== "dyn") report("shape", [...path, "trim"], "trim applies to a string field", { node });
+    if (field.public && type.kind !== "url" && type.kind !== "dyn") report("shape", [...path, "public"], "public applies to a url field", { node });
   };
 
   const collectFieldTypes = (fields: Record<string, FieldDecl>, basePath: TemplatePath, scope: Scope, node?: string) => {
@@ -296,6 +361,7 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type: checkType } = expr(field.check, scope.with({ value: type }), [...path, "check"], node);
         expectType(checkType, isBool, "a field check must be bool", [...path, "check"], node);
       }
+      checkFieldOptions(field, type, path, node);
     }
     return types;
   };
@@ -311,6 +377,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(field.check, Scope.root({ params: T.record(paramTypes), value: resourceFieldTypes.get(name)![key] }), at);
         expectType(type, isBool, "a field check must be bool", at);
       }
+      if (field.public) report("shape", [...path, "fields", key, "public"], "public applies to a collected url field, checked when it is sent");
+      if (field.trim) report("shape", [...path, "fields", key, "trim"], "trim applies to a collected field");
       for (const misplaced of ["where", "when", "from"] as const) {
         if (field[misplaced] !== undefined && !(misplaced === "from" && field.type === "link")) {
           report("shape", [...path, "fields", key, misplaced], `${misplaced} applies to a collected field, not to a resource field`);
@@ -350,6 +418,14 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(claim.where, base.with({ self: T.resource(name) }), [...claimPath, "where"]);
         expectType(type, isBool, "a claim eligibility rule must be bool", [...claimPath, "where"]);
         gap("claim eligibility on a resource type", [...claimPath, "where"], "the resources capability filters draws by class only");
+      }
+    }
+    if (resource.ordered_by !== undefined) {
+      const orderType = resourceFieldTypes.get(name)![resource.ordered_by];
+      if (!orderType || ENGINE_FIELD_NAMES.includes(resource.ordered_by)) {
+        report("reference", [...path, "ordered_by"], `ordered_by '${resource.ordered_by}': no such field`);
+      } else if (orderType.kind !== "int" && orderType.kind !== "dyn") {
+        report("type", [...path, "ordered_by"], `ordered_by names an int field, got ${showType(orderType)}`);
       }
     }
     if (resource.cardinality) {
@@ -532,6 +608,19 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     // Les nœuds écartés de la lane : leurs lectures valent `dyn`.
     for (const id of lane.broken) bindings[id] = T.dyn;
 
+    if (entry.trigger === "submission") {
+      if (!submissionType) report("reference", entryPath, "a submission lane needs a submissions declaration");
+      else bindings.submission = submissionType;
+      if (!entry.step || !shell.submissions?.steps[entry.step]) {
+        report("reference", [...entryPath, "step"], `a submission lane names a declared step${entry.step ? `, not '${entry.step}'` : ""}`);
+      } else if (submissionLanes.has(entry.step)) {
+        report("shape", [...entryPath, "step"], `step '${entry.step}' is already played by lane '${submissionLanes.get(entry.step)}'`);
+      } else {
+        submissionLanes.set(entry.step, lane.id);
+      }
+    } else if (entry.step !== undefined) {
+      report("shape", [...entryPath, "step"], "step belongs to a submission lane");
+    }
     if ((entry.trigger === "user") !== Boolean(entry.access)) {
       report("shape", entryPath, entry.trigger === "user" ? "a user lane declares its access" : `a ${entry.trigger} lane has no access`);
     }
@@ -586,9 +675,12 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         else bindings[access.resource] = T.resource(access.resource);
       }
       if (access.group !== undefined) {
-        expr(access.group, base, [...accessPath, "group"]);
-        bindings.group = T.record({ members: T.list(T.user) });
-        gap("group participation", [...accessPath, "group"], "group multipliers are not compiled in v1");
+        bindings.group = T.record({ members: T.list(T.user), size: T.int, multiplier: T.number });
+        // `group: true` : la politique de groupe de la plateforme (3 membres, bonus 1 / 1.4 / 1.8), compilée.
+        if (access.group !== true) {
+          expr(access.group, base, [...accessPath, "group"]);
+          gap("group participation", [...accessPath, "group"], "a custom group policy is not compiled in v1; group: true uses the platform's");
+        }
       }
       if (access.stake) {
         const { type } = expr(access.stake.amount, base, [...accessPath, "stake", "amount"]);
@@ -801,12 +893,13 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     segments: Segments
   ): Type | null {
     const { body, path, id } = node;
-    const operations = ["capability", "create", "transition", "grant", "match_or_create"].filter((key) => body[key as keyof typeof body] !== undefined);
+    const operations = ["capability", "create", "transition", "grant", "match_or_create", "update", "delete"].filter((key) => body[key as keyof typeof body] !== undefined);
     const args = Object.keys(body).filter((key) => !ACT_KEYS.has(key));
     let output: Record<string, Type> = {};
 
     if (operations.length > 1) report("shape", path, `an act does one thing, got ${operations.join(" and ")}`, { node: id });
-    if (operations.length === 0 && !body.claim) report("shape", path, "an act needs capability, create, claim, transition, grant or match_or_create", { node: id });
+    if (operations.length === 0 && !body.claim) report("shape", path, "an act needs capability, create, claim, transition, grant, match_or_create, update or delete", { node: id });
+    if (body.upsert && body.create === undefined) report("shape", [...path, "upsert"], "upsert applies to a create", { node: id });
     if (args.length > 0 && !body.capability) report("format", [...path, args[0]], `unknown act key '${args[0]}'`, { node: id });
 
     if (body.claim) {
@@ -899,10 +992,70 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         const { type } = expr(body.many.from_file, scope, [...path, "many", "from_file"], id);
         expectType(type, (t) => t.kind === "file" || t.kind === "dyn", "a batch is read from a file", [...path, "many", "from_file"], id);
       }
+      if (body.upsert) {
+        if (body.many) report("shape", [...path, "upsert"], "an upsert creates one instance, not a batch", { node: id });
+        body.upsert.by.forEach((key, i) => {
+          if (key !== "author" && (!fields[key] || ENGINE_FIELD_NAMES.includes(key))) {
+            report("reference", [...path, "upsert", "by", i], `${resource} has no field '${key}'`, { node: id });
+          }
+        });
+      }
       if (shell.resources[resource].match_or_create?.by === "human") {
         report("shape", [...path, "create"], `${resource} is matched by a human decision; use match_or_create`, { node: id });
       }
       return body.many ? T.list(T.resource(resource)) : T.resource(resource);
+    }
+
+    if (body.update) {
+      const at = [...path, "update"];
+      const { type } = expr(body.update.resource, scope, [...at, "resource"], id);
+      if (type.kind !== "resource") {
+        if (type.kind !== "dyn") report("type", [...at, "resource"], `an update takes a resource, got ${showType(type)}`, { node: id });
+        return T.record(output);
+      }
+      const fields = resourceFieldTypes.get(type.name) ?? {};
+      if (body.update.from === undefined && !body.update.set) report("shape", at, "an update writes from a gesture or set", { node: id });
+      if (body.update.from !== undefined) {
+        const gesture = ctx.index.get(body.update.from)?.[0]?.node;
+        const source = scope.lookup(body.update.from);
+        if (!gesture || gesture.family !== "collect") {
+          report("reference", [...at, "from"], `update from '${body.update.from}': not a collect of this lane`, { node: id });
+        } else if (source?.kind === "record") {
+          for (const [key, value] of Object.entries(source.fields)) {
+            if (fields[key] && !ENGINE_FIELD_NAMES.includes(key) && !assignable(fields[key], value)) {
+              report("type", [...at, "from"], `${type.name}.${key} expects ${showType(fields[key])}, got ${showType(value)}`, { node: id });
+            }
+          }
+        }
+      }
+      for (const [key, value] of Object.entries(body.update.set ?? {})) {
+        const where = [...at, "set", key];
+        if (!fields[key] || ENGINE_FIELD_NAMES.includes(key)) {
+          report("reference", where, `${type.name} has no field '${key}'`, { node: id });
+          continue;
+        }
+        const { type: valueType } = expr(value, scope, where, id);
+        if (!assignable(fields[key], valueType)) report("type", where, `${type.name}.${key} expects ${showType(fields[key])}, got ${showType(valueType)}`, { node: id });
+      }
+      return T.record(output);
+    }
+
+    if (body.delete !== undefined) {
+      const guarded = typeof body.delete === "object" ? body.delete : null;
+      const at = guarded ? [...path, "delete", "resource"] : [...path, "delete"];
+      const { type } = expr(guarded ? guarded.resource : (body.delete as ExprSource), scope, at, id);
+      if (type.kind !== "resource" && type.kind !== "dyn") report("type", at, `a delete takes a resource, got ${showType(type)}`, { node: id });
+      if (guarded?.without_inputs) {
+        const aggregate = model.aggregates.find((candidate) => candidate.decl.id === guarded.without_inputs!.aggregate);
+        if (!aggregate) report("reference", [...path, "delete", "without_inputs", "aggregate"], `unknown aggregate '${guarded.without_inputs.aggregate}'`, { node: id });
+        else if (type.kind === "resource" && aggregate.decl.over !== type.name) {
+          report("type", [...path, "delete", "without_inputs", "aggregate"], `${aggregate.decl.id} resolves ${aggregate.decl.over}, not ${type.name}`, { node: id });
+        }
+      }
+      if (guarded?.unclaimed && type.kind === "resource" && !shell.resources[type.name]?.claim) {
+        report("claim", [...path, "delete", "unclaimed"], `${type.name} declares no claim mode`, { node: id });
+      }
+      return T.record(output);
     }
 
     if (body.transition) {
@@ -950,14 +1103,23 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       checkClaimUse(body.claim, scope, [...path, "claim"], id);
     }
 
+    if (body.snapshot !== undefined && body.kind !== "ai_grid") report("shape", [...path, "snapshot"], "snapshot applies to an ai_grid assessment", { node: id });
+    if (body.background) checkBackground(node, ctx);
+    else if (body.kind === "ai_grid" && (ctx.lane.entry.trigger === "user" || ctx.lane.entry.trigger === "admin")) {
+      advise("shape", path, "an ai_grid evaluation takes a minute or more inside the request; background: true answers 202 and resumes the lane", id);
+    }
+
     switch (body.kind) {
       case "ai_grid":
       case "self": {
         if (body.grid === undefined) report("shape", path, `a ${body.kind} assessment names its grid`, { node: id });
         else checkGrid(body.grid, scope, [...path, "grid"], id);
         for (const [i, input] of (body.input ?? []).entries()) expr(input, scope, [...path, "input", i], id);
-        if (body.kind === "ai_grid") output = T.record({ score: T.number });
-        else {
+        if (body.kind === "ai_grid") {
+          // L'évaluation note un artefact : une URL GitHub ou Kaggle parmi les entrées.
+          if (!body.input?.length) report("shape", path, "an ai_grid assessment takes its artifact URL in input", { node: id });
+          output = T.record({ score: T.number });
+        } else {
           if (body.gating !== false) report("shape", path, "a self assessment is formative: gating: false", { node: id });
           if (body.emit) report("shape", [...path, "emit"], "a self assessment emits nothing", { node: id });
           gap("self assessment", path, "formative self-evaluation is not compiled in v1", id);
@@ -1021,7 +1183,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       return;
     }
     const { type } = expr(grid, scope, path, node);
-    expectType(type, (t) => t.kind === "grid" || t.kind === "dyn", "a grid reference must be of type grid_ref", path, node);
+    // Un slug écrit en littéral (`'"code"'`) vaut une référence : la grille publiée de ce slug.
+    expectType(type, (t) => t.kind === "grid" || t.kind === "string" || t.kind === "dyn", "a grid reference must be of type grid_ref", path, node);
   }
 
   function checkTransition(body: TransitionBody, scope: Scope, path: TemplatePath, closer: "aggregate" | "transition" | "admin_act", node?: string) {
@@ -1076,6 +1239,39 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         gap("counters written by an aggregate", effect.path, "slash accounting is out of v1");
         return;
       }
+    }
+  }
+
+  /**
+   * Une évaluation en arrière-plan reprend la lane au nœud suivant, depuis ce
+   * que le run a gardé : ni claim à tenir, ni geste après elle, et une place au
+   * premier niveau de la lane pour que la reprise sache où continuer.
+   */
+  function checkBackground(node: Extract<NodeModel, { family: "assess" }>, ctx: NodeContext) {
+    const { body, path, id } = node;
+    const at = [...path, "background"];
+    if (body.kind !== "ai_grid") return report("shape", at, "background applies to an ai_grid assessment", { node: id });
+    if (ctx.lane.entry.trigger !== "user" && ctx.lane.entry.trigger !== "admin") {
+      return report("shape", at, "a background evaluation answers a gesture: its lane is triggered by a user or an admin", { node: id });
+    }
+    const index = ctx.lane.nodes.indexOf(node);
+    if (index < 0) return report("shape", at, "a background evaluation sits at the top level of its lane, not in a branch", { node: id });
+    const claims = (nodes: readonly NodeModel[]): boolean =>
+      nodes.some((candidate) =>
+        (candidate.family === "act" && Boolean(candidate.body.claim)) ||
+        (candidate.family === "assess" && Boolean(candidate.body.claim)) ||
+        (candidate.family === "gate" && (candidate.branches ?? []).some((branch) => claims(branch.nodes)))
+      );
+    if (claims(ctx.lane.nodes)) report("shape", at, "a background evaluation does not hold a claim across its run", { node: id });
+    const gestures = (nodes: readonly NodeModel[]): boolean =>
+      nodes.some((candidate) =>
+        candidate.family === "collect" ||
+        (candidate.family === "assess" && candidate.body.kind === "human" && Boolean(candidate.body.fields)) ||
+        (candidate.family === "gate" && (candidate.branches ?? []).some((branch) => gestures(branch.nodes)))
+      );
+    if (gestures(ctx.lane.nodes.slice(index + 1))) report("shape", at, "no gesture follows a background evaluation: the lane resumes without the participant", { node: id });
+    if (ctx.lane.nodes.slice(index + 1).some((candidate) => candidate.family === "assess" && candidate.body.background)) {
+      report("shape", at, "one background evaluation per lane", { node: id });
     }
   }
 
@@ -1170,6 +1366,35 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       }
     }
     if (body.clamp === "pool" && body.pool === undefined) report("economy", [...path, "clamp"], "clamp: pool needs a pool", { node });
+    if (body.basis === "delta") {
+      if (typeof body.amount === "object") report("economy", [...path, "basis"], "a delta basis applies to an amount expression", { node });
+      if (negative) report("economy", [...path, "basis"], "a delta basis never pays back: its amount is not negative", { node });
+      if (where !== "lane") report("economy", [...path, "basis"], "a delta basis applies to a lane reward", { node });
+    }
+    for (const [key, source] of Object.entries(body.meta ?? {})) expr(source, scope, [...path, "meta", key], node);
+    if (body.multiplier !== undefined) {
+      const { type } = expr(body.multiplier, scope, [...path, "multiplier"], node);
+      expectType(type, isNumeric, "a multiplier must be a number", [...path, "multiplier"], node);
+      if (body.basis === "delta") report("economy", [...path, "multiplier"], "a delta basis multiplies in its amount; multiplier applies to a plain payment", { node });
+    }
+    if (body.transfers) {
+      const at = [...path, "transfers"];
+      if (where !== "lane") report("economy", at, "reuse transfers follow a lane payment", { node });
+      if (negative) report("economy", at, "a payment back transfers nothing", { node });
+      if (body.transfers.floor !== undefined) {
+        const { type } = expr(body.transfers.floor, scope, [...at, "floor"], node);
+        expectType(type, isNumeric, "a transfer floor is a share of the payment", [...at, "floor"], node);
+      }
+      body.transfers.to.forEach((target, i) => {
+        const { type } = expr(target.from, scope, [...at, "to", i, "from"], node);
+        const item = type.kind === "list" ? type.of : null;
+        if (type.kind !== "dyn" && !(item && (item.kind === "dyn" || (item.kind === "record" && item.fields.author)))) {
+          report("type", [...at, "to", i, "from"], `transfers go to a list of {author, contribution, weight?}, got ${showType(type)}`, { node });
+        }
+        const { type: share } = expr(target.share, scope, [...at, "to", i, "share"], node);
+        expectType(share, isNumeric, "a transfer share must be a number", [...at, "to", i, "share"], node);
+      });
+    }
     if (body.order === "commit_time" && where !== "aggregate") report("economy", [...path, "order"], "earliest-first ordering applies to an aggregate's payment", { node });
     if (negative && !body.rule_key) report("economy", [...path, "amount"], "a negative reward (clawback) declares its rule_key", { node });
     if (!negative && body.pool === undefined && !body.rule_key) {

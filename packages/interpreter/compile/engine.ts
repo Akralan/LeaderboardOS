@@ -1,11 +1,12 @@
 import type { Challenge, RewardEntryDraft } from "../../database-service/domain/entities.js";
 import { ClaimNotConsumableError, type ConsumedClaim } from "../../capabilities/resources.js";
 import { readsRoot, type Expr } from "../expr/ast.js";
-import { evaluate, type Value } from "../expr/evaluator.js";
+import { LEDGER_FUNCTIONS, evaluate, ledgerKey, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
 import type { AggregateDecl, ClaimUse, ExprSource, RewardBody, TransitionBody } from "../format/schema.js";
 import type { EffectModel, NodeModel, TemplateModel } from "../validate/format.js";
-import { ObserverRefusal, type TemplateRuntime } from "./runtime.js";
+import { ObserverRefusal, type EvaluationDetail, type ParticipationContext, type TemplateRuntime } from "./runtime.js";
+import { splitShares } from "../../database-service/domain/share.js";
 import { parseCsv } from "./csv.js";
 import { zodOf } from "./params.js";
 import { deserializeValue, resourceValue, serializeValue, type ResourceTypes } from "./values.js";
@@ -27,9 +28,33 @@ import { deserializeValue, resourceValue, serializeValue, type ResourceTypes } f
  */
 
 export class Refusal extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    /** La raison lisible par une interface (`tasks_not_done`…). */
+    readonly reason?: string
+  ) {
     super(message);
   }
+}
+
+/**
+ * Une évaluation en arrière-plan : le geste s'arrête là. Les nœuds déjà passés
+ * ont tout vérifié ; l'appelant prend l'évaluation, planifie la suite et répond 202.
+ */
+export class Deferred extends Error {
+  constructor(
+    readonly node: Extract<NodeModel, { family: "assess" }>,
+    readonly grid: string,
+    readonly inputs: Value[]
+  ) {
+    super(`[interpreter] ${node.id} continues in the background`);
+  }
+}
+
+/** Le score d'une liaison d'évaluation, avec son détail s'il est connu. */
+export function scoreOf(result: number | { score: number; evaluation: unknown }): { score: number; evaluation: unknown } {
+  return typeof result === "number" ? { score: result, evaluation: null } : result;
 }
 
 export interface CompiledTemplate {
@@ -51,6 +76,18 @@ export interface CompiledTemplate {
   contribution: { type: string; title: string };
   /** Les aggregates qui reçoivent des entrées d'un claim posé sur une autre ressource (un case, émis vers un target). */
   crossEmits: ReadonlySet<string>;
+  /** Le template lit la participation (groupe, workspace, board) : elle se charge avant chaque exécution. */
+  participationContext: boolean;
+  /** Les lanes jouées en groupe (`access.group: true`) : le porteur agit pour tous. */
+  groupLanes: ReadonlySet<string>;
+  /** La description de la contribution, une expression sur `challenge`. */
+  contributionDescription: ExprSource | null;
+  /** La clé de ledger de chaque transfert déclaré. */
+  transferKeys: ReadonlyMap<object, string>;
+  /** Les paramètres de type `role` : ce que `participation.qualified` lit. */
+  roleParams: readonly string[];
+  /** Une lane lit `participation.qualified` : les qualifications se vérifient avant chaque geste. */
+  readsQualified: boolean;
 }
 
 /** Le segment qui livre le travail d'un claim : l'Act qui l'a tiré, les gestes qui l'ont rempli, les nœuds à rejouer. */
@@ -87,6 +124,21 @@ export interface RunState {
   awarded: number;
   /** Ce que la réponse peut dire du claim tiré. */
   drawn: { claimId: string; resourceId: string; expiresAt: Date | null } | null;
+  /** Qui a fait le geste ; `userId` est le porteur quand la lane se joue en groupe. */
+  caller: string | null;
+  /** Le groupe du porteur, dans une lane jouée en groupe. */
+  group: ParticipationContext | null;
+  /** Par geste, les champs que la requête portait vraiment : ce qu'un `update from` réécrit. */
+  sent: Record<string, readonly string[]>;
+  /** Les instances qu'un `create` à `upsert` a créées ou retrouvées, par Act : ce que la réponse rend. */
+  created: Record<string, string>;
+  /**
+   * Une lane jouée pour une soumission : la contribution de l'étape (ses lignes
+   * de ledger, sa note) et ce qu'un run d'évaluation rejoue.
+   */
+  submission: { contributionId: string; origin: { handler: string; payload: Record<string, unknown> } } | null;
+  /** Le détail de la dernière évaluation par grille, à écrire sur la contribution. */
+  evaluation: EvaluationDetail | null;
 }
 
 export function newState(challenge: Challenge, userId: string | null, params: Record<string, Value>): RunState {
@@ -94,11 +146,17 @@ export function newState(challenge: Challenge, userId: string | null, params: Re
   return {
     challenge,
     userId,
-    bindings: { params, challenge: { state }, participation: { user: userId } },
+    bindings: { params, challenge: { state, title: challenge.title }, participation: { user: userId } },
     claim: null,
     result: {},
     awarded: 0,
     drawn: null,
+    caller: userId,
+    group: null,
+    sent: {},
+    created: {},
+    submission: null,
+    evaluation: null,
   };
 }
 
@@ -135,11 +193,53 @@ export class Engine {
     }
     for (const name of Object.keys(this.shell.resources)) {
       if (!(name in bindings) && readsRoot(ast, name)) {
-        const instances = await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type: name });
+        const instances = await this.instancesOf(state.challenge.uuid, name);
         bindings[name] = await Promise.all(instances.map((instance) => resourceValue(instance, this.t.runtime, this.t.resourceTypes)));
       }
     }
-    return evaluate(ast, bindings, { now: this.t.runtime.now() });
+    return evaluate(ast, bindings, { now: this.t.runtime.now(), ledger: await this.ledgerReads(ast, state) });
+  }
+
+  /**
+   * `best`, `best_of_others`, `best_of_mine` : le plus grand `meta.<champ>` d'une
+   * clé de ledger sur le challenge, pour tous, pour les autres que le porteur,
+   * pour lui seul — lu avant l'évaluation, comme le flow ML lit la meilleure métrique.
+   */
+  private async ledgerReads(ast: Expr, state: RunState): Promise<Record<string, number | null> | undefined> {
+    const calls: { callee: string; rule: string; field: string }[] = [];
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== "object") return;
+      const candidate = node as { k?: string; callee?: string; args?: { k: string; value?: unknown }[] };
+      if (candidate.k === "call" && (LEDGER_FUNCTIONS as readonly string[]).includes(candidate.callee ?? "")) {
+        const [rule, field] = candidate.args ?? [];
+        if (typeof rule?.value === "string" && typeof field?.value === "string") calls.push({ callee: candidate.callee!, rule: rule.value, field: field.value });
+      }
+      for (const value of Object.values(node)) Array.isArray(value) ? value.forEach(visit) : visit(value);
+    };
+    visit(ast);
+    if (calls.length === 0) return undefined;
+    const reads: Record<string, number | null> = {};
+    for (const { callee, rule, field } of calls) {
+      const key = ledgerKey(callee, rule, field);
+      if (key in reads) continue;
+      const holder = state.userId ?? undefined;
+      reads[key] = await this.t.runtime.ledger.max(state.challenge.uuid, {
+        ruleKey: rule,
+        field,
+        ...(callee === "best_of_others" && holder ? { excludeUserId: holder } : {}),
+        ...(callee === "best_of_mine" && holder ? { onlyUserId: holder } : {}),
+      });
+    }
+    return reads;
+  }
+
+  /** Les instances d'un type, dans leur ordre : `ordered_by` quand le type en déclare un, la création sinon. */
+  async instancesOf(challengeId: string, type: string) {
+    const instances = await this.t.runtime.resources.list({ challengeId, type });
+    const field = this.shell.resources[type]?.ordered_by;
+    if (!field) return instances;
+    const position = (instance: { payload: Record<string, unknown> }) => (typeof instance.payload[field] === "number" ? (instance.payload[field] as number) : Number.MAX_SAFE_INTEGER);
+    return [...instances].sort((a, b) => position(a) - position(b) || a.created_at.getTime() - b.created_at.getTime());
   }
 
   private async number(source: ExprSource, state: RunState, extra?: Record<string, Value>): Promise<number> {
@@ -218,6 +318,54 @@ export class Engine {
     return replayed;
   }
 
+  // ── Participation ───────────────────────────────────────────────────────
+
+  /**
+   * La participation de l'appelant (capacités `groups`, `workspaces`, `board`) :
+   * son porteur, son groupe, le workspace et le board du porteur. Dans une lane
+   * jouée en groupe, le porteur agit pour tous — contribution, ledger et
+   * évaluation sont les siens, comme au challenge code.
+   */
+  async bindParticipation(state: RunState, laneId: string): Promise<void> {
+    if (!this.t.participationContext || !state.caller) return;
+    const { runtime } = this.t;
+    const context = await runtime.participations.context(state.challenge.uuid, state.caller);
+    const group = { size: context.members.length, multiplier: context.multiplier, members: context.members };
+    state.bindings.participation = {
+      user: state.caller,
+      holder: context.holder,
+      group,
+      workspace: { ...(context.workspace ?? { provider: "", url: "", ref: "", status: "", ready: false }) } as Record<string, Value>,
+    };
+    if (this.t.groupLanes.has(laneId)) {
+      state.userId = context.holder;
+      state.group = context;
+      state.bindings.group = group;
+    }
+    if (this.shell.presentation?.board) state.bindings.board = await runtime.participations.board(state.challenge.uuid, context.holder);
+  }
+
+  /** La contribution qui porte le travail et le ledger d'un participant ; créée au premier besoin. */
+  async contributionFor(state: RunState, userId: string): Promise<string> {
+    // Une soumission : la contribution de son étape, écrite par la capacité `submissions`.
+    if (state.submission && userId === state.userId) return state.submission.contributionId;
+    const description = this.t.contributionDescription === null ? null : String(await this.eval(this.t.contributionDescription, state));
+    return this.t.runtime.ledger.contribution(state.challenge, userId, { ...this.t.contribution, description });
+  }
+
+  /**
+   * Les parts d'un groupe : ce que l'exécution a versé au porteur, réparti entre
+   * les membres présents (`splitShares`, le reste au porteur), cumulé sur la
+   * contribution. Rien pour un solo.
+   */
+  async settleShares(state: RunState): Promise<void> {
+    const group = state.group;
+    if (!group || group.members.length <= 1 || state.awarded <= 0 || !state.userId) return;
+    const contributionId = await this.contributionFor(state, state.userId);
+    const shares = splitShares(state.awarded, group.members, group.holder);
+    await this.t.runtime.participations.addShares(contributionId, [...shares].map(([userId, points]) => ({ userId, points })));
+  }
+
   // ── Nœuds ───────────────────────────────────────────────────────────────
 
   async run(nodes: readonly NodeModel[], state: RunState): Promise<void> {
@@ -239,7 +387,9 @@ export class Engine {
       case "gate":
         if (node.body.all) {
           for (const condition of node.body.all) {
-            if ((await this.eval(condition, state)) !== true) throw new Refusal(node.body.refuse ?? 422, `Refused by ${node.id}`);
+            if ((await this.eval(condition, state)) !== true) {
+              throw new Refusal(node.body.refuse ?? 422, node.body.message ?? `Refused by ${node.id}`, node.body.reason);
+            }
           }
           return;
         }
@@ -296,7 +446,29 @@ export class Engine {
     }
 
     if (body.create !== undefined) {
-      await this.create(body.create, body, state);
+      await this.create(node.id, body.create, body, state);
+      return;
+    }
+
+    if (body.update) {
+      await this.update(body.update, state);
+      return;
+    }
+
+    if (body.delete !== undefined) {
+      const guarded = typeof body.delete === "object" ? body.delete : null;
+      const instance = await this.designated(guarded ? guarded.resource : (body.delete as ExprSource), state);
+      const refuse = (message: string, count: number) => new Refusal(409, message.replace(/\{count\}/g, String(count)));
+      if (guarded?.unclaimed) {
+        const claims = await this.t.runtime.resources.claimCount(instance.uuid);
+        if (claims > 0) throw refuse(guarded.unclaimed, claims);
+      }
+      if (guarded?.without_inputs) {
+        const inputs = await this.inputs(guarded.without_inputs.aggregate, instance.uuid, state.bindings.params as Record<string, Value>);
+        if (inputs.length > 0) throw refuse(guarded.without_inputs.message, inputs.length);
+      }
+      if (!(await this.t.runtime.resources.remove(instance.uuid))) throw new Refusal(404, `This ${instance.resource_type} no longer exists`);
+      if (this.shell.resources[instance.resource_type]?.ordered_by) await this.renumber(state.challenge.uuid, instance.resource_type, null);
       return;
     }
 
@@ -462,7 +634,86 @@ export class Engine {
     state.claim = { actId, claimId, resourceId, consumed: false };
   }
 
-  private async create(type: string, body: Extract<NodeModel, { family: "act" }>["body"], state: RunState): Promise<void> {
+  /** L'instance qu'une expression désigne, sur ce challenge ; 404 sinon. */
+  private async designated(source: ExprSource, state: RunState) {
+    const target = await this.eval(source, state);
+    const id = target && typeof target === "object" && !Array.isArray(target) ? target.id : null;
+    const instance = typeof id === "string" ? await this.t.runtime.resources.resource(id) : null;
+    if (!instance || instance.challenge_id !== state.challenge.uuid || !this.shell.resources[instance.resource_type]) {
+      throw new Refusal(404, "Resource not found");
+    }
+    return instance;
+  }
+
+  /** Une valeur de champ telle que la charge la garde : une ressource ou une contribution par son id. */
+  private stored(value: Value): unknown {
+    return value && typeof value === "object" && !Array.isArray(value) && "id" in value && !("blob_id" in value) ? (value as { id: unknown }).id : value;
+  }
+
+  /** Les erreurs d'une valeur de champ : requise sauf `optional`, de son type, conforme à son `check`. */
+  private async fieldErrors(type: string, name: string, value: unknown, state: RunState): Promise<string | null> {
+    const field = this.shell.resources[type].fields[name];
+    if (value === undefined || value === null) return field.optional ? null : `${name} is required`;
+    const parsed = zodOf((this.t.resourceTypes.get(type) ?? {})[name]).safeParse(value);
+    if (!parsed.success) return `${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`;
+    if (field.check !== undefined && (await this.checks(field.check, value as Value, state)) !== true) return `${name} fails its check`;
+    return null;
+  }
+
+  /**
+   * `update` : les champs qu'un geste a vraiment portés (`from`) puis `set`,
+   * validés comme à la création. Un champ `ordered_by` réécrit déplace
+   * l'instance à cet index (borné) et renumérote la fratrie.
+   */
+  private async update(body: NonNullable<Extract<NodeModel, { family: "act" }>["body"]["update"]>, state: RunState): Promise<void> {
+    const instance = await this.designated(body.resource, state);
+    const type = instance.resource_type;
+    const decl = this.shell.resources[type];
+    const patch: Record<string, unknown> = {};
+    if (body.from !== undefined) {
+      const gesture = state.bindings[body.from];
+      const values = gesture && typeof gesture === "object" && !Array.isArray(gesture) ? (gesture as Record<string, Value>) : {};
+      for (const name of state.sent[body.from] ?? []) if (name in decl.fields && name in values) patch[name] = this.stored(values[name]);
+    }
+    for (const [name, source] of Object.entries(body.set ?? {})) patch[name] = this.stored(await this.eval(source, state));
+
+    const errors: string[] = [];
+    for (const [name, value] of Object.entries(patch)) {
+      const error = await this.fieldErrors(type, name, value, state);
+      if (error) errors.push(error);
+    }
+    if (errors.length > 0) throw new Refusal(400, errors.join("; "));
+
+    const order = decl.ordered_by;
+    const move = order !== undefined && order in patch ? (patch[order] as number) : null;
+    if (order !== undefined) delete patch[order];
+    if (Object.keys(patch).length > 0 && !(await this.t.runtime.resources.update(instance.uuid, patch))) {
+      throw new Refusal(404, `This ${type} no longer exists`);
+    }
+    if (move !== null) await this.renumber(state.challenge.uuid, type, { id: instance.uuid, to: move });
+  }
+
+  /**
+   * Des positions denses (0..n-1) : l'instance déplacée réinsérée à son index
+   * borné, puis toute la fratrie réécrite là où elle diffère — deux positions
+   * égales laisseraient l'ordre à la date de création.
+   */
+  private async renumber(challengeId: string, type: string, moving: { id: string; to: number } | null): Promise<void> {
+    const field = this.shell.resources[type].ordered_by!;
+    const ordered = await this.instancesOf(challengeId, type);
+    let sequence = ordered;
+    if (moving) {
+      const moved = ordered.find((instance) => instance.uuid === moving.id);
+      const others = ordered.filter((instance) => instance.uuid !== moving.id);
+      const at = Math.max(0, Math.min(moving.to, others.length));
+      sequence = moved ? [...others.slice(0, at), moved, ...others.slice(at)] : others;
+    }
+    for (const [index, instance] of sequence.entries()) {
+      if (instance.payload[field] !== index) await this.t.runtime.resources.update(instance.uuid, { [field]: index });
+    }
+  }
+
+  private async create(actId: string, type: string, body: Extract<NodeModel, { family: "act" }>["body"], state: RunState): Promise<void> {
     const fields = Object.keys(this.shell.resources[type].fields);
     const base: Record<string, unknown> = {};
     for (const source of body.from === undefined ? [] : [body.from].flat()) {
@@ -495,25 +746,22 @@ export class Engine {
       rows.push(base);
     }
 
+    // `ordered_by` : une création s'ajoute à la fin, quelle que soit la position écrite.
+    const order = this.shell.resources[type].ordered_by;
+    if (order !== undefined) {
+      const count = (await this.t.runtime.resources.list({ challengeId: state.challenge.uuid, type })).length;
+      rows.forEach((row, index) => (row[order] = count + index));
+    }
+
     // Tout ou rien : une ligne qui ne tient pas son type ou son `check` refuse le lot entier.
     const errors: string[] = [];
-    const types = this.t.resourceTypes.get(type) ?? {};
     for (const [index, row] of rows.entries()) {
       const where = body.many ? `Row ${index + 1}: ` : "";
-      for (const [name, field] of Object.entries(this.shell.resources[type].fields)) {
-        const value = row[name];
-        if (value === undefined || value === null) {
-          errors.push(`${where}${name} is required`);
-          continue;
-        }
-        const parsed = zodOf(types[name]).safeParse(value);
-        if (!parsed.success) {
-          errors.push(`${where}${name}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-          continue;
-        }
-        if (field.check !== undefined && (await this.checks(field.check, value as Value, state)) !== true) {
-          errors.push(`${where}${name} fails its check`);
-        }
+      for (const name of Object.keys(this.shell.resources[type].fields)) {
+        const error = await this.fieldErrors(type, name, row[name], state);
+        if (error) errors.push(`${where}${error}`);
+        // Un champ optionnel absent se garde à `null` : la forme qu'un flow écrit à la main stocke.
+        else if (row[name] === undefined) row[name] = null;
       }
     }
     if (errors.length > 0) throw new Refusal(400, errors.slice(0, 50).join("; "));
@@ -542,6 +790,16 @@ export class Engine {
 
     // `class` vit dans sa colonne, que le tirage filtre ; jamais dans la charge.
     const items = rows.map(({ class: klass, ...payload }) => ({ payload, class: typeof klass === "string" ? klass : null }));
+    if (body.upsert) {
+      // Une par combinaison, sous verrou : un double clic retrouve l'instance au lieu d'en créer une seconde.
+      const { id } = await this.t.runtime.resources.upsert(state.challenge.uuid, type, items[0], {
+        createdBy: state.userId,
+        by: body.upsert.by,
+        overwrite: body.upsert.overwrite === true,
+      });
+      state.created[actId] = id;
+      return;
+    }
     await this.t.runtime.resources.createMany(state.challenge.uuid, type, items, { createdBy: state.userId });
   }
 
@@ -607,7 +865,28 @@ export class Engine {
       case "ai_grid": {
         const grid = await this.eval(body.grid!, state);
         const inputs = await Promise.all((body.input ?? []).map((input) => this.eval(input, state)));
-        const score = await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs });
+        if (body.background) throw new Deferred(node, String(grid), inputs);
+        let score: number;
+        try {
+          const result = scoreOf(
+            await this.t.runtime.evaluate({
+              challenge: state.challenge,
+              userId: state.userId!,
+              grid: String(grid),
+              inputs,
+              ...(body.snapshot ? { snapshot: body.snapshot } : {}),
+              // Une soumission : le run se rattache à la contribution de l'étape, et se rejoue depuis la soumission.
+              ...(state.submission ? { contributionId: state.submission.contributionId, origin: state.submission.origin } : {}),
+            })
+          );
+          score = result.score;
+          if (result.evaluation) state.evaluation = result.evaluation as EvaluationDetail;
+        } catch (error) {
+          // Dans une soumission, une évaluation qui échoue est une panne : le run passe `failed`, rejouable.
+          if (state.submission) throw error;
+          if (error instanceof ObserverRefusal) throw new Refusal(error.status, error.message);
+          throw error;
+        }
         output = { score };
         break;
       }
@@ -769,8 +1048,14 @@ export class Engine {
     let distributed = await runtime.ledger.distributed(challengeId);
     const drafts: RewardEntryDraft[] = [];
 
+    const written: Record<string, Value> = {};
+    for (const [key, source] of Object.entries(body.meta ?? {})) written[key] = await this.eval(source, state);
+
     for (const { user: userId } of recipients) {
-      const entryMeta = meta;
+      // Une clé versée en différentiel n'a pas de clé naturelle : ce qui la distingue est ce qui est déjà versé.
+      // Une méta déclarée est la forme de la ligne (celle d'un flow repris) ; seule la clé naturelle d'un claim ou d'une ressource s'y ajoute.
+      const natural = Object.fromEntries(Object.entries(meta).filter(([key]) => key === "claim_id" || key === "resource_id" || key === "aggregate"));
+      const entryMeta: Record<string, Value> = body.basis === "delta" ? { ...written } : body.meta ? { ...natural, ...written } : { ...meta, ...written };
       // Rejouer le geste ne paie pas deux fois : même clé, même méta, même personne.
       // Sans clé naturelle (ni claim ni ressource), chaque geste paie.
       const keyed = Boolean(meta.claim_id || meta.resource_id);
@@ -779,18 +1064,92 @@ export class Engine {
       );
       if (duplicate) continue;
 
-      let points = Math.round(await this.number(amount, state));
+      const raw = Math.round(await this.number(amount, state));
+      // Le bonus de groupe multiplie le versé, jamais l'assiette des transferts.
+      const multiplier = body.multiplier === undefined ? null : await this.number(body.multiplier, state);
+      let points = multiplier === null ? raw : Math.round(raw * multiplier);
+      if (body.basis === "delta") {
+        // Le challenge code : seul ce qui dépasse le déjà versé sur cette clé, jamais de reprise.
+        const paid = existing
+          .filter((entry) => entry.rule_key === ruleKey && entry.user_id === userId)
+          .reduce((sum, entry) => sum + entry.points, 0);
+        points = Math.max(0, raw - paid);
+        entryMeta.rawPoints = raw;
+      }
+      const due = points;
       if (body.clamp === "pool" && points > 0) {
         points = Math.min(points, Math.max(0, state.challenge.contribution_points_reward - distributed));
       }
+      if (body.basis === "delta" && points < due) entryMeta.clampedTo = points;
+      if (body.record_clamp && points < due) Object.assign(entryMeta, { rawPoints: due, clampedTo: points });
       if (points === 0) continue;
 
-      const contributionId = await runtime.ledger.contribution(state.challenge, userId, this.t.contribution);
+      const contributionId = await this.contributionFor(state, userId);
       drafts.push({ challenge_id: challengeId, user_id: userId, contribution_id: contributionId, rule_key: ruleKey, points, meta: entryMeta });
       if (body.pool !== undefined) distributed += points;
       if (userId === state.userId) state.awarded += points;
+
+      if (body.transfers && points > 0) {
+        // L'assiette rognée dans la même proportion que le versé : un montant coupé de moitié ne reverse pas une part de points jamais versés.
+        const base = Math.round(raw * (due === 0 ? 0 : points / due));
+        const transfers = await this.transfers(body.transfers, state, { userId, contributionId, ruleKey, points, base });
+        drafts.push(...transfers);
+        if (userId === state.userId) state.awarded += transfers.filter((draft) => draft.user_id === userId).reduce((sum, draft) => sum + draft.points, 0);
+      }
     }
     if (drafts.length > 0) await runtime.ledger.write(drafts);
+  }
+
+  /**
+   * Les crédits de réutilisation d'un montant versé : pour chaque auteur amont,
+   * `round(assiette × weight × share)` prélevé au destinataire et crédité à
+   * l'auteur, hors pool (la paire s'annule). Le destinataire garde au moins
+   * `floor` de ce qui lui a été versé : au-delà, les prélèvements sont réduits
+   * au prorata (arrondis vers le bas). Le calcul de `computeReuseSplits`.
+   */
+  private async transfers(
+    spec: NonNullable<RewardBody["transfers"]>,
+    state: RunState,
+    award: { userId: string; contributionId: string; ruleKey: string; points: number; base: number }
+  ): Promise<RewardEntryDraft[]> {
+    let deductions: { ruleKey: string; author: string; contribution: string | undefined; amount: number }[] = [];
+    for (const target of spec.to) {
+      const items = await this.eval(target.from, state);
+      const share = await this.number(target.share, state);
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const author = typeof item.author === "string" ? item.author : null;
+        const weight = typeof item.weight === "number" ? item.weight : 1;
+        const part = weight * share;
+        // Réutiliser son propre artefact ne prélève rien.
+        if (!author || author === award.userId || !(part > 0)) continue;
+        deductions.push({
+          ruleKey: this.t.transferKeys.get(target)!,
+          author,
+          contribution: typeof item.contribution === "string" ? item.contribution : undefined,
+          amount: Math.round(award.base * part),
+        });
+      }
+    }
+    if (deductions.length === 0) return [];
+
+    const floor = spec.floor === undefined ? 0 : await this.number(spec.floor, state);
+    const maxDeductible = award.points - Math.round(award.points * floor);
+    const total = deductions.reduce((sum, deduction) => sum + deduction.amount, 0);
+    if (total > maxDeductible) {
+      const ratio = total === 0 ? 0 : maxDeductible / total;
+      deductions = deductions.map((deduction) => ({ ...deduction, amount: Math.floor(deduction.amount * ratio) }));
+    }
+
+    const challengeId = state.challenge.uuid;
+    const drafts: RewardEntryDraft[] = [];
+    for (const deduction of deductions) {
+      if (deduction.amount <= 0) continue;
+      const meta = { rawPoints: award.points, sourceRule: award.ruleKey };
+      drafts.push({ challenge_id: challengeId, user_id: award.userId, contribution_id: award.contributionId, rule_key: deduction.ruleKey, points: -deduction.amount, source_user_id: deduction.author, meta });
+      drafts.push({ challenge_id: challengeId, user_id: deduction.author, contribution_id: deduction.contribution, rule_key: deduction.ruleKey, points: deduction.amount, source_user_id: award.userId, meta: { ...meta } });
+    }
+    return drafts;
   }
 
   /**
@@ -815,7 +1174,7 @@ export class Engine {
       const net = own.reduce((sum, entry) => sum + entry.points, 0);
       if (net <= 0) continue;
       const contributionId = own.find((entry) => entry.contribution_id)?.contribution_id
-        ?? (await runtime.ledger.contribution(state.challenge, user, this.t.contribution));
+        ?? (await this.contributionFor(state, user));
       drafts.push({
         challenge_id: state.challenge.uuid,
         user_id: user,

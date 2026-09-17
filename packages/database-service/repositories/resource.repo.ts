@@ -241,6 +241,69 @@ export class ResourceRepository {
     return inserted.length;
   }
 
+  /**
+   * Une instance par combinaison `(type, by)` : sous un verrou consultatif de
+   * transaction sur cette combinaison, la trouve (`author` compare
+   * `created_by`, les autres clés la charge) ou l'insère. Existante, elle est
+   * rendue telle quelle, ou sa charge remplacée avec `overwrite`.
+   */
+  async upsert(
+    challengeId: string,
+    type: string,
+    item: { payload: Record<string, unknown>; class?: string | null },
+    options: { createdBy: string | null; by: readonly string[]; overwrite: boolean }
+  ): Promise<{ uuid: string; created: boolean }> {
+    const key = options.by.map((name) => (name === "author" ? options.createdBy ?? "" : JSON.stringify(item.payload[name] ?? null))).join("|");
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${challengeId}:${type}:${key}`}))`);
+      const filters: SQL[] = [eq(resource_instances.challenge_id, challengeId), eq(resource_instances.resource_type, type)];
+      for (const name of options.by) {
+        if (name === "author") {
+          filters.push(options.createdBy ? eq(resource_instances.created_by, options.createdBy) : isNull(resource_instances.created_by));
+        } else {
+          filters.push(sql`${resource_instances.payload} -> ${name} = ${JSON.stringify(item.payload[name] ?? null)}::jsonb`);
+        }
+      }
+      const [existing] = await tx.select({ uuid: resource_instances.uuid }).from(resource_instances).where(and(...filters)).limit(1);
+      if (existing) {
+        if (options.overwrite) {
+          await tx.update(resource_instances).set({ payload: item.payload, class: item.class ?? null }).where(eq(resource_instances.uuid, existing.uuid));
+        }
+        return { uuid: existing.uuid, created: false };
+      }
+      const [inserted] = await tx
+        .insert(resource_instances)
+        .values({ challenge_id: challengeId, resource_type: type, payload: item.payload, class: item.class ?? null, created_by: options.createdBy })
+        .returning({ uuid: resource_instances.uuid });
+      return { uuid: inserted.uuid, created: true };
+    });
+  }
+
+  /** Fusionne `patch` dans la charge d'une instance ; `null` si elle n'existe plus. */
+  async updatePayload(resourceId: string, patch: Record<string, unknown>): Promise<ResourceInstance | null> {
+    const [row] = await db
+      .update(resource_instances)
+      .set({ payload: sql`${resource_instances.payload} || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(resource_instances.uuid, resourceId))
+      .returning();
+    return row ? toInstance(row) : null;
+  }
+
+  /** Les réclamations vivantes ou livrées d'une instance. */
+  async claimCount(resourceId: string): Promise<number> {
+    const [row] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(resource_claims)
+      .where(and(eq(resource_claims.resource_id, resourceId), countsTowardK));
+    return row?.total ?? 0;
+  }
+
+  /** Supprime une instance, ses réclamations et ses grants (cascade) ; `false` si elle n'existait plus. */
+  async deleteResource(resourceId: string): Promise<boolean> {
+    const rows = await db.delete(resource_instances).where(eq(resource_instances.uuid, resourceId)).returning({ uuid: resource_instances.uuid });
+    return rows.length > 0;
+  }
+
   inDrawTransaction<T>(run: (tx: ResourceDrawTransaction) => Promise<T>): Promise<T> {
     return db.transaction((tx) => run(new ResourceDrawTransaction(tx)));
   }

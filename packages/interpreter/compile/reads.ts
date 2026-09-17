@@ -1,4 +1,5 @@
 import type { ActionAccess, ActionContext, ChallengeActionDeclaration } from "../../registry/platform.js";
+
 import { flowConfigOf } from "../../capabilities/flow-config.js";
 import { jsonError } from "./responses.js";
 import type { Value } from "../expr/evaluator.js";
@@ -8,6 +9,9 @@ import { Engine, newState, type CompiledTemplate } from "./engine.js";
 import type { CompiledParams } from "./params.js";
 import { scopeKeyOfFields } from "./scope.js";
 import { project, resourceValue, type Viewer } from "./values.js";
+
+/** Comme `contribution.repo.ts` : un run d'évaluation plus vieux se reprend. */
+const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
 
 /**
  * Les surfaces générées (compromis 10)
@@ -33,6 +37,12 @@ import { project, resourceValue, type Viewer } from "./values.js";
  *   et ce que la lane en a gardé ;
  * - `GET <lane>/file?claim_id=&path=` et `GET file?resource_id=&field=` : les
  *   octets d'un fichier, sous la même règle de visibilité ; purgé, 410 ;
+ * - `GET mine` : les instances que l'appelant a créées, par type, projetées
+ *   pour lui — ce qu'un participant reprend (une walkthrough en cours) ;
+ * - `GET counts?type=&by=` : le nombre d'instances d'un type par référence
+ *   (`walkthrough` par `app`), sans rien de leur contenu ;
+ * - `GET resources?type=` : toutes les instances d'un type pour un manager,
+ *   brouillons compris, avec leur auteur, leur état et leur résolution ;
  * - `GET <lane>/options?field=<geste>.<champ>` : les choix d'un champ `ref` ou
  *   `link` pour l'appelant — le `where` évalué côté serveur, les combinaisons
  *   qu'un claim désigné refuserait déjà retirées (les autres champs du geste en
@@ -42,7 +52,7 @@ import { project, resourceValue, type Viewer } from "./values.js";
 
 const MANAGERS: ActionAccess = { roles: ["admin"], manager: true };
 const PARTICIPANTS: ActionAccess = { roles: ["admin"], manager: true, member: true };
-export const GENERATED_PATHS = ["progress", "overview", "export", "file"] as const;
+export const GENERATED_PATHS = ["progress", "overview", "export", "file", "mine", "resources", "counts"] as const;
 
 export function generatedActions(
   t: CompiledTemplate,
@@ -53,11 +63,15 @@ export function generatedActions(
 ): ChallengeActionDeclaration[] {
   const { shell } = t.model;
   // Ce qu'une lane lit, qui peut y entrer le lit : un relecteur qualifié n'a pas à être membre.
-  const laneAccess = (lane: LaneModel): ActionAccess => (lane.entry.trigger === "admin" ? MANAGERS : { ...PARTICIPANTS, ...entryAccess(lane) });
+  const laneAccess = (lane: LaneModel): ActionAccess =>
+    lane.entry.trigger === "admin" ? MANAGERS : lane.entry.access?.mode === "signed_in" ? {} : { ...PARTICIPANTS, ...entryAccess(lane) };
+  const signedInLanes = t.model.lanes.some((lane) => lane.entry.trigger === "user" && lane.entry.access?.mode === "signed_in");
   const qualifiedLanes = t.model.lanes.filter((lane) => lane.entry.trigger === "user" && entryAccess(lane).qualification);
-  const ANYONE_WHO_ENTERS: ActionAccess = qualifiedLanes.length
-    ? { ...PARTICIPANTS, qualification: (challenge) => entryAccess(qualifiedLanes[0]).qualification!(challenge) }
-    : PARTICIPANTS;
+  const ANYONE_WHO_ENTERS: ActionAccess = signedInLanes
+    ? {}
+    : qualifiedLanes.length
+      ? { ...PARTICIPANTS, qualification: (challenge) => entryAccess(qualifiedLanes[0]).qualification!(challenge) }
+      : PARTICIPANTS;
   const actions: ChallengeActionDeclaration[] = [];
   const valuesOr409 = (ctx: ActionContext) => params.valuesOf(ctx.challenge, flowConfigOf(ctx.challenge));
   const ruleKeys = new Set(t.ruleKeys.values());
@@ -66,7 +80,7 @@ export function generatedActions(
   // ── release ─────────────────────────────────────────────────────────────
   for (const lane of t.model.lanes) {
     const drawing = lane.nodes.some((node) => node.family === "act" && node.body.claim);
-    if (!drawing || lane.entry.trigger === "cron") continue;
+    if (!drawing || lane.entry.trigger === "cron" || lane.entry.trigger === "submission") continue;
     actions.push({
       path: `${lane.id}/release`,
       method: "POST",
@@ -77,6 +91,35 @@ export function generatedActions(
         if (!claim || claim.user_id !== user.id || claim.challenge_id !== challenge.uuid) return jsonError(404, "Claim not found");
         if (!(await t.runtime.resources.release(claim.uuid, user.id))) return jsonError(409, "This claim is no longer active");
         return { released: true };
+      },
+    });
+  }
+
+  // ── evaluation : l'état d'une évaluation en arrière-plan ─────────────────
+  for (const lane of t.model.lanes) {
+    const background = lane.nodes.some((node) => node.family === "assess" && Boolean(node.body.background));
+    if (!background) continue;
+    actions.push({
+      path: `${lane.id}/evaluation`,
+      method: "GET",
+      access: laneAccess(lane),
+      async handle({ challenge, user }) {
+        const [state, entries] = await Promise.all([
+          t.runtime.evaluations.read(challenge.uuid, user.id, t.contribution.type),
+          t.runtime.ledger.entries(challenge.uuid),
+        ]);
+        const since = state?.since ?? null;
+        // Comme le challenge code : un run de plus de 30 minutes se reprend au prochain lancement.
+        const stale = state?.status === "running" && since !== null && t.runtime.now().getTime() - since.getTime() >= EVALUATION_STALE_AFTER_MS;
+        return {
+          status: state?.status ?? null,
+          running: state?.status === "running" && !stale,
+          started_at: since,
+          score: state?.evaluation ? Math.min(1, Math.max(0, state.evaluation.globalScore / 9)) : null,
+          evaluation: state?.evaluation ?? null,
+          artifact_url: state?.artifactUrl ?? null,
+          cp: entries.filter((entry) => entry.user_id === user.id && ruleKeys.has(entry.rule_key)).reduce((sum, entry) => sum + entry.points, 0),
+        };
       },
     });
   }
@@ -179,7 +222,7 @@ export function generatedActions(
   };
 
   for (const lane of t.model.lanes) {
-    if (lane.entry.trigger === "cron") continue;
+    if (lane.entry.trigger === "cron" || lane.entry.trigger === "submission") continue;
     const nodes = gesturesOf(lane);
     const refFields = nodes.flatMap((node) =>
       (node.family === "collect" || node.family === "assess") && node.body.fields
@@ -223,7 +266,7 @@ export function generatedActions(
 
         const typeName = (ref.type as { name: string }).name;
         const decl = shell.resources[typeName];
-        const instances = await t.runtime.resources.list({ challengeId: ctx.challenge.uuid, type: typeName });
+        const instances = await engine.instancesOf(ctx.challenge.uuid, typeName);
         const hydrated = await Promise.all(instances.map((instance) => resourceValue(instance, t.runtime, t.resourceTypes)));
         let eligible = hydrated;
         if (ref.decl.where !== undefined) {
@@ -269,10 +312,13 @@ export function generatedActions(
   }
 
   // ── claim en cours, fichiers ─────────────────────────────────────────────
+  /** La réclamation de l'appelant ; toute réclamation du challenge pour un manager, qui lit les preuves. */
   const holderOf = async (ctx: ActionContext) => {
     const claimId = new URL(ctx.request.url).searchParams.get("claim_id");
     const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
-    return claim && claim.user_id === ctx.user.id && claim.challenge_id === ctx.challenge.uuid ? claim : null;
+    if (!claim || claim.challenge_id !== ctx.challenge.uuid) return null;
+    if (claim.user_id === ctx.user.id) return claim;
+    return ctx.access.isAdmin() || (await ctx.access.isManager()) ? claim : null;
   };
   const projectedFor = async (ctx: ActionContext, values: Record<string, Value>, resourceId: string, claimant: boolean) => {
     const instance = await t.runtime.resources.resource(resourceId);
@@ -285,8 +331,10 @@ export function generatedActions(
   };
 
   for (const lane of t.model.lanes) {
-    if (lane.entry.trigger === "cron" || !lane.nodes.some((node) => node.family === "act" && node.body.claim)) continue;
-    const access = laneAccess(lane);
+    if (lane.entry.trigger === "cron" || lane.entry.trigger === "submission" || !lane.nodes.some((node) => node.family === "act" && node.body.claim)) continue;
+    // Les managers lisent les preuves des réclamations (la réponse observée, le fichier éprouvé).
+    const entered = laneAccess(lane);
+    const access: ActionAccess = Object.keys(entered).length === 0 ? entered : { ...entered, roles: [...new Set([...(entered.roles ?? []), "admin"])], manager: true };
 
     actions.push({
       path: `${lane.id}/claim`,
@@ -354,6 +402,103 @@ export function generatedActions(
       const view = await projectedFor(ctx, values, resourceId, claimant);
       if (!view) return jsonError(404, "Resource not found");
       return serveBlob(t, view.projected[field] ?? null);
+    },
+  });
+
+  // ── mine : ce que l'appelant a créé ───────────────────────────────────────
+  actions.push({
+    path: "mine",
+    method: "GET",
+    access: ANYONE_WHO_ENTERS,
+    async handle(ctx) {
+      const values = valuesOr409(ctx);
+      if (!values) return jsonError(409, "This challenge has no readable configuration or rules");
+      const viewer = participantViewer(ctx, values, false);
+      const resources: Record<string, Record<string, Value>[]> = {};
+      for (const [type, decl] of Object.entries(shell.resources)) {
+        const own = (await engine.instancesOf(ctx.challenge.uuid, type)).filter((instance) => instance.created_by === ctx.user.id);
+        if (own.length === 0) continue;
+        resources[type] = await Promise.all(
+          own.map(async (instance) => ({
+            ...(await project(await resourceValue(instance, t.runtime, t.resourceTypes), decl, viewer)),
+            open: instance.state === "open",
+            verdict: instance.verdict,
+            resolution: (instance.resolution ?? null) as Value,
+            created_at: instance.created_at.toISOString(),
+          }))
+        );
+      }
+      return { resources };
+    },
+  });
+
+  // ── counts : combien d'instances par référence ───────────────────────────
+  actions.push({
+    path: "counts",
+    method: "GET",
+    access: ANYONE_WHO_ENTERS,
+    async handle(ctx) {
+      const query = new URL(ctx.request.url).searchParams;
+      const type = query.get("type") ?? "";
+      const by = query.get("by") ?? "";
+      if (!shell.resources[type]) return jsonError(404, `No resource type ${type}`);
+      if (t.resourceTypes.get(type)?.[by]?.kind !== "resource") return jsonError(400, `${by} is not a reference field of ${type}`);
+      const counts: Record<string, number> = {};
+      for (const instance of await t.runtime.resources.list({ challengeId: ctx.challenge.uuid, type })) {
+        const ref = instance.payload[by];
+        if (typeof ref === "string") counts[ref] = (counts[ref] ?? 0) + 1;
+      }
+      return { counts };
+    },
+  });
+
+  // ── resources : le navigateur d'un manager ───────────────────────────────
+  actions.push({
+    path: "resources",
+    method: "GET",
+    access: MANAGERS,
+    async handle(ctx) {
+      const values = valuesOr409(ctx);
+      if (!values) return jsonError(409, "This challenge has no readable configuration or rules");
+      const type = new URL(ctx.request.url).searchParams.get("type") ?? "";
+      const decl = shell.resources[type];
+      if (!decl) return jsonError(404, `No resource type ${type}`);
+      const viewer = adminViewer(ctx, values);
+      const instances = await engine.instancesOf(ctx.challenge.uuid, type);
+      // Les preuves : chaque réclamation livrée, avec ce que la lane a gardé et le résultat du geste final.
+      const claimsOf = new Map<string, Awaited<ReturnType<typeof t.runtime.resources.consumedClaims>>>();
+      if (t.replays.has(type)) {
+        for (const instance of instances) claimsOf.set(instance.uuid, await t.runtime.resources.consumedClaims(instance.uuid));
+      }
+      const people = [...instances.map((instance) => instance.created_by), ...[...claimsOf.values()].flat().map((claim) => claim.user_id)];
+      const names = await t.runtime.names([...new Set(people.filter((id): id is string => Boolean(id)))]);
+      return {
+        type,
+        instances: await Promise.all(
+          instances.map(async (instance) => ({
+            id: instance.uuid,
+            author: instance.created_by,
+            author_name: instance.created_by ? names[instance.created_by] ?? null : null,
+            open: instance.state === "open",
+            verdict: instance.verdict,
+            resolution: (instance.resolution ?? null) as Value,
+            created_at: instance.created_at.toISOString(),
+            fields: await project(await resourceValue(instance, t.runtime, t.resourceTypes), decl, viewer),
+            ...(claimsOf.has(instance.uuid)
+              ? {
+                  claims: (claimsOf.get(instance.uuid) ?? []).map((claim) => ({
+                    claim_id: claim.claim_id,
+                    user_id: claim.user_id,
+                    user_name: names[claim.user_id] ?? null,
+                    consumed_at: claim.consumed_at.toISOString(),
+                    context: Object.fromEntries(Object.entries(claim.context ?? {}).filter(([key]) => !key.startsWith("$"))) as Value,
+                    result: claim.result as Value,
+                  })),
+                }
+              : {}),
+          }))
+        ),
+      };
     },
   });
 
@@ -427,6 +572,7 @@ export function generatedPathConflicts(lanes: readonly LaneModel[], declared: re
     generated.add(`${lane.id}/release`);
     generated.add(`${lane.id}/claim`);
     generated.add(`${lane.id}/file`);
+    generated.add(`${lane.id}/evaluation`);
   }
   return declared.filter((path) => generated.has(path));
 }

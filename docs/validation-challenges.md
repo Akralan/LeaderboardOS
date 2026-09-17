@@ -231,7 +231,11 @@ This skips the private/loopback block entirely. **Local dev only — never set t
 
 ---
 
+> **Since template parity P6 (Sept. 2026)** the reference-case mode runs only on the `endpoint-check` template: `npm run db:migrate-endpoint-validation` (postdeploy) moves every `endpoint-validation` challenge to it with its targets, cases, claims, reveals and verdicts. Admins remove an untouched target or an unclaimed case through the template's `withdraw_target` / `withdraw_case` lanes (authors through `withdraw_own_case`); managers read the evidence with `GET resources?type=reference_case`.
+
 ## Scenario mode
+
+> **Since template parity P4 (Sept. 2026)** `journey-validation` is served by the compiled template `content/templates/journey-validation/template.yaml`. Its screens (`ScenarioChallengeFlow`, `ScenarioWalkthroughScreen`, `ScenarioStepsEditor`, `ScenarioWalkthroughsPanel`, and the shared targets and rewards panels) are the ones described here, wired to the template's routes by `apps/leaderboard-client/src/lib/journeyTemplateApi.ts`. The rules below are unchanged; the routes are the template's generated gestures (`apps/expose`, `withdraw/withdraw_app`, `add_step/new_step`, `edit_step/step_edit`, `remove_step/step_removal`, `open/start`, `record/feedback`, `complete/finish`, plus `mine`, `counts?type=walkthrough&by=app` and `resources?type=`), and the data lives in resources (`app`, `step`, `walkthrough`, `step_result`) — `npm run db:migrate-journey-resources` (postdeploy) copies the tables described here under the same uuids. The hand-written flow stays in the tree as the equivalence reference; see `docs/input/template-parity-gap-analysis.md` for the remaining differences.
 
 A `journey-validation` challenge is linked to a source whose deliverable is a deployed application — same `challenges` row shape, same `contribution_points_reward` pool and `cp_per_validation`, but no `required_validations`: there is no quorum to reach, because there is no verdict to reach it toward.
 

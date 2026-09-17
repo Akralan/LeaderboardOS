@@ -180,11 +180,27 @@ function OptionPicker({
   if (error) return <p className="text-xs text-red-400">{error}</p>;
   if (!options) return <p className="text-xs" style={{ color: fgAt(0.35) }}>Loading…</p>;
   if (options.length === 0) return <p className="text-xs" style={{ color: fgAt(0.35) }}>Nothing to choose from yet.</p>;
+  const chosen = options.find((option) => option.id === value);
+  // Une ressource choisie qui porte une adresse (l'app d'un parcours) : elle s'ouvre à côté du formulaire.
+  const frame = field.kind === 'ref' && chosen ? Object.values(chosen).find((item): item is string => typeof item === 'string' && /^https:\/\//.test(item)) : undefined;
   return (
-    <select className={inputClass} value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">Choose…</option>
-      {options.map((option, index) => <option key={option.id} value={option.id}>{labelOf(option, index, field)}</option>)}
-    </select>
+    <div className="space-y-3">
+      <select className={inputClass} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Choose…</option>
+        {options.map((option, index) => <option key={option.id} value={option.id}>{labelOf(option, index, field)}</option>)}
+      </select>
+      {frame && <AppFrame url={frame} />}
+    </div>
+  );
+}
+
+/** Une application sous test, chargée par le navigateur de l'appelant ; un onglet quand l'iframe ne suffit pas (caméra…). */
+function AppFrame({ url }: { url: string }) {
+  return (
+    <div className="space-y-2">
+      <iframe src={url} title="Application under test" className="h-[520px] w-full rounded-[14px] border border-white/10 bg-white" allow="camera; microphone; fullscreen" />
+      <a href={url} target="_blank" rel="noreferrer" className="text-xs text-brandCP hover:underline">Open in a new tab</a>
+    </div>
   );
 }
 

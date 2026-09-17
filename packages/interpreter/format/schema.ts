@@ -18,6 +18,9 @@ export const exprSource = z.union([z.string(), z.number(), z.boolean()]);
 export type ExprSource = z.infer<typeof exprSource>;
 
 const identifier = z.string().regex(/^[a-z][a-z0-9_]*$/, "an identifier is lower_snake_case");
+/** Un nom de paramètre : lower_snake_case, ou camelCase quand il reprend une clé de `reward_rules` qu'un flow écrit à la main stocke (`apiPackaging`). */
+export const PARAM_NAME = /^[a-z][a-zA-Z0-9_]*$/;
+const paramName = z.string().regex(PARAM_NAME, "a param name is lower_snake_case or camelCase");
 const duration = z.string().regex(/^[0-9]+[mhd]$/, "a duration is a number followed by m, h or d");
 const typeSpec = z.union([z.string(), z.record(z.string(), z.unknown())]);
 
@@ -27,6 +30,12 @@ export const fieldDecl = z.strictObject({
   deliverable: identifier.optional(),
   /** Deux instances ne portent jamais la même valeur de ce champ ; une seconde création est refusée (409). */
   unique: z.boolean().optional(),
+  /** Le champ peut manquer : `null`, jamais refusé (un commentaire, une instruction). */
+  optional: z.boolean().optional(),
+  /** Une chaîne collectée est rognée ; vide après rognage, un champ optionnel vaut `null`. */
+  trim: z.boolean().optional(),
+  /** Pour un champ `url` collecté : une adresse publique, vérifiée côté serveur (garde SSRF) avant d'être gardée. */
+  public: z.boolean().optional(),
   /** Pour un champ `file` : la conservation des octets, en jours après la fermeture du challenge. */
   retention: z.strictObject({ days_after_close: z.number().int().min(1) }).optional(),
   from: exprSource.optional(),
@@ -63,6 +72,12 @@ export const resourceDecl = z.strictObject({
     .optional(),
   cardinality: z.strictObject({ exactly: exprSource }).optional(),
   match_or_create: z.strictObject({ by: z.string() }).optional(),
+  /**
+   * Un champ `int` qui ordonne les instances, gardé dense (0..n-1) par le moteur :
+   * une création s'ajoute à la fin, un `update` qui le change déplace l'instance,
+   * un `delete` renumérote (les étapes d'un scénario).
+   */
+  ordered_by: identifier.optional(),
 });
 export type ResourceDecl = z.infer<typeof resourceDecl>;
 
@@ -111,6 +126,47 @@ export const rewardBody = z.strictObject({
   clamp: z.literal("pool").optional(),
   order: z.literal("commit_time").optional(),
   rule_key: z.string().regex(/^[a-z][a-z0-9_.]*$/).optional(),
+  /**
+   * `delta` : ne verse que ce qui dépasse ce que cette clé a déjà versé à ce
+   * destinataire sur le challenge — un montant rogné par le pool se complète
+   * plus tard, une baisse ne reprend rien (le challenge code).
+   */
+  basis: z.literal("delta").optional(),
+  /**
+   * Le bonus de groupe : `amount` (arrondi) est l'assiette, le versé est
+   * `round(assiette × multiplier)`. Les transferts se calculent sur l'assiette,
+   * jamais sur le bonus (le challenge ML).
+   */
+  multiplier: exprSource.optional(),
+  /** Un montant rogné par le pool garde `rawPoints` et `clampedTo` dans sa méta. */
+  record_clamp: z.boolean().optional(),
+  /** Le libellé de la clé de ledger, lu par les écrans de récompense. */
+  label: z.string().min(1).optional(),
+  /**
+   * Des crédits de réutilisation hors pool : pour chaque élément de `from`
+   * (`{author, contribution, weight?}`), `round(assiette versée × weight × share)`
+   * est prélevé au destinataire et crédité à l'auteur, sous `rule_key`. Un auteur
+   * qui est le destinataire ne prélève rien ; le destinataire garde au moins
+   * `floor` de ce qui lui a été versé (les prélèvements sont alors réduits au prorata).
+   */
+  transfers: z
+    .strictObject({
+      floor: exprSource.optional(),
+      to: z
+        .array(
+          z.strictObject({
+            rule_key: z.string().regex(/^[a-z][a-z0-9_.]*$/),
+            label: z.string().min(1).optional(),
+            from: exprSource,
+            share: exprSource,
+          })
+        )
+        .min(1),
+    })
+    .optional(),
+  /** Ce que la ligne de ledger garde, clé par clé (`agentScore`…). */
+  // Les clés sont celles que les flows écrits à la main posent (`agentScore`) : la forme de leurs données fait foi.
+  meta: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, "a meta key is an identifier"), exprSource).optional(),
 });
 export type RewardBody = z.infer<typeof rewardBody>;
 
@@ -131,6 +187,32 @@ export const actBody = z.looseObject({
   grant: z.strictObject({ field: exprSource, to: z.literal("participation") }).optional(),
   match_or_create: z.strictObject({ resource: identifier, decision: identifier }).optional(),
   attach: exprSource.optional(),
+  /**
+   * Avec `create` : une instance par combinaison de ces champs (`author` : le
+   * créateur). Déjà là, elle est rendue telle quelle, ou réécrite avec `overwrite`.
+   */
+  upsert: z.strictObject({ by: z.array(identifier).min(1), overwrite: z.boolean().optional() }).optional(),
+  /**
+   * Réécrit des champs d'une instance : `from` un geste (seulement les champs
+   * que la requête porte, `null` compris), `set` des expressions.
+   */
+  update: z.strictObject({ resource: exprSource, from: identifier.optional(), set: z.record(identifier, exprSource).optional() }).optional(),
+  /**
+   * Supprime une instance (et ses réclamations). Les gardes que seul le moteur
+   * sait lire se déclarent ici, avec leur message (`{count}` y est remplacé) :
+   * `unclaimed`, aucune réclamation vivante ou livrée ; `without_inputs`, aucune
+   * entrée de cet aggregate. Refusée, 409.
+   */
+  delete: z
+    .union([
+      exprSource,
+      z.strictObject({
+        resource: exprSource,
+        unclaimed: z.string().min(1).optional(),
+        without_inputs: z.strictObject({ aggregate: identifier, message: z.string().min(1) }).optional(),
+      }),
+    ])
+    .optional(),
 });
 export type ActBody = z.infer<typeof actBody>;
 export const ACT_KEYS = new Set(Object.keys(actBody.shape));
@@ -140,6 +222,14 @@ export const assessBody = z.strictObject({
   kind: z.enum(["ai_grid", "human", "metric", "self"]),
   grid: exprSource.optional(),
   input: z.array(exprSource).optional(),
+  /** `ai_grid` sur un dépôt : son historique récent (défaut GitHub) ou son dernier état (défaut Kaggle). */
+  snapshot: z.enum(["history", "latest"]).optional(),
+  /**
+   * `ai_grid` hors de la requête : le geste répond 202, l'évaluation tourne en
+   * arrière-plan (une à la fois par participation, reprise après 30 min), puis
+   * la lane reprend au nœud suivant. Rejouable par la relance d'un run échoué.
+   */
+  background: z.boolean().optional(),
   fields: fields.optional(),
   from: identifier.optional(),
   value: exprSource.optional(),
@@ -155,7 +245,10 @@ export const gateBody = z.strictObject({
   id: identifier,
   all: z.array(exprSource).min(1).optional(),
   /** Le statut d'un refus de `all` : 422 par défaut, 403 quand la règle dit « pas toi ». */
-  refuse: z.union([z.literal(403), z.literal(409), z.literal(422)]).optional(),
+  refuse: z.union([z.literal(400), z.literal(403), z.literal(409), z.literal(422)]).optional(),
+  /** Le message du refus (`Refused by <id>` sinon) et la raison lisible par une interface. */
+  message: z.string().min(1).optional(),
+  reason: identifier.optional(),
   branch: z.array(z.record(z.string(), z.unknown())).min(1).optional(),
 });
 export type GateBody = z.infer<typeof gateBody>;
@@ -170,7 +263,8 @@ export const NODE_FAMILIES = {
 export type NodeFamily = keyof typeof NODE_FAMILIES;
 
 export const accessDecl = z.strictObject({
-  mode: z.enum(["open", "role", "author_of"]),
+  /** `signed_in` : tout compte connecté, membre ou non (un validateur qui ne rejoint pas). */
+  mode: z.enum(["open", "role", "author_of", "signed_in"]),
   role: exprSource.optional(),
   resource: identifier.optional(),
   group: exprSource.optional(),
@@ -180,7 +274,10 @@ export const accessDecl = z.strictObject({
 export type AccessDecl = z.infer<typeof accessDecl>;
 
 export const entryDecl = z.strictObject({
-  trigger: z.enum(["user", "admin", "cron", "webhook"]),
+  /** `submission` : joué en arrière-plan après qu'un participant a soumis l'URL d'une étape (capacité `submissions`). */
+  trigger: z.enum(["user", "admin", "cron", "webhook", "submission"]),
+  /** Pour `trigger: submission` : l'étape déclarée dans `submissions.steps`. */
+  step: identifier.optional(),
   access: accessDecl.optional(),
   schedule: z.string().optional(),
   over: z
@@ -259,23 +356,79 @@ export const presentationDecl = z.strictObject({
   /** Un visiteur anonyme peut ouvrir un challenge public de ce flow ; faux par défaut. */
   public: z.boolean().optional(),
   /** La contribution qui porte les lignes du ledger d'un participant. */
-  contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
+  contribution: z
+    .strictObject({
+      type: identifier,
+      title: z.string().min(1),
+      /** Une expression sur `challenge` : la description écrite à la création de la contribution. */
+      description: exprSource.optional(),
+      /** Ce que cette contribution livre, qu'un challenge de validation peut éprouver (`deployed_app`). */
+      deliverables: z.array(identifier).optional(),
+    })
+    .optional(),
+  /** Un board personnel par participant (le porteur, en groupe), copié du template au join ; `board.total`, `board.done`. */
+  board: z.boolean().optional(),
+  /** La clé du handler qui rejoue une évaluation en arrière-plan échouée (`continue` sinon) : celle d'un flow repris. */
+  evaluation_handler: identifier.optional(),
+});
+
+/**
+ * Où un participant livre son code (capacité `workspaces`) : `provided_repo`,
+ * une branche perso sur le dépôt du challenge, ou `own_repo`, son propre dépôt
+ * déclaré par `PATCH workspace`. `participation.workspace` le lit.
+ */
+export const workspaceDecl = z.strictObject({ mode: exprSource });
+
+/**
+ * Des étapes à soumettre (capacité `submissions`) : un dépôt par étape créé
+ * avec le challenge, une URL par participant (le porteur, en groupe) gardée
+ * dans `challenge_repos.workspace_meta`, une contribution par type écrite à la
+ * soumission, puis la lane `trigger: submission` de l'étape jouée en
+ * arrière-plan. `GET/PATCH workspace` sont générés.
+ */
+export const submissionStepDecl = z.strictObject({
+  /** Le type du dépôt créé avec le challenge (`kaggle_dataset`, `github`…). */
+  repo: z.string().min(1),
+  /** Ce qui suit le titre du challenge dans le titre du dépôt (`Dataset`). */
+  repo_title: z.string().min(1),
+  /** Le type de contribution que l'étape alimente ; deux étapes peuvent en partager un. */
+  contribution: identifier,
+  title: z.string().min(1),
+  /** L'URL identifie l'artefact : le premier à la soumettre en est l'auteur, les suivants le réutilisent. */
+  artifact: z.boolean().optional(),
+  /** Ce que la contribution livre à une validation (`endpoint`). */
+  deliverables: z.array(identifier).optional(),
+  /** Une soumission n'est acceptée que si l'expression tient (403 `closed_message` sinon) ; retirer son URL reste permis. */
+  open: exprSource.optional(),
+  /** Le champ de création qui retire l'étape quand il vaut `false` (`api_packaging_enabled`). */
+  unless_input: identifier.optional(),
+});
+
+export const submissionsDecl = z.strictObject({
+  steps: z.record(identifier, submissionStepDecl),
+  /** L'étape dont le dépôt garde la sélection de datasets (`dataset_urls`), lue par `submission.lineage.selection`. */
+  selection: identifier.optional(),
+  closed_message: z.string().min(1).optional(),
+  /** La clé du handler qui rejoue une soumission échouée (`{challengeId, userId, repoId, url}`). */
+  evaluation_handler: identifier.optional(),
 });
 
 export const statesDecl = z.union([z.literal("standard"), z.strictObject({ close_at: exprSource.optional() })]);
 
 /** Les clés d'un document : ce que le parse de sauvetage lit section par section (validate/format.ts). */
-export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "lifecycle", "lanes"] as const;
+export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "workspace", "submissions", "lifecycle", "lanes"] as const;
 export const LIFECYCLE_KEYS = ["states", "aggregates", "on_close"] as const;
 
 export const documentShell = z.strictObject({
   format: z.literal("leaderboardos/1"),
   template: templateHeader,
-  params: z.record(identifier, paramDecl).default({}),
+  params: z.record(paramName, paramDecl).default({}),
   requires: requiresDecl,
   resources: z.record(identifier, resourceDecl).default({}),
   counters: z.record(identifier, counterDecl).default({}),
   presentation: presentationDecl.optional(),
+  workspace: workspaceDecl.optional(),
+  submissions: submissionsDecl.optional(),
   lifecycle: z
     .strictObject({
       states: statesDecl.optional(),
