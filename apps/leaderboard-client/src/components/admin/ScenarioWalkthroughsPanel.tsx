@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Loader2, Stethoscope } from 'lucide-react';
-import { managedRuns } from '@/lib/journeyTemplateApi';
+import { managedRuns, type JourneyRoutes } from '@/lib/journeyTemplateApi';
 import { RESULT_META, type ScenarioResult } from '@/components/challenges/scenarioResult';
 
 interface ScenarioStep { id: string; position: number; title: string }
@@ -137,7 +137,7 @@ function RunRow({ run, steps, stepCount }: { run: WalkthroughRun; steps: Map<str
  * donc se lire, pas se déchiffrer. La ligne de marques donne la forme d'une
  * walkthrough en un coup d'oeil ; le dépliage donne les mots.
  */
-export function ScenarioWalkthroughsPanel({ challengeId, open }: { challengeId: string; open: boolean }) {
+export function ScenarioWalkthroughsPanel({ challengeId, routes, open }: { challengeId: string; routes: JourneyRoutes; open: boolean }) {
   const [steps, setSteps] = useState<ScenarioStep[]>([]);
   const [runs, setRuns] = useState<WalkthroughRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,7 +153,7 @@ export function ScenarioWalkthroughsPanel({ challengeId, open }: { challengeId: 
     // Avec zéro quorum ce panneau EST le contrôle qualité : un 403/500 qui se
     // lit "No walkthrough yet" est la seule mauvaise réponse possible à donner
     // à un manager qui inspecte le travail des validateurs.
-    managedRuns(challengeId)
+    managedRuns(challengeId, routes)
       .then(d => {
         setSteps(d.steps);
         setRuns(d.runs);

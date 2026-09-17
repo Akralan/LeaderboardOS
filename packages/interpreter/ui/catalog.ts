@@ -13,7 +13,7 @@ import type { UiScreen } from "../format/schema.js";
 
 export const UI_COLUMNS = 12;
 
-export type UiPropKind = "lane" | "text" | "markdown" | "bool";
+export type UiPropKind = "lane" | "resource" | "text" | "markdown" | "bool";
 
 export interface UiPropSpec {
   kind: UiPropKind;
@@ -138,6 +138,69 @@ export const UI_CATALOG: readonly UiComponentSpec[] = [
     screens: ["manage"],
     props: {},
     size: { w: 12, h: 5, minW: 6, minH: 3 },
+    single: true,
+  },
+
+  // ── Un scénario parcouru dans des applications (journey-validation) ────
+  // Les ressources : des cibles qui portent une URL et un lien (`app`), des
+  // étapes ordonnées (`step`, avec title, instructions, position), une
+  // walkthrough par (validateur, cible) qui se ferme sur `global_feedback`, et
+  // un résultat par (walkthrough, étape) — `result` (enum), `comment`,
+  // `medical_comment`. Les lanes : ouvrir, enregistrer une étape, conclure.
+  {
+    name: "walkthrough",
+    label: "Walkthrough",
+    role: "the exposed apps and my walkthrough on each: the app in a frame, one scenario step at a time",
+    screens: ["contributor"],
+    props: {
+      targets: { kind: "resource", label: "Apps", required: true, hint: "the exposed apps: a link field and an url field" },
+      steps: { kind: "resource", label: "Steps", required: true, hint: "the ordered scenario: title, instructions, position" },
+      open: { kind: "lane", label: "Open", required: true, hint: "opens (or resumes) my walkthrough on an app" },
+      record: { kind: "lane", label: "Record", required: true, hint: "records a step: walkthrough, step, result, comment, medical_comment" },
+      complete: { kind: "lane", label: "Complete", required: true, hint: "closes the walkthrough on global_feedback" },
+      reward_param: { kind: "text", label: "Reward param", hint: "the param paid per walkthrough (cp_per_validation)" },
+      expert_param: { kind: "text", label: "Expert param", hint: "the role param that allows an expert comment" },
+    },
+    size: { w: 12, h: 8, minW: 8, minH: 5 },
+    single: true,
+  },
+  {
+    name: "targets",
+    label: "Targets",
+    role: "the apps under test: expose a submission of the source challenge, withdraw one nobody walked",
+    screens: ["manage"],
+    props: {
+      targets: { kind: "resource", label: "Apps", required: true },
+      expose: { kind: "lane", label: "Expose", required: true, hint: "collects the contribution and its url" },
+      withdraw: { kind: "lane", label: "Withdraw", hint: "deletes an app" },
+    },
+    size: { w: 12, h: 5, minW: 6, minH: 3 },
+    single: true,
+  },
+  {
+    name: "steps",
+    label: "Scenario steps",
+    role: "the ordered scenario, editable until the first walkthrough",
+    screens: ["manage"],
+    props: {
+      steps: { kind: "resource", label: "Steps", required: true },
+      add: { kind: "lane", label: "Add", required: true, hint: "collects title and instructions" },
+      edit: { kind: "lane", label: "Edit", hint: "updates title, instructions or position" },
+      remove: { kind: "lane", label: "Remove", hint: "deletes a step" },
+    },
+    size: { w: 12, h: 5, minW: 6, minH: 3 },
+    single: true,
+  },
+  {
+    name: "walkthroughs",
+    label: "Walkthroughs",
+    role: "every walkthrough with its step results, app by app",
+    screens: ["manage"],
+    props: {
+      targets: { kind: "resource", label: "Apps", required: true },
+      steps: { kind: "resource", label: "Steps", required: true },
+    },
+    size: { w: 12, h: 6, minW: 6, minH: 3 },
     single: true,
   },
 ];

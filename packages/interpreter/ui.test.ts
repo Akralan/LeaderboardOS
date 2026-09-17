@@ -125,3 +125,36 @@ describe("the layout geometry", () => {
     expect(overlaps({ x: 0, y: 0, w: 3, h: 2 }, { x: 2, y: 1, w: 2, h: 2 })).toBe(true);
   });
 });
+
+describe("the scenario components", () => {
+  const JOURNEY = readFileSync(path.join(ROOT, "content/templates/journey-validation/template.yaml"), "utf8").replace(/\r\n/g, "\n");
+
+  it("compose the journey-validation template's screens, whose surface names the referenced resources", () => {
+    const { surface } = describeTemplate(JOURNEY, "journey-validation");
+    expect(surface.ui?.contributor?.blocks.map((block) => block.component)).toEqual(["walkthrough"]);
+    expect(surface.ui?.manage?.blocks.map((block) => block.component)).toEqual(["pool", "targets", "steps", "walkthroughs"]);
+    const walkthrough = surface.resources.find((resource) => resource.type === "walkthrough");
+    expect(walkthrough?.fields).toEqual([{ name: "app", kind: "ref", resource: "app" }]);
+    const result = surface.resources.find((resource) => resource.type === "step_result");
+    expect(result?.fields.find((field) => field.name === "result")).toEqual({ name: "result", kind: "enum", values: ["passed", "failed", "blocked"] });
+    expect(result?.fields.find((field) => field.name === "comment")).toEqual({ name: "comment", kind: "string", optional: true });
+  });
+
+  it("check the shape of what they play: an url on the apps, ordered steps, a result resource, the lanes' fields", () => {
+    const source = JOURNEY.replace(/\nui:[\s\S]*$/, "\n") + [
+      "ui:",
+      "  contributor:",
+      "    blocks:",
+      "      - {id: w, component: walkthrough, at: {x: 0, y: 0, w: 12, h: 8}, props: {targets: step, steps: app, open: open, record: open, complete: open}}",
+      "",
+    ].join("\n");
+    const errors = checkTemplateSource(source, "journey-validation").errors.map((issue) => [issue.path.join("."), issue.message]);
+    expect(errors).toEqual([
+      ["ui.contributor.blocks.0.props.targets", "'walkthrough' needs apps with an url field"],
+      ["ui.contributor.blocks.0.props.steps", "'walkthrough': steps must have title, position — missing title, position"],
+      ["ui.contributor.blocks.0.props.steps", "'walkthrough' needs a result resource with ref(step_result) and ref(app) fields"],
+      ["ui.contributor.blocks.0.props.record", "'walkthrough': the record lane must have result — missing result"],
+      ["ui.contributor.blocks.0.props.complete", "'walkthrough': the complete lane must have global_feedback — missing global_feedback"],
+    ]);
+  });
+});

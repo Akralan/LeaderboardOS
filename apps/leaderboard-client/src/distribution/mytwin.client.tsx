@@ -10,7 +10,6 @@ import { codeSlots } from './client/code';
 import { mlSlots } from './client/ml';
 import { endpointValidationSlots } from './client/endpoint-validation';
 import { dataAnnotationSlots } from './client/data-annotation';
-import { journeyValidationSlots } from './client/journey-validation';
 import { describedSlots, generatedSlots } from './client/generated';
 
 /**
@@ -28,8 +27,8 @@ const SLOTS: Readonly<Record<string, FlowUiSlots>> = {
   [dataAnnotationFlowDescriptor.key]: dataAnnotationSlots,
   // Aucun écran écrit à la main : l'UI que l'interpréteur génère du template (note §5).
   [endpointCheckTemplate.descriptor.key]: generatedSlots(endpointCheckTemplate),
-  // Le template journey-validation garde ses écrans de scénario, branchés sur ses routes.
-  [journeyValidationTemplate.descriptor.key]: journeyValidationSlots,
+  // Le template journey-validation compose ses écrans (bloc `ui`) sur les composants de scénario du catalogue.
+  [journeyValidationTemplate.descriptor.key]: generatedSlots(journeyValidationTemplate),
 };
 
 /**

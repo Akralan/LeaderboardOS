@@ -12,6 +12,7 @@ import { GeneratedLane } from './GeneratedLane';
 import { GeneratedOverview } from './GeneratedOverview';
 import { GeneratedMine, GeneratedResources } from './GeneratedResources';
 import { GeneratedWorkspace } from './GeneratedWorkspace';
+import { StepsBlock, TargetsBlock, WalkthroughBlock, WalkthroughsBlock } from './journeyBlocks';
 import { fgAt } from './format';
 
 /**
@@ -149,6 +150,11 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   participants: (block, runtime) => (
     <ParticipantsProgress team={runtime.data.team} tasks={runtime.data.tasks} participants={runtime.data.participants} contributions={runtime.data.contributions} showWorkspaceStatus={block.props.workspace_status === true} />
   ),
+  // Le scénario parcouru dans des applications (journey-validation), sur les routes que le bloc désigne.
+  walkthrough: (block, runtime) => <WalkthroughBlock block={block} runtime={runtime} />,
+  targets: (block, runtime) => <TargetsBlock block={block} runtime={runtime} />,
+  steps: (block, runtime) => <StepsBlock block={block} runtime={runtime} />,
+  walkthroughs: (block, runtime) => <WalkthroughsBlock block={block} runtime={runtime} />,
 };
 
 /** Les blocs dans l'ordre de lecture : la colonne d'un téléphone les empile ainsi. */

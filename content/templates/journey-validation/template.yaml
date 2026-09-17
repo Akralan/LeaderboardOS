@@ -254,3 +254,20 @@ lanes:
           meta:
             targetContributionId: finish.walkthrough.app.contribution.id
             runId: finish.walkthrough.id
+
+# The screens, composed on the UI catalogue: the validator's walkthrough, and
+# the manager's pool, targets, scenario and walkthroughs — the screens the
+# hand-written flow had, on the template's lanes and resources.
+ui:
+  contributor:
+    blocks:
+      - id: walkthrough
+        component: walkthrough
+        at: {x: 0, y: 0, w: 12, h: 8}
+        props: {targets: app, steps: step, open: open, record: record, complete: complete, reward_param: cp_per_validation, expert_param: expert_comment_qualification}
+  manage:
+    blocks:
+      - {id: pool, component: pool, at: {x: 0, y: 0, w: 12, h: 2}}
+      - {id: targets, component: targets, at: {x: 0, y: 2, w: 12, h: 5}, props: {targets: app, expose: apps, withdraw: withdraw}}
+      - {id: steps, component: steps, at: {x: 0, y: 7, w: 12, h: 5}, props: {steps: step, add: add_step, edit: edit_step, remove: remove_step}}
+      - {id: walkthroughs, component: walkthroughs, at: {x: 0, y: 12, w: 12, h: 6}, props: {targets: app, steps: step}}

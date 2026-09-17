@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, ListOrdered, Loader2, Lock, Plus, Trash2 } from 'lucide-react';
-import { addStep, editStep, managedScenario, removeStep } from '@/lib/journeyTemplateApi';
+import { addStep, editStep, managedScenario, removeStep, type JourneyRoutes } from '@/lib/journeyTemplateApi';
 
 interface StepItem {
   id: string;
@@ -25,7 +25,7 @@ function fgAt(opacity: number) {
  * sans avoir à tenter une écriture pour l'apprendre. Même geste que le bouton de suppression déjà désactivé sur un
  * target qui porte des verdicts.
  */
-export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string; open: boolean }) {
+export function ScenarioStepsEditor({ challengeId, routes, open }: { challengeId: string; routes: JourneyRoutes; open: boolean }) {
   const [steps, setSteps] = useState<StepItem[]>([]);
   const [frozen, setFrozen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -46,7 +46,7 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setLoading(true);
     setError('');
     try {
-      const scenario = await managedScenario(challengeId);
+      const scenario = await managedScenario(challengeId, routes);
       setSteps(scenario.steps);
       setFrozen(scenario.frozen);
     } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load the scenario'); }
@@ -59,7 +59,7 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setAdding(true);
     setError('');
     try {
-      await addStep(challengeId, title, draftInstructions.trim() || null);
+      await addStep(challengeId, routes, title, draftInstructions.trim() || null);
       setDraftTitle('');
       setDraftInstructions('');
       await fetchSteps();
@@ -71,7 +71,7 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setBusyId(id);
     setError('');
     try {
-      await editStep(challengeId, id, body);
+      await editStep(challengeId, routes, id, body);
       await fetchSteps();
     } catch (e) { setError(e instanceof Error ? e.message : 'Failed to update the step'); }
     finally { setBusyId(null); }
@@ -81,7 +81,7 @@ export function ScenarioStepsEditor({ challengeId, open }: { challengeId: string
     setBusyId(id);
     setError('');
     try {
-      await removeStep(challengeId, id);
+      await removeStep(challengeId, routes, id);
       await fetchSteps();
     } catch (e) { setError(e instanceof Error ? e.message : 'Failed to delete the step'); }
     finally { setBusyId(null); }

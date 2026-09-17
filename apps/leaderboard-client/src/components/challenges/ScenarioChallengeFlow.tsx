@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, Coins, ListOrdered, MonitorSmartphone } from 'lucide-react';
-import { JourneyApiError, listApps, listSteps, mine, poolState, walkthroughCounts } from '@/lib/journeyTemplateApi';
+import { JourneyApiError, listApps, listSteps, mine, poolState, walkthroughCounts, type JourneyRoutes } from '@/lib/journeyTemplateApi';
 import { ScenarioWalkthroughScreen } from './ScenarioWalkthroughScreen';
 
 interface TargetItem {
@@ -57,7 +57,8 @@ function stateOf(target: TargetItem, currentUserId: string | null): TargetState 
  * Lu par les routes du template (`lib/journeyTemplateApi.ts`) ; le forfait et
  * la qualification des avis experts viennent de la configuration du challenge.
  */
-export function ScenarioChallengeFlow({ challengeId, cpPerValidation, expertQualification }: {
+export function ScenarioChallengeFlow({ challengeId, routes, cpPerValidation, expertQualification }: {
+  routes: JourneyRoutes;
   challengeId: string;
   cpPerValidation: number;
   expertQualification: string | null;
@@ -75,15 +76,15 @@ export function ScenarioChallengeFlow({ challengeId, cpPerValidation, expertQual
     setError('');
     try {
       const [apps, scenario, counts, own, rewards, me] = await Promise.all([
-        listApps(challengeId),
-        listSteps(challengeId).catch(() => []),
-        walkthroughCounts(challengeId).catch(() => ({} as Record<string, number>)),
-        mine(challengeId).catch(() => ({ walkthroughs: [], results: [] })),
+        listApps(challengeId, routes),
+        listSteps(challengeId, routes).catch(() => []),
+        walkthroughCounts(challengeId, routes).catch(() => ({} as Record<string, number>)),
+        mine(challengeId, routes).catch(() => ({ walkthroughs: [], results: [] })),
         poolState(challengeId).catch(() => null),
         fetch('/api/contributors/me').then(res => (res.ok ? res.json() : null)).catch(() => null),
       ]);
       setTargets(apps.map(app => {
-        const run = own.walkthroughs.find(walkthrough => walkthrough.app?.id === app.id);
+        const run = own.walkthroughs.find(walkthrough => walkthrough.target?.id === app.id);
         return {
           ...app,
           walkthroughCount: counts[app.id] ?? 0,
@@ -101,7 +102,7 @@ export function ScenarioChallengeFlow({ challengeId, cpPerValidation, expertQual
     } finally {
       setLoading(false);
     }
-  }, [challengeId, cpPerValidation]);
+  }, [challengeId, cpPerValidation, routes]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -113,6 +114,7 @@ export function ScenarioChallengeFlow({ challengeId, cpPerValidation, expertQual
     return (
       <ScenarioWalkthroughScreen
         challengeId={challengeId}
+        routes={routes}
         appId={active.id}
         cpPerValidation={cpPerValidation}
         expertAllowed={!!expertQualification && qualifications.includes(expertQualification)}

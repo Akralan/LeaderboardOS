@@ -78,7 +78,8 @@ export interface SurfaceLane {
 
 export interface SurfaceResource {
   type: string;
-  fields: { name: string; kind: SurfaceFieldKind }[];
+  /** Pour un champ `ref` : le type de ressource désigné ; pour un `enum` : ses valeurs. */
+  fields: { name: string; kind: SurfaceFieldKind; resource?: string; values?: readonly string[]; optional?: boolean }[];
   /** Les aggregates qui résolvent ce type : leur état vient avec les options. */
   aggregates: string[];
 }
@@ -220,7 +221,16 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
   }
   const resources = Object.entries(model.shell.resources).map(([type, decl]) => ({
     type,
-    fields: Object.entries(decl.fields).map(([name, field]) => ({ name, kind: kindOf(types.resources.get(type)?.[name], field.type) })),
+    fields: Object.entries(decl.fields).map(([name, field]) => {
+      const fieldType = types.resources.get(type)?.[name];
+      return {
+        name,
+        kind: kindOf(fieldType, field.type),
+        ...(fieldType?.kind === "resource" ? { resource: fieldType.name } : {}),
+        ...(fieldType?.kind === "enum" && fieldType.values ? { values: fieldType.values } : {}),
+        ...(field.optional ? { optional: true } : {}),
+      };
+    }),
     aggregates: model.aggregates.filter((aggregate) => aggregate.decl.over === type).map((aggregate) => aggregate.decl.id),
   }));
   const poolParam = poolParamOf(model);

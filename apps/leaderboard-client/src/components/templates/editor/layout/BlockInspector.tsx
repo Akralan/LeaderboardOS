@@ -53,6 +53,17 @@ function PropControl({ block, name, spec }: { block: BlockView; name: string; sp
         </FieldShell>
       );
     }
+    case 'resource':
+      return (
+        <FieldShell label={spec.label} hint={spec.hint} issues={issues}>
+          <SelectInput
+            value={typeof value === 'string' ? value : ''}
+            options={[{ value: '', label: 'Choose a resource…' }, ...model.resources.map((resource) => ({ value: resource.name, label: humanize(resource.name) }))]}
+            onCommit={commit}
+            disabled={readOnly}
+          />
+        </FieldShell>
+      );
     case 'bool':
       return (
         <FieldShell label={spec.label} hint={spec.hint} issues={issues}>

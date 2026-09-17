@@ -46,7 +46,8 @@ function QualifiedLanes({ challenge, lanes, render }: { challenge: SlotChallenge
 
 function heroStat(description: DescribedTemplate, rewards: ChallengeRewards | null, contributions: number): HeroStat {
   const counts = rewards?.resources as Record<string, { total?: number; closed?: number }> | undefined;
-  const resolved = description.surface.resources.find((resource) => resource.aggregates.length > 0) ?? description.surface.resources[0];
+  // « Résolu » ne veut dire quelque chose que pour un type qu'un aggregate ferme ; sinon, les contributions enregistrées.
+  const resolved = description.surface.resources.find((resource) => resource.aggregates.length > 0);
   const row = resolved ? counts?.[resolved.type] : undefined;
   if (!resolved || !row) {
     return { key: 'contributions', label: 'Contributions', value: String(contributions), meta: 'recorded' };

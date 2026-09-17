@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, Loader2, Stethoscope } from 'lucide-react';
-import { completeWalkthrough, JourneyApiError, openWalkthrough, saveStep as saveStepResult, walkthroughState } from '@/lib/journeyTemplateApi';
+import { completeWalkthrough, JourneyApiError, openWalkthrough, saveStep as saveStepResult, walkthroughState, type JourneyRoutes } from '@/lib/journeyTemplateApi';
 import { RESULT_META, SCENARIO_RESULTS } from './scenarioResult';
 import {
   finishHint,
@@ -14,6 +14,8 @@ import {
 
 interface Props {
   challengeId: string;
+  /** Les routes du template : ressources, gestes, champs de référence. */
+  routes: JourneyRoutes;
   /** L'application exposée (la ressource `app` du template). */
   appId: string;
   cpPerValidation: number;
@@ -42,7 +44,7 @@ function fgAt(opacity: number) {
  * rien, et fermer l'onglet non plus. Routes du template : `lib/journeyTemplateApi.ts`.
  */
 export function ScenarioWalkthroughScreen({
-  challengeId, appId, cpPerValidation, expertAllowed, submitterName, endpointUrl, onClose,
+  challengeId, routes, appId, cpPerValidation, expertAllowed, submitterName, endpointUrl, onClose,
 }: Props) {
   const [steps, setSteps] = useState<WalkthroughStepView[]>([]);
   // Le dernier snapshot qu'on sait confirmé par le serveur — pas un miroir de
@@ -72,8 +74,8 @@ export function ScenarioWalkthroughScreen({
     (async () => {
       try {
         // Ouvrir est idempotent : le brouillon laissé, ou la walkthrough terminée.
-        const openedRun = await openWalkthrough(challengeId, appId);
-        const run = await walkthroughState(challengeId, openedRun);
+        const openedRun = await openWalkthrough(challengeId, routes, appId);
+        const run = await walkthroughState(challengeId, routes, openedRun);
         if (cancelled) return;
         setRunId(run.runId);
         setSteps(run.steps);
@@ -91,7 +93,7 @@ export function ScenarioWalkthroughScreen({
       }
     })();
     return () => { cancelled = true; };
-  }, [challengeId, appId]);
+  }, [challengeId, appId, routes]);
 
   const isReadOnly = !!completedAt;
   const step = steps[current];
@@ -118,13 +120,13 @@ export function ScenarioWalkthroughScreen({
     try {
       let saved = true;
       try {
-        await saveStepResult(challengeId, runId, next);
+        await saveStepResult(challengeId, routes, runId, next);
       } catch (e) {
         saved = false;
         setError(e instanceof JourneyApiError ? e.message : 'Could not save this step');
       }
       if (saved) {
-        const serverSteps: WalkthroughStepView[] = (await walkthroughState(challengeId, runId)).steps;
+        const serverSteps: WalkthroughStepView[] = (await walkthroughState(challengeId, routes, runId)).steps;
         // Fusion étape par étape, pas un remplacement du tableau entier : une
         // autre étape peut porter une saisie locale (un commentaire tapé sans
         // résultat, donc jamais PUT) que ce snapshot n'a jamais vue et qui ne
@@ -154,7 +156,7 @@ export function ScenarioWalkthroughScreen({
     setFinishing(true);
     setError('');
     try {
-      const awarded = await completeWalkthrough(challengeId, runId, globalFeedback);
+      const awarded = await completeWalkthrough(challengeId, routes, runId, globalFeedback);
       setCompletedAt(new Date().toISOString());
       setCpAwarded(awarded);
     } catch (e) {

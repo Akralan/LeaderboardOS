@@ -242,8 +242,97 @@ function ParticipantsPreview({ block }: { block: BlockView }) {
   );
 }
 
+/** Le nom lisible d'une ressource désignée par un argument, ou l'argument manquant. */
+function resourceArg(block: BlockView, name: string) {
+  return typeof block.props[name] === 'string' ? humanize(block.props[name] as string) : null;
+}
+
+function WalkthroughPreview({ block }: { block: BlockView }) {
+  const { model } = useEditor();
+  const stepsType = typeof block.props.steps === 'string' ? block.props.steps : null;
+  const apps = resourceArg(block, 'targets');
+  return (
+    <div className={card}>
+      <div className="flex items-baseline gap-1.5 rounded-lg border border-brandCP/[0.22] px-3 py-2">
+        <span className="text-lg font-semibold text-white">—</span>
+        <span className="text-[10px] font-bold text-brandCP">CP left</span>
+        <span className="ml-auto text-[10px] text-white/40">per completed walkthrough</span>
+      </div>
+      {Array.from({ length: 2 }, (_, row) => (
+        <div key={row} className="flex items-center gap-2 rounded-lg border border-white/[0.06] px-3 py-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-brandCP/10 text-[9px] font-bold text-brandCP">AB</span>
+          <div className="flex flex-1 flex-col gap-1">
+            <span className={`${skeleton} h-2.5 w-1/3`} />
+            <span className={`${skeleton} h-2 w-1/2`} />
+          </div>
+          <span className="rounded-full bg-brandCP/10 px-2 py-0.5 text-[10px] font-semibold text-brandCP">Start</span>
+        </div>
+      ))}
+      <span className="text-[10px] text-white/40">
+        {apps ?? 'Apps?'} · {stepsType ? `${humanize(stepsType)} in order` : 'Steps?'} · {model.lanes.filter((lane) => ['open', 'record', 'complete'].some((name) => block.props[name] === lane.id)).length}/3 lanes
+      </span>
+    </div>
+  );
+}
+
+function TargetsPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta={block.props.withdraw ? 'expose · withdraw' : 'expose'}>{resourceArg(block, 'targets') ?? 'Targets'}</Title>
+      <div className="flex gap-2">
+        <span className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 text-[10px] text-white/35">Pick a submission…</span>
+        <span className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 text-[10px] text-white/35">https://</span>
+        <span className="rounded-lg bg-brandCP/15 px-2 py-1.5 text-[10px] font-semibold text-brandCP">Add</span>
+      </div>
+      <Rows count={3} columns={3} />
+    </div>
+  );
+}
+
+function StepsPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta="ordered · frozen by the first walkthrough">{resourceArg(block, 'steps') ?? 'Steps'}</Title>
+      {Array.from({ length: 3 }, (_, row) => (
+        <div key={row} className="flex items-center gap-2">
+          <span className="font-mono text-[10px] text-white/30">{String(row + 1).padStart(2, '0')}</span>
+          <span className={`${skeleton} h-2.5 flex-1`} />
+          <span className="text-[10px] text-white/30">↑ ↓ ✕</span>
+        </div>
+      ))}
+      <span className="rounded-lg border border-dashed border-white/15 px-2 py-1.5 text-[10px] text-white/35">+ New step</span>
+    </div>
+  );
+}
+
+function WalkthroughsPreview({ block }: { block: BlockView }) {
+  const marks = ['bg-green-500/60', 'bg-green-500/60', 'bg-red-500/60', 'bg-amber-500/60', 'bg-white/15'];
+  return (
+    <div className={card}>
+      <Title meta={`${resourceArg(block, 'targets') ?? 'apps'} · ${resourceArg(block, 'steps') ?? 'steps'}`}>Walkthroughs</Title>
+      {Array.from({ length: 3 }, (_, row) => (
+        <div key={row} className="flex items-center gap-2">
+          <span className={`${skeleton} h-2.5 w-1/4`} />
+          <span className="flex gap-1">
+            {marks.map((mark, index) => <span key={index} className={`h-2.5 w-2.5 rounded-sm ${mark}`} />)}
+          </span>
+          <span className="ml-auto rounded-full bg-green-500/15 px-2 py-0.5 text-[9px] font-bold text-green-400">Completed</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function BlockPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
   switch (block.component) {
+    case 'walkthrough':
+      return <WalkthroughPreview block={block} />;
+    case 'targets':
+      return <TargetsPreview block={block} />;
+    case 'steps':
+      return <StepsPreview block={block} />;
+    case 'walkthroughs':
+      return <WalkthroughsPreview block={block} />;
     case 'pool':
       return <PoolPreview />;
     case 'activity':
