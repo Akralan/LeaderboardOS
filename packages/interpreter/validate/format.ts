@@ -12,6 +12,8 @@ import {
   paramDecl,
   presentationDecl,
   workspaceDecl,
+  submissionsDecl,
+  PARAM_NAME,
   requiresDecl,
   resourceDecl,
   statesDecl,
@@ -245,7 +247,7 @@ function section<T>(schema: z.ZodType<T>, value: unknown, path: TemplatePath, fa
 }
 
 /** Une section en dictionnaire : chaque entrée à part ; une entrée cassée devient un marqueur. */
-function entries<T>(schema: z.ZodType<T>, value: unknown, path: TemplatePath, issues: Issues, broken: Set<string>): Record<string, T> {
+function entries<T>(schema: z.ZodType<T>, value: unknown, path: TemplatePath, issues: Issues, broken: Set<string>, names = IDENTIFIER): Record<string, T> {
   if (value === undefined) return {};
   if (!isRecord(value)) {
     issues.push(formatIssue(path, "expected a mapping"));
@@ -253,8 +255,8 @@ function entries<T>(schema: z.ZodType<T>, value: unknown, path: TemplatePath, is
   }
   const kept: Record<string, T> = {};
   for (const [name, entry] of Object.entries(value)) {
-    if (!IDENTIFIER.test(name)) {
-      issues.push(formatIssue([...path, name], "an identifier is lower_snake_case"));
+    if (!names.test(name)) {
+      issues.push(formatIssue([...path, name], names === IDENTIFIER ? "an identifier is lower_snake_case" : "a param name is lower_snake_case or camelCase"));
       continue;
     }
     const parsed = schema.safeParse(entry);
@@ -286,12 +288,13 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
 
   if (raw.format !== "leaderboardos/1") issues.push(formatIssue(["format"], 'format is "leaderboardos/1"'));
   const template = section(templateHeader, raw.template, ["template"], { id: "draft", version: "0.0.0", name: "Draft", summary: "Draft" }, issues);
-  const params = entries(paramDecl, raw.params, ["params"], issues, broken.params);
+  const params = entries(paramDecl, raw.params, ["params"], issues, broken.params, PARAM_NAME);
   const requires = section(requiresDecl, raw.requires, ["requires"], { core: 1 }, issues);
   const resources = entries(resourceDecl, raw.resources, ["resources"], issues, broken.resources);
   const counters = entries(counterDecl, raw.counters, ["counters"], issues, broken.counters);
   const presentation = raw.presentation === undefined ? undefined : section(presentationDecl.optional(), raw.presentation, ["presentation"], undefined, issues);
   const workspace = raw.workspace === undefined ? undefined : section(workspaceDecl.optional(), raw.workspace, ["workspace"], undefined, issues);
+  const submissions = raw.submissions === undefined ? undefined : section(submissionsDecl.optional(), raw.submissions, ["submissions"], undefined, issues);
 
   const lifecycleRaw = raw.lifecycle === undefined ? {} : raw.lifecycle;
   const lifecycle: DocumentShell["lifecycle"] = { aggregates: [], on_close: [] };
@@ -358,6 +361,6 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
     });
   }
 
-  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, workspace, lifecycle, lanes: laneShells };
+  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, workspace, submissions, lifecycle, lanes: laneShells };
   return { model: { shell, lanes, aggregates, onClose, broken }, issues, complete: issues.length === 0 };
 }

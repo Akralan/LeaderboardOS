@@ -38,7 +38,7 @@ vi.mock("../../../../packages/database-service/repositories/index.js", () => ({
   },
 }));
 
-vi.mock("../../../../packages/services/challenge/artifactUrl.js", () => ({
+vi.mock("../../../../packages/capabilities/artifact-url.js", () => ({
   normalizeArtifactUrl: h.normalizeArtifactUrl,
 }));
 

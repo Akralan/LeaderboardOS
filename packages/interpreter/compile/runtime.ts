@@ -1,6 +1,8 @@
 import type { Challenge, RewardEntry, RewardEntryDraft } from "../../database-service/domain/entities.js";
 import type { Resources } from "../../capabilities/resources.js";
 import type { Blobs } from "../../capabilities/blobs.js";
+import type { AcceptedSubmission, SubmissionLineage, SubmissionOptions, SubmissionTable } from "../../capabilities/submissions.js";
+import type { ChallengeRepo } from "../../database-service/domain/entities.js";
 import type { Value } from "../expr/evaluator.js";
 
 /**
@@ -47,6 +49,8 @@ export interface RuntimeLedger {
   /** La contribution qui porte les lignes d'un participant ; créée au premier paiement. */
   contribution(challenge: Challenge, userId: string, contribution: { type: string; title: string; description?: string | null }): Promise<string>;
   write(drafts: RewardEntryDraft[]): Promise<void>;
+  /** Le plus grand nombre `meta[field]` des lignes de cette clé, sans ou seulement une personne ; `null` sans ligne. */
+  max(challengeId: string, query: { ruleKey: string; field: string; excludeUserId?: string; onlyUserId?: string }): Promise<number | null>;
   /** `challenges.completion` : la part du pool drainée. */
   syncCompletion(challenge: Challenge): Promise<void>;
 }
@@ -122,7 +126,8 @@ export type EvaluateResult = number | { score: number; evaluation: EvaluationDet
 export interface RuntimeEvaluations {
   /** Prend l'évaluation : `false` quand une autre tourne depuis moins de 30 minutes. */
   claim(contributionId: string, artifactUrl: string | null): Promise<boolean>;
-  finish(contributionId: string, outcome: { status: "done" | "failed"; evaluation?: EvaluationDetail }): Promise<void>;
+  /** Le statut final, et le détail quand l'évaluation en a produit un ; `skipped_reuse` pour une soumission réutilisée. */
+  finish(contributionId: string, outcome: { status: "done" | "failed" | "running" | "skipped_reuse"; evaluation?: EvaluationDetail }): Promise<void>;
   /** L'état d'évaluation d'une participation, sans rien créer : `null` avant la première évaluation. */
   read(challengeId: string, userId: string, contributionType: string): Promise<EvaluationState | null>;
   /** Lance une tâche après la réponse ; ses erreurs sont journalisées, jamais renvoyées au geste. */
@@ -130,6 +135,24 @@ export interface RuntimeEvaluations {
 }
 
 export type RuntimeBlobs = Pick<Blobs, "store" | "get">;
+
+/** La contribution qu'une étape soumise alimente, telle que la note la présente. */
+export interface StepContribution {
+  id: string;
+  title: string;
+  description: string | null;
+}
+
+/** La capacité `submissions` du core : les dépôts d'étape, leurs URLs, les contributions d'étape, la lignée. */
+export interface RuntimeSubmissions {
+  read(challengeId: string, userId: string): Promise<unknown>;
+  submit(challenge: Challenge, userId: string, body: unknown, table: SubmissionTable, options: SubmissionOptions): Promise<Response | { repo: ChallengeRepo; submission: AcceptedSubmission | null }>;
+  /** Le rôle du dépôt d'étape `repoId` sur ce challenge, ou `null`. */
+  role(challengeId: string, repoId: string): Promise<string | null>;
+  /** La contribution de ce type du porteur, ou `null` (une soumission retirée entre-temps). */
+  contribution(challengeId: string, holderId: string, type: string): Promise<StepContribution | null>;
+  lineage(challengeId: string, holderId: string, table: SubmissionTable, selectionRole: string | null): Promise<SubmissionLineage>;
+}
 
 /** Une contribution telle qu'un `link` la lit : son auteur, son URL, son type. */
 export interface LinkedContribution {
@@ -161,6 +184,7 @@ export interface TemplateRuntime {
   contributions: RuntimeContributions;
   ledger: RuntimeLedger;
   participations: RuntimeParticipations;
+  submissions: RuntimeSubmissions;
   /** Le score d'une évaluation par grille, sur 0..1. */
   evaluate(request: EvaluateBinding): Promise<EvaluateResult>;
   evaluations: RuntimeEvaluations;
@@ -299,6 +323,10 @@ export function defaultRuntime(
         const { RewardEntryRepository } = await repositories();
         await new RewardEntryRepository().createManyAndSyncRewards(drafts);
       },
+      async max(challengeId, query) {
+        const { RewardEntryRepository } = await repositories();
+        return new RewardEntryRepository().maxMetaNumber(challengeId, query);
+      },
       async syncCompletion(challenge) {
         const { RewardEntryRepository, ChallengeRepository } = await repositories();
         const { distributedFromPool, poolCompletion } = await import("../../capabilities/pool.js");
@@ -331,6 +359,26 @@ export function defaultRuntime(
         await new ContributionMemberRepository().addShares(shares.map((share) => ({ contribution_id: contributionId, user_id: share.userId, share_cp: share.points })));
       },
     },
+    submissions: {
+      async read(challengeId, userId) {
+        return (await import("../../capabilities/submissions.js")).readSubmissions(challengeId, userId);
+      },
+      async submit(challenge, userId, body, table, options) {
+        return (await import("../../capabilities/submissions.js")).submitToStep(challenge, userId, body, table, options);
+      },
+      async role(challengeId, repoId) {
+        const { ChallengeRepoRepository } = await repositories();
+        return (await new ChallengeRepoRepository().findByChallengeAndRepo(challengeId, repoId))?.role ?? null;
+      },
+      async contribution(challengeId, holderId, type) {
+        const { ContributionRepository } = await repositories();
+        const found = (await new ContributionRepository().findByChallenge(challengeId)).find((candidate) => candidate.user_id === holderId && candidate.type === type);
+        return found ? { id: found.uuid, title: found.title, description: found.description ?? null } : null;
+      },
+      async lineage(challengeId, holderId, table, selectionRole) {
+        return (await import("../../capabilities/submissions.js")).lineageOf(challengeId, holderId, table, selectionRole);
+      },
+    },
     evaluate:
       bindings.evaluate ??
       (async (request) => (await import("./bindings.js")).evaluateGrid(request)),
@@ -341,7 +389,9 @@ export function defaultRuntime(
       },
       async finish(contributionId, { status, evaluation }) {
         const { ContributionRepository } = await repositories();
-        await new ContributionRepository().update(contributionId, { evaluation_status: status, ...(evaluation ? { evaluation: evaluation as never } : {}) });
+        // Le détail d'abord, le statut ensuite : l'ordre du flow ML, qui écrit la note dès qu'elle revient.
+        if (evaluation) await new ContributionRepository().update(contributionId, { evaluation: evaluation as never });
+        await new ContributionRepository().update(contributionId, { evaluation_status: status });
       },
       schedule(task) {
         void task().catch((error) => console.error("[interpreter] background evaluation failed:", error));

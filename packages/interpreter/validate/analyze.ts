@@ -191,6 +191,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         return T.resource(node.resource);
       case "list":
         return T.list(resolveType(node.of, path, paramsScope));
+      case "optional":
+        return T.optional(resolveType(node.of, path, paramsScope));
       case "record": {
         const fields: Record<string, Type> = {};
         for (const [key, value] of Object.entries(node.fields)) fields[key] = resolveType(value, path, paramsScope);
@@ -279,6 +281,39 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   for (const name of brokenResources) baseBindings[name] = T.dyn;
   const base = Scope.root(baseBindings);
   checkWorkspace(base);
+
+  // ── Soumissions ─────────────────────────────────────────────────────────
+  /** Les rôles de dépôt que le core connaît (`challenge_repos.role`). */
+  const SUBMISSION_ROLES = ["dataset", "model", "model_code", "api"];
+  const author = T.record({ author: T.user, contribution: T.string, weight: T.number });
+  const submissionType = shell.submissions
+    ? T.record({
+        step: T.string,
+        url: T.url,
+        repo: T.string,
+        contribution: T.string,
+        lineage: T.record({
+          artifacts: T.record(Object.fromEntries(Object.values(shell.submissions.steps).filter((step) => step.artifact).map((step) => [step.contribution, author]))),
+          selection: T.list(author),
+        }),
+      })
+    : null;
+  if (shell.submissions) {
+    const steps = shell.submissions.steps;
+    for (const [role, step] of Object.entries(steps)) {
+      const at = ["submissions", "steps", role];
+      if (!SUBMISSION_ROLES.includes(role)) report("reference", at, `a submission step is a repo role: ${SUBMISSION_ROLES.join(", ")}`);
+      if (step.open !== undefined) {
+        const { type } = expr(step.open, base, [...at, "open"]);
+        expectType(type, isBool, "a step's open condition must be bool", [...at, "open"]);
+      }
+    }
+    if (shell.submissions.selection !== undefined && !steps[shell.submissions.selection]) {
+      report("reference", ["submissions", "selection"], `selection names no step '${shell.submissions.selection}'`);
+    }
+    if (shell.workspace) report("shape", ["submissions"], "a template declares workspace or submissions, not both: both serve PATCH workspace");
+  }
+  const submissionLanes = new Map<string, string>();
 
   /** Les règles de visibilité : `author`, `admin`, `claimant`, `everyone`, `role(params.x)`. */
   const checkVisibility = (entries: readonly string[] | undefined, path: TemplatePath) => {
@@ -573,6 +608,19 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     // Les nœuds écartés de la lane : leurs lectures valent `dyn`.
     for (const id of lane.broken) bindings[id] = T.dyn;
 
+    if (entry.trigger === "submission") {
+      if (!submissionType) report("reference", entryPath, "a submission lane needs a submissions declaration");
+      else bindings.submission = submissionType;
+      if (!entry.step || !shell.submissions?.steps[entry.step]) {
+        report("reference", [...entryPath, "step"], `a submission lane names a declared step${entry.step ? `, not '${entry.step}'` : ""}`);
+      } else if (submissionLanes.has(entry.step)) {
+        report("shape", [...entryPath, "step"], `step '${entry.step}' is already played by lane '${submissionLanes.get(entry.step)}'`);
+      } else {
+        submissionLanes.set(entry.step, lane.id);
+      }
+    } else if (entry.step !== undefined) {
+      report("shape", [...entryPath, "step"], "step belongs to a submission lane");
+    }
     if ((entry.trigger === "user") !== Boolean(entry.access)) {
       report("shape", entryPath, entry.trigger === "user" ? "a user lane declares its access" : `a ${entry.trigger} lane has no access`);
     }
@@ -1312,6 +1360,29 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       if (where !== "lane") report("economy", [...path, "basis"], "a delta basis applies to a lane reward", { node });
     }
     for (const [key, source] of Object.entries(body.meta ?? {})) expr(source, scope, [...path, "meta", key], node);
+    if (body.multiplier !== undefined) {
+      const { type } = expr(body.multiplier, scope, [...path, "multiplier"], node);
+      expectType(type, isNumeric, "a multiplier must be a number", [...path, "multiplier"], node);
+      if (body.basis === "delta") report("economy", [...path, "multiplier"], "a delta basis multiplies in its amount; multiplier applies to a plain payment", { node });
+    }
+    if (body.transfers) {
+      const at = [...path, "transfers"];
+      if (where !== "lane") report("economy", at, "reuse transfers follow a lane payment", { node });
+      if (negative) report("economy", at, "a payment back transfers nothing", { node });
+      if (body.transfers.floor !== undefined) {
+        const { type } = expr(body.transfers.floor, scope, [...at, "floor"], node);
+        expectType(type, isNumeric, "a transfer floor is a share of the payment", [...at, "floor"], node);
+      }
+      body.transfers.to.forEach((target, i) => {
+        const { type } = expr(target.from, scope, [...at, "to", i, "from"], node);
+        const item = type.kind === "list" ? type.of : null;
+        if (type.kind !== "dyn" && !(item && (item.kind === "dyn" || (item.kind === "record" && item.fields.author)))) {
+          report("type", [...at, "to", i, "from"], `transfers go to a list of {author, contribution, weight?}, got ${showType(type)}`, { node });
+        }
+        const { type: share } = expr(target.share, scope, [...at, "to", i, "share"], node);
+        expectType(share, isNumeric, "a transfer share must be a number", [...at, "to", i, "share"], node);
+      });
+    }
     if (body.order === "commit_time" && where !== "aggregate") report("economy", [...path, "order"], "earliest-first ordering applies to an aggregate's payment", { node });
     if (negative && !body.rule_key) report("economy", [...path, "amount"], "a negative reward (clawback) declares its rule_key", { node });
     if (!negative && body.pool === undefined && !body.rule_key) {

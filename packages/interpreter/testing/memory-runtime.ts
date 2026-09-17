@@ -6,6 +6,7 @@ import { workspaceView, type EvaluateBinding, type EvaluateResult, type Evaluati
 import { groupContextFrom } from "../../database-service/domain/groupPolicy.js";
 import { scopeKeyOf } from "../../capabilities/resources.js";
 import type { StoredBlob } from "../../capabilities/blobs.js";
+import { lineageFrom } from "../../capabilities/submissions.js";
 
 /**
  * Un runtime en mémoire, pour les tests
@@ -39,6 +40,12 @@ export interface MemoryRuntime extends TemplateRuntime {
   /** Les parts cumulées par (contribution, membre). */
   shares: Map<string, number>;
   completions: Map<string, number>;
+  /** Les dépôts d'étape : `role` par `repo_id`, et la sélection de datasets par porteur (déjà normalisée). */
+  stepRepos: { challenge_id: string; repo_id: string; role: string; selections?: Record<string, string[]> }[];
+  /** Les contributions d'étape, comme `contributions` : ce que la lignée et la note lisent. */
+  stepContributions: { uuid: string; challenge_id: string; user_id: string; type: string; title: string; description: string | null; artifact_url?: string; submitted_at: Date }[];
+  /** Le statut d'évaluation écrit sur chaque contribution d'étape, dans l'ordre. */
+  statuses: { contribution: string; status: string }[];
 }
 
 /**
@@ -74,6 +81,9 @@ export function memoryRuntime(options: {
     tasks: [],
     shares: new Map(),
     completions: new Map(),
+    stepRepos: [],
+    stepContributions: [],
+    statuses: [],
     // Le journal des demandes porte aussi le port `evaluations` : l'état des contributions, les tâches planifiées.
     evaluations: Object.assign([] as EvaluateBinding[], {
       status: new Map(),
@@ -89,7 +99,9 @@ export function memoryRuntime(options: {
         log.status.set(contributionId, { ...current, status: "running", since: runtime.clock, artifactUrl });
         return true;
       },
-      async finish(contributionId: string, outcome: { status: "done" | "failed"; evaluation?: EvaluationDetail }) {
+      async finish(contributionId: string, outcome: { status: "done" | "failed" | "running" | "skipped_reuse"; evaluation?: EvaluationDetail }) {
+        runtime.statuses.push({ contribution: contributionId, status: outcome.status });
+        if (outcome.status === "running" || outcome.status === "skipped_reuse") return;
         const log = runtime.evaluations;
         const current = log.status.get(contributionId);
         log.status.set(contributionId, {
@@ -382,6 +394,14 @@ export function memoryRuntime(options: {
       async write(drafts: RewardEntryDraft[]) {
         for (const draft of drafts) runtime.ledgerRows.push({ ...draft, uuid: id("entry"), created_at: runtime.clock });
       },
+      async max(challengeId, query) {
+        const values = runtime.ledgerRows
+          .filter((row) => row.challenge_id === challengeId && row.rule_key === query.ruleKey)
+          .filter((row) => (query.excludeUserId === undefined || row.user_id !== query.excludeUserId) && (query.onlyUserId === undefined || row.user_id === query.onlyUserId))
+          .map((row) => Number((row.meta as Record<string, unknown> | undefined)?.[query.field]))
+          .filter((value) => Number.isFinite(value));
+        return values.length ? Math.max(...values) : null;
+      },
       async syncCompletion(challenge) {
         const distributed = await runtime.ledger.distributed(challenge.uuid);
         runtime.completions.set(challenge.uuid, challenge.contribution_points_reward > 0 ? Math.min(1, distributed / challenge.contribution_points_reward) : 0);
@@ -411,6 +431,31 @@ export function memoryRuntime(options: {
           const key = `${contributionId}:${share.userId}`;
           runtime.shares.set(key, (runtime.shares.get(key) ?? 0) + share.points);
         }
+      },
+    },
+
+    submissions: {
+      async read() {
+        throw new Error("no submissions read in this test");
+      },
+      async submit() {
+        throw new Error("no submission route in this test");
+      },
+      async role(challengeId, repoId) {
+        return runtime.stepRepos.find((repo) => repo.challenge_id === challengeId && repo.repo_id === repoId)?.role ?? null;
+      },
+      async contribution(challengeId, holderId, type) {
+        const found = runtime.stepContributions.find((row) => row.challenge_id === challengeId && row.user_id === holderId && row.type === type);
+        return found ? { id: found.uuid, title: found.title, description: found.description } : null;
+      },
+      async lineage(challengeId, holderId, table, selectionRole) {
+        const selection = selectionRole && table[selectionRole]
+          ? {
+              contributionType: table[selectionRole].contributionType,
+              urls: runtime.stepRepos.filter((repo) => repo.challenge_id === challengeId && repo.role === selectionRole).flatMap((repo) => repo.selections?.[holderId] ?? []),
+            }
+          : null;
+        return lineageFrom(runtime.stepContributions.filter((row) => row.challenge_id === challengeId) as never, holderId, table, selection);
       },
     },
 

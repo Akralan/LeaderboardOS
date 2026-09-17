@@ -58,6 +58,7 @@ const USER_FIELDS: Record<string, Type> = { id: T.string };
 
 export const BUILTINS = [
   "size", "count", "exists", "majority", "mode", "mean", "min", "max", "has", "age", "now", "int", "double", "string",
+  "best", "best_of_others", "best_of_mine",
 ] as const;
 
 export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type; issues: ExprIssue[] } {
@@ -320,6 +321,16 @@ export function checkExpr(expr: Expr, scope: Scope, env: CheckEnv): { type: Type
         if (arg && arg.k !== "member") return fail("type", "has expects a field access", arg.pos);
         if (arg && arg.k === "member") visit(arg.object, s);
         return T.bool;
+      }
+      case "best":
+      case "best_of_others":
+      case "best_of_mine": {
+        // Le ledger du challenge : `best("model_metric", "metricValue")`, `null` sans ligne. Deux littéraux, lus avant l'évaluation.
+        arity(2);
+        for (const arg of args) {
+          if (arg.k !== "lit" || typeof arg.value !== "string") fail("type", `${node.callee} takes a rule key and a meta field as string literals`, arg.pos);
+        }
+        return T.number;
       }
       case "now":
         // L'horloge du moteur, en ISO 8601 : une date qui se stocke, jamais une source de hasard.

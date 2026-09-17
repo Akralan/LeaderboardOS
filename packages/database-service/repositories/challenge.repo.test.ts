@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { closedAtPatch } from "./challenge.repo";
+import { closedAtPatch, updatePatchOf } from "./challenge.repo";
 
 // Le digest lit closed_at pour sa section completed_challenges. La règle tient
 // en trois cas : on pose sur l'arrivée à 'completed', on efface si le challenge
@@ -46,5 +46,13 @@ describe("closedAtPatch", () => {
 
   it("treats a missing previous status as not-closed", () => {
     expect(closedAtPatch(undefined, "completed").closed_at).toBeInstanceOf(Date);
+  });
+});
+
+describe("updatePatchOf", () => {
+  it("keeps only the fields the caller gave, never the schema defaults", () => {
+    // Écrire la complétion d'un challenge ML ne doit ni le repasser en `code`, ni toucher au reste.
+    expect(updatePatchOf({ completion: 0.4 })).toEqual({ completion: 0.4 });
+    expect(updatePatchOf({ title: "Renamed" })).toEqual({ title: "Renamed" });
   });
 });

@@ -2,6 +2,7 @@ import type { PlatformDefinitions } from '../../../../packages/registry/platform
 import { codeFlow } from '../../../../content/flows/code';
 import { codeTemplateFlow } from '../../../../content/templates/code';
 import { mlFlow } from '../../../../content/flows/ml';
+import { mlTemplateFlow } from '../../../../content/templates/ml';
 import { endpointValidationFlow } from '../../../../content/flows/endpoint-validation';
 import { journeyValidationTemplateFlow } from '../../../../content/templates/journey-validation';
 import { dataAnnotationTemplateFlow } from '../../../../content/templates/data-annotation';
@@ -30,7 +31,9 @@ export const platform: PlatformDefinitions = {
     // passent au template. Le flow écrit à la main reste la référence d'équivalence ; la distribution garde ses quêtes
     // et sa proposition de sandbox.
     { ...codeTemplateFlow, events: codeFlow.events, quests: codeFlow.quests, proposable: codeFlow.proposable },
-    mlFlow,
+    // Compilé depuis content/templates/ml/template.yaml (parité P5), avec continuité : mêmes dépôts d'étape, contributions
+    // et ledger. La distribution garde la lecture des récompenses du flow (métrique, seuil) et sa proposition de sandbox.
+    { ...mlTemplateFlow, rewards: mlFlow.rewards, proposable: mlFlow.proposable },
     // Les validations MyTwin sont jugées par des professionnels de santé.
     // Retiré par attrition : il sert ses challenges existants, les nouveaux prennent endpoint-check.
     { ...endpointValidationFlow, retired: true, configDefaults: { reviewer_qualification: MEDICAL_PRO } },

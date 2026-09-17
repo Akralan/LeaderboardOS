@@ -24,6 +24,18 @@ export class EvalError extends Error {
 export interface EvalContext {
   /** Pour `age(resource)`. */
   now?: Date;
+  /**
+   * Les lectures du ledger, résolues avant l'évaluation : `best(...)`,
+   * `best_of_others(...)`, `best_of_mine(...)` par `ledgerKey`.
+   */
+  ledger?: Readonly<Record<string, number | null>>;
+}
+
+/** Les fonctions qui lisent le ledger du challenge : le plus grand `meta.<field>` d'une clé, pour tous, les autres ou le porteur. */
+export const LEDGER_FUNCTIONS = ["best", "best_of_others", "best_of_mine"] as const;
+
+export function ledgerKey(callee: string, ruleKey: string, field: string): string {
+  return `${callee}:${ruleKey}:${field}`;
 }
 
 export type Bindings = Readonly<Record<string, Value>>;
@@ -200,6 +212,13 @@ export function evaluate(expr: Expr, bindings: Bindings, context: EvalContext = 
       }
       case "now":
         return (context.now ?? new Date()).toISOString();
+      case "best":
+      case "best_of_others":
+      case "best_of_mine": {
+        const key = ledgerKey(node.callee, String(run(first, scope)), String(run(second, scope)));
+        if (!context.ledger || !(key in context.ledger)) throw new EvalError(`${node.callee} was not read from the ledger`, node.pos);
+        return context.ledger[key];
+      }
       case "age": {
         const resource = run(first, scope);
         const created = isObject(resource) ? resource.created_at : null;

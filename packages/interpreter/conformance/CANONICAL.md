@@ -107,3 +107,16 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | `<resource>.id`, link `.id`, `.title`, `.members` | comparing references; excluding the author's group (`contribution_members`) |
 | declared `reward.meta` | is the shape of the ledger line (`{targetContributionId, runId}`), only the natural key of a claim or resource is added |
 | generated `GET mine`, `GET resources?type=` | what a participant resumes; every instance, drafts included, for a manager |
+
+## Submitted steps, ledger reads and reuse credit (template parity, milestone 5)
+
+| Addition | Why |
+|---|---|
+| top-level `submissions: {steps, selection, closed_message, evaluation_handler}` | the `submissions` capability (moved out of the ML flow): one repo per step at creation, `GET/PATCH workspace` generated with the flow's exact writes (`workspace_meta.userUrls`, `datasetUrls`, the step contribution, the implicit join), a step's `open` condition refusing a submission (403) |
+| `entry: {trigger: submission, step}` | the step's lane runs in the background for the holder after a submission; leading gates run first, a refusal with a `reason` becomes the contribution's status (`skipped_reuse`), then `running`, `done` or `failed` (replayable through `evaluation_handler`) |
+| `submission.lineage.{artifacts, selection}` | who first submitted each artifact, and the selected datasets weighing `1/N` — `resolveLineage` |
+| `best`, `best_of_others`, `best_of_mine` | the challenge-wide best metric (blockThreshold) and the lead condition (`takesTheLead`) |
+| `reward.multiplier` | the group bonus multiplies what is paid, never the base of reuse credit |
+| `reward.transfers: {floor, to}` | off-pool debit/credit pairs on the (clamped) base, with the reuser's floor — `computeReuseSplits` |
+| `reward.record_clamp`, `reward.label` | `rawPoints`/`clampedTo` on a clamped line; the ledger key's label |
+| `optional(<type>)` in a record param, camelCase param names | `model.metric.blockThreshold`; the `reward_rules` keys the ML flow stores (`apiPackaging`) |

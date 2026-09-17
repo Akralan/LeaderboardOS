@@ -78,7 +78,7 @@ export function generatedActions(
   // ── release ─────────────────────────────────────────────────────────────
   for (const lane of t.model.lanes) {
     const drawing = lane.nodes.some((node) => node.family === "act" && node.body.claim);
-    if (!drawing || lane.entry.trigger === "cron") continue;
+    if (!drawing || lane.entry.trigger === "cron" || lane.entry.trigger === "submission") continue;
     actions.push({
       path: `${lane.id}/release`,
       method: "POST",
@@ -220,7 +220,7 @@ export function generatedActions(
   };
 
   for (const lane of t.model.lanes) {
-    if (lane.entry.trigger === "cron") continue;
+    if (lane.entry.trigger === "cron" || lane.entry.trigger === "submission") continue;
     const nodes = gesturesOf(lane);
     const refFields = nodes.flatMap((node) =>
       (node.family === "collect" || node.family === "assess") && node.body.fields
@@ -326,7 +326,7 @@ export function generatedActions(
   };
 
   for (const lane of t.model.lanes) {
-    if (lane.entry.trigger === "cron" || !lane.nodes.some((node) => node.family === "act" && node.body.claim)) continue;
+    if (lane.entry.trigger === "cron" || lane.entry.trigger === "submission" || !lane.nodes.some((node) => node.family === "act" && node.body.claim)) continue;
     const access = laneAccess(lane);
 
     actions.push({

@@ -33,6 +33,9 @@ export type Type =
   /** Une instance d'un type de ressource du template, résolue par nom. */
   | { kind: "resource"; name: string };
 
+/** Les types marqués optionnels (`optional(number)`) : leur schéma accepte l'absence, leur valeur se lit `null`. */
+export const OPTIONAL_TYPES = new WeakSet<Type>();
+
 export const T = {
   int: { kind: "int" } as Type,
   number: { kind: "number" } as Type,
@@ -55,6 +58,12 @@ export const T = {
   record: (fields: Record<string, Type>): Type => ({ kind: "record", fields }),
   resource: (name: string): Type => ({ kind: "resource", name }),
   enum: (values: readonly string[] | null): Type => ({ kind: "enum", values }),
+  /** Une copie marquée : les singletons (`T.number`) restent obligatoires. */
+  optional: (of: Type): Type => {
+    const copy = { ...of } as Type;
+    OPTIONAL_TYPES.add(copy);
+    return copy;
+  },
 };
 
 export function showType(type: Type): string {

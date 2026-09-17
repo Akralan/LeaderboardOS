@@ -34,6 +34,11 @@ requires: {core: 1}
 presentation?:     {icon?, long_label?, join_caption?, brief_required?: bool, public?: bool, board?: bool, evaluation_handler?: <snake>,
                     contribution?: {type: <snake>, title: <text>, description?: <expr on challenge>, deliverables?: [<capability>]}}
 workspace?:        {mode: <expr: provided_repo | own_repo>}   # a branch per participant on the challenge repo, or their own GitHub repo (PATCH workspace)
+submissions?:      # steps submitted by URL (GET/PATCH workspace generated): one repo per step, a contribution per type, then the step's lane in background
+  steps: {<dataset | model | model_code | api>: {repo: <repo type>, repo_title: <text>, contribution: <snake>, title: <text>, artifact?: bool, deliverables?: [..], open?: <expr>, unless_input?: <create field>}}
+  selection?: <step whose repo keeps dataset_urls>
+  closed_message?: <text>
+  evaluation_handler?: <snake>
 resources:         # shared work units
   <snake_name>:
     fields: {<field>: {type: <type>, visibility?: [claimant | author | admin | "role(params.x)"], check?, from?, deliverable?, unique?, optional?: bool, retention?: {days_after_close: N}}}
@@ -55,7 +60,7 @@ lifecycle?:
   on_close?: [ effects ]
 lanes:             # at least one
   - id: <snake>
-    entry: {trigger: user | admin | cron, access?: {mode: open | role | author_of | signed_in, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},
+    entry: {trigger: user | admin | cron | submission, step?: <submission step>, access?: {mode: open | role | author_of | signed_in, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},
             schedule?: "<cron>", over?: {resource: <type>, where?: <expr>, sample?: <expr>}, cursor?: engine}
     nodes: [ <node>, ... ]   # a strict top-down sequence; no cycles
 
@@ -74,18 +79,22 @@ A node is a mapping with exactly ONE family key:
 - assess:  {id, kind: human | metric | ai_grid | self, fields?: {...}, from?: <collect id>, value?: <expr>, grid?: <expr>, input?: [<artifact URL expr>, ...], snapshot?: history | latest, background?: bool,
             emit?: {to: lifecycle.<aggregate id>, scope: <expr of the resource>}, counters?: {<counter>: {add: "<expr>"}}, gating?: bool}
 - reward:  {id?, amount: "<expr>" | {reverse: <rule_key>} | {mapping: tiers, tiers, key, match: at_least | equals, input} | {mapping: rank, over, by, order: asc | desc, amounts},
-            to?: <expr>, pool?: params.pool, clamp?: pool, order?: commit_time, rule_key?: <snake>, basis?: delta, meta?: {<key>: <expr>}}
+            to?: <expr>, pool?: params.pool, clamp?: pool, order?: commit_time, rule_key?: <snake>, label?: <text>, basis?: delta, meta?: {<key>: <expr>},
+            multiplier?: <expr: amount is the base, paid = round(base × multiplier)>, record_clamp?: bool,
+            transfers?: {floor?: <expr>, to: [{rule_key, label?, from: <list of {author, contribution, weight?}>, share: <expr>}]}}   # off-pool reuse credit on the base
 
-Types: string int number ratio points bool url file json date duration role capability grid_ref template_ref challenge_ref link,
+Types: string int number ratio points bool url file json date duration role capability grid_ref template_ref challenge_ref link, "optional(<type>)" in a record,
        "enum(a, b)", "enum(params.x)", "ref(<resource>)", "list(<type>)", "{field: type, ...}" or a YAML mapping.
 
 Expressions are a closed CEL-like subset, always YAML strings when they contain spaces or operators:
   literals, && || ! == != < <= > >= + - * / %, cond ? a : b, lists [..], member a.b, index a[0]
   methods: .map(x, e) .filter(x, e) .exists(x, e) .all(x, e) .size() .trim()
   functions: size count exists majority mode mean min max has age int double string now()
+    best("<rule_key>", "<meta field>"), best_of_others(..), best_of_mine(..)   # the ledger's max meta number: everyone, others than the holder, the holder
   Enum literals are quoted strings: 'judge.outcome == "failed"'. A bare word is a name.
 In scope: params.*, counters.*, challenge.state, challenge.title, participation.user, aggregates.<id>.inputs / .verdict,
   participation.holder, participation.group.{size, multiplier, members}, participation.workspace.{provider, url, ref, status, ready},
+  submission.{step, url, repo, contribution, lineage.{artifacts.<contribution type>: {author, contribution, weight} | null, selection: [..]}} (in a submission lane),
   participation.role (platform role), participation.qualified.<role param> (bool), <resource>.id, link fields: .id .author .title .url .members,
   board.{total, done} (with presentation.board),
   every upstream node by id (collect fields: form.field; claim: draw.<type>, draw.substituted; stored observation: probe.<store>; assess: check.value; ai_grid: grade.score on 0..1),

@@ -1,11 +1,11 @@
 import type { Challenge, RewardEntryDraft } from "../../database-service/domain/entities.js";
 import { ClaimNotConsumableError, type ConsumedClaim } from "../../capabilities/resources.js";
 import { readsRoot, type Expr } from "../expr/ast.js";
-import { evaluate, type Value } from "../expr/evaluator.js";
+import { LEDGER_FUNCTIONS, evaluate, ledgerKey, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
 import type { AggregateDecl, ClaimUse, ExprSource, RewardBody, TransitionBody } from "../format/schema.js";
 import type { EffectModel, NodeModel, TemplateModel } from "../validate/format.js";
-import { ObserverRefusal, type ParticipationContext, type TemplateRuntime } from "./runtime.js";
+import { ObserverRefusal, type EvaluationDetail, type ParticipationContext, type TemplateRuntime } from "./runtime.js";
 import { splitShares } from "../../database-service/domain/share.js";
 import { parseCsv } from "./csv.js";
 import { zodOf } from "./params.js";
@@ -82,6 +82,8 @@ export interface CompiledTemplate {
   groupLanes: ReadonlySet<string>;
   /** La description de la contribution, une expression sur `challenge`. */
   contributionDescription: ExprSource | null;
+  /** La clé de ledger de chaque transfert déclaré. */
+  transferKeys: ReadonlyMap<object, string>;
   /** Les paramètres de type `role` : ce que `participation.qualified` lit. */
   roleParams: readonly string[];
   /** Une lane lit `participation.qualified` : les qualifications se vérifient avant chaque geste. */
@@ -130,6 +132,13 @@ export interface RunState {
   sent: Record<string, readonly string[]>;
   /** Les instances qu'un `create` à `upsert` a créées ou retrouvées, par Act : ce que la réponse rend. */
   created: Record<string, string>;
+  /**
+   * Une lane jouée pour une soumission : la contribution de l'étape (ses lignes
+   * de ledger, sa note) et ce qu'un run d'évaluation rejoue.
+   */
+  submission: { contributionId: string; origin: { handler: string; payload: Record<string, unknown> } } | null;
+  /** Le détail de la dernière évaluation par grille, à écrire sur la contribution. */
+  evaluation: EvaluationDetail | null;
 }
 
 export function newState(challenge: Challenge, userId: string | null, params: Record<string, Value>): RunState {
@@ -146,6 +155,8 @@ export function newState(challenge: Challenge, userId: string | null, params: Re
     group: null,
     sent: {},
     created: {},
+    submission: null,
+    evaluation: null,
   };
 }
 
@@ -186,7 +197,40 @@ export class Engine {
         bindings[name] = await Promise.all(instances.map((instance) => resourceValue(instance, this.t.runtime, this.t.resourceTypes)));
       }
     }
-    return evaluate(ast, bindings, { now: this.t.runtime.now() });
+    return evaluate(ast, bindings, { now: this.t.runtime.now(), ledger: await this.ledgerReads(ast, state) });
+  }
+
+  /**
+   * `best`, `best_of_others`, `best_of_mine` : le plus grand `meta.<champ>` d'une
+   * clé de ledger sur le challenge, pour tous, pour les autres que le porteur,
+   * pour lui seul — lu avant l'évaluation, comme le flow ML lit la meilleure métrique.
+   */
+  private async ledgerReads(ast: Expr, state: RunState): Promise<Record<string, number | null> | undefined> {
+    const calls: { callee: string; rule: string; field: string }[] = [];
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== "object") return;
+      const candidate = node as { k?: string; callee?: string; args?: { k: string; value?: unknown }[] };
+      if (candidate.k === "call" && (LEDGER_FUNCTIONS as readonly string[]).includes(candidate.callee ?? "")) {
+        const [rule, field] = candidate.args ?? [];
+        if (typeof rule?.value === "string" && typeof field?.value === "string") calls.push({ callee: candidate.callee!, rule: rule.value, field: field.value });
+      }
+      for (const value of Object.values(node)) Array.isArray(value) ? value.forEach(visit) : visit(value);
+    };
+    visit(ast);
+    if (calls.length === 0) return undefined;
+    const reads: Record<string, number | null> = {};
+    for (const { callee, rule, field } of calls) {
+      const key = ledgerKey(callee, rule, field);
+      if (key in reads) continue;
+      const holder = state.userId ?? undefined;
+      reads[key] = await this.t.runtime.ledger.max(state.challenge.uuid, {
+        ruleKey: rule,
+        field,
+        ...(callee === "best_of_others" && holder ? { excludeUserId: holder } : {}),
+        ...(callee === "best_of_mine" && holder ? { onlyUserId: holder } : {}),
+      });
+    }
+    return reads;
   }
 
   /** Les instances d'un type, dans leur ordre : `ordered_by` quand le type en déclare un, la création sinon. */
@@ -303,6 +347,8 @@ export class Engine {
 
   /** La contribution qui porte le travail et le ledger d'un participant ; créée au premier besoin. */
   async contributionFor(state: RunState, userId: string): Promise<string> {
+    // Une soumission : la contribution de son étape, écrite par la capacité `submissions`.
+    if (state.submission && userId === state.userId) return state.submission.contributionId;
     const description = this.t.contributionDescription === null ? null : String(await this.eval(this.t.contributionDescription, state));
     return this.t.runtime.ledger.contribution(state.challenge, userId, { ...this.t.contribution, description });
   }
@@ -812,8 +858,22 @@ export class Engine {
         if (body.background) throw new Deferred(node, String(grid), inputs);
         let score: number;
         try {
-          score = scoreOf(await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs, ...(body.snapshot ? { snapshot: body.snapshot } : {}) })).score;
+          const result = scoreOf(
+            await this.t.runtime.evaluate({
+              challenge: state.challenge,
+              userId: state.userId!,
+              grid: String(grid),
+              inputs,
+              ...(body.snapshot ? { snapshot: body.snapshot } : {}),
+              // Une soumission : le run se rattache à la contribution de l'étape, et se rejoue depuis la soumission.
+              ...(state.submission ? { contributionId: state.submission.contributionId, origin: state.submission.origin } : {}),
+            })
+          );
+          score = result.score;
+          if (result.evaluation) state.evaluation = result.evaluation as EvaluationDetail;
         } catch (error) {
+          // Dans une soumission, une évaluation qui échoue est une panne : le run passe `failed`, rejouable.
+          if (state.submission) throw error;
           if (error instanceof ObserverRefusal) throw new Refusal(error.status, error.message);
           throw error;
         }
@@ -995,7 +1055,9 @@ export class Engine {
       if (duplicate) continue;
 
       const raw = Math.round(await this.number(amount, state));
-      let points = raw;
+      // Le bonus de groupe multiplie le versé, jamais l'assiette des transferts.
+      const multiplier = body.multiplier === undefined ? null : await this.number(body.multiplier, state);
+      let points = multiplier === null ? raw : Math.round(raw * multiplier);
       if (body.basis === "delta") {
         // Le challenge code : seul ce qui dépasse le déjà versé sur cette clé, jamais de reprise.
         const paid = existing
@@ -1009,14 +1071,75 @@ export class Engine {
         points = Math.min(points, Math.max(0, state.challenge.contribution_points_reward - distributed));
       }
       if (body.basis === "delta" && points < due) entryMeta.clampedTo = points;
+      if (body.record_clamp && points < due) Object.assign(entryMeta, { rawPoints: due, clampedTo: points });
       if (points === 0) continue;
 
       const contributionId = await this.contributionFor(state, userId);
       drafts.push({ challenge_id: challengeId, user_id: userId, contribution_id: contributionId, rule_key: ruleKey, points, meta: entryMeta });
       if (body.pool !== undefined) distributed += points;
       if (userId === state.userId) state.awarded += points;
+
+      if (body.transfers && points > 0) {
+        // L'assiette rognée dans la même proportion que le versé : un montant coupé de moitié ne reverse pas une part de points jamais versés.
+        const base = Math.round(raw * (due === 0 ? 0 : points / due));
+        const transfers = await this.transfers(body.transfers, state, { userId, contributionId, ruleKey, points, base });
+        drafts.push(...transfers);
+        if (userId === state.userId) state.awarded += transfers.filter((draft) => draft.user_id === userId).reduce((sum, draft) => sum + draft.points, 0);
+      }
     }
     if (drafts.length > 0) await runtime.ledger.write(drafts);
+  }
+
+  /**
+   * Les crédits de réutilisation d'un montant versé : pour chaque auteur amont,
+   * `round(assiette × weight × share)` prélevé au destinataire et crédité à
+   * l'auteur, hors pool (la paire s'annule). Le destinataire garde au moins
+   * `floor` de ce qui lui a été versé : au-delà, les prélèvements sont réduits
+   * au prorata (arrondis vers le bas). Le calcul de `computeReuseSplits`.
+   */
+  private async transfers(
+    spec: NonNullable<RewardBody["transfers"]>,
+    state: RunState,
+    award: { userId: string; contributionId: string; ruleKey: string; points: number; base: number }
+  ): Promise<RewardEntryDraft[]> {
+    let deductions: { ruleKey: string; author: string; contribution: string | undefined; amount: number }[] = [];
+    for (const target of spec.to) {
+      const items = await this.eval(target.from, state);
+      const share = await this.number(target.share, state);
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const author = typeof item.author === "string" ? item.author : null;
+        const weight = typeof item.weight === "number" ? item.weight : 1;
+        const part = weight * share;
+        // Réutiliser son propre artefact ne prélève rien.
+        if (!author || author === award.userId || !(part > 0)) continue;
+        deductions.push({
+          ruleKey: this.t.transferKeys.get(target)!,
+          author,
+          contribution: typeof item.contribution === "string" ? item.contribution : undefined,
+          amount: Math.round(award.base * part),
+        });
+      }
+    }
+    if (deductions.length === 0) return [];
+
+    const floor = spec.floor === undefined ? 0 : await this.number(spec.floor, state);
+    const maxDeductible = award.points - Math.round(award.points * floor);
+    const total = deductions.reduce((sum, deduction) => sum + deduction.amount, 0);
+    if (total > maxDeductible) {
+      const ratio = total === 0 ? 0 : maxDeductible / total;
+      deductions = deductions.map((deduction) => ({ ...deduction, amount: Math.floor(deduction.amount * ratio) }));
+    }
+
+    const challengeId = state.challenge.uuid;
+    const drafts: RewardEntryDraft[] = [];
+    for (const deduction of deductions) {
+      if (deduction.amount <= 0) continue;
+      const meta = { rawPoints: award.points, sourceRule: award.ruleKey };
+      drafts.push({ challenge_id: challengeId, user_id: award.userId, contribution_id: award.contributionId, rule_key: deduction.ruleKey, points: -deduction.amount, source_user_id: deduction.author, meta });
+      drafts.push({ challenge_id: challengeId, user_id: deduction.author, contribution_id: deduction.contribution, rule_key: deduction.ruleKey, points: deduction.amount, source_user_id: award.userId, meta: { ...meta } });
+    }
+    return drafts;
   }
 
   /**

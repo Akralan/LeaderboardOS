@@ -22,6 +22,7 @@ import { artifactOf } from "./bindings.js";
 import { evaluate as evaluateExpr } from "../expr/evaluator.js";
 import { provisionWorkspace, reprotectGroupBranch, setOwnRepo, workspaceCreationRepos, workspaceModeOf, type WorkspaceMode } from "../../capabilities/workspaces.js";
 import type { EvaluationDetail } from "./runtime.js";
+import type { SubmissionTable } from "../../capabilities/submissions.js";
 import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
 import { generatedActions, generatedPathConflicts, resourceCounts } from "./reads.js";
@@ -120,13 +121,22 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
   if (poolParam === undefined) throw new CompileError(`[interpreter] ${flowKey}: v1 compiles a single pool`);
 
   const ruleKeys: RuleKeyDeclaration[] = [];
-  for (const { body, key } of rewards) {
-    const declared = ruleKeys.find((ruleKey) => ruleKey.key === key);
-    const consumesPool = body.pool !== undefined;
-    if (declared && declared.consumesPool !== consumesPool) {
+  const transferKeys = new Map<object, string>();
+  const declareKey = (key: string, consumesPool: boolean, label: string | undefined) => {
+    const known = ruleKeys.find((ruleKey) => ruleKey.key === key);
+    if (known && known.consumesPool !== consumesPool) {
       throw new CompileError(`[interpreter] ${flowKey}: rule key ${key} is written both from and outside the pool`);
     }
-    if (!declared) ruleKeys.push({ key, consumesPool, label: key });
+    if (!known) ruleKeys.push({ key, consumesPool, label: label ?? key });
+  };
+  for (const { body, key } of rewards) {
+    declareKey(key, body.pool !== undefined, body.label);
+    // Un transfert suit le pool de sa récompense : sa paire prélèvement/crédit s'y annule.
+    for (const target of body.transfers?.to ?? []) {
+      const transferKey = declared(target.rule_key);
+      transferKeys.set(target, transferKey);
+      declareKey(transferKey, body.pool !== undefined, target.label);
+    }
   }
 
   const params = compileParams(shell, types.params, poolParam);
@@ -151,9 +161,11 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       ? { ...shell.presentation.contribution, type: declared(shell.presentation.contribution.type) }
       : { type: flowKey, title: shell.template.name },
     version: options.published?.version ?? null,
-    participationContext: Boolean(shell.workspace || shell.presentation?.board || model.lanes.some((lane) => lane.entry.access?.group === true)),
-    groupLanes: new Set(model.lanes.filter((lane) => lane.entry.access?.group === true).map((lane) => lane.id)),
+    participationContext: Boolean(shell.workspace || shell.submissions || shell.presentation?.board || model.lanes.some((lane) => lane.entry.access?.group === true)),
+    // Une soumission se joue toujours pour le porteur : la contribution et le ledger d'un groupe sont les siens.
+    groupLanes: new Set(model.lanes.filter((lane) => lane.entry.access?.group === true || lane.entry.trigger === "submission").map((lane) => lane.id)),
     contributionDescription: shell.presentation?.contribution?.description ?? null,
+    transferKeys,
     roleParams: Object.entries(types.params).filter(([, type]) => type.kind === "role").map(([name]) => name),
     readsQualified: model.lanes.some((lane) => expressionsOf(lane.nodes.map((node) => node.body)).some((ast) => readsQualified(ast))),
   };
@@ -171,6 +183,9 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     }
   };
   const engine = new Engine(compiled);
+  const submissionTable: SubmissionTable = Object.fromEntries(
+    Object.entries(shell.submissions?.steps ?? {}).map(([role, step]) => [role, { contributionType: declared(step.contribution), title: step.title, isArtifact: step.artifact === true }])
+  );
 
   // ── Actions ─────────────────────────────────────────────────────────────
   const actions: ChallengeActionDeclaration[] = [];
@@ -181,6 +196,8 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       jobs.push(cronJob(lane, compiled, engine, params));
       continue;
     }
+    // Jouée en arrière-plan après une soumission : aucune action à elle.
+    if (lane.entry.trigger === "submission") continue;
     const segments = segmentsOf(lane);
     const persisted = checkSegments(flowKey, lane, segments);
     const claimAct = lane.nodes.find((node) => node.family === "act" && node.body.claim) as Extract<NodeModel, { family: "act" }> | undefined;
@@ -223,6 +240,47 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     });
   }
 
+  // ── Soumissions : les dépôts d'étape, lus et soumis ─────────────────────
+  const submissions = shell.submissions;
+  if (submissions) {
+    if (shell.workspace) throw new CompileError(`[interpreter] ${flowKey}: workspace and submissions both serve PATCH workspace`);
+    // Pas de join préalable : lire et soumettre restent ouverts à tout compte connecté, soumettre fait entrer.
+    actions.push({
+      path: "workspace",
+      method: "GET",
+      access: {},
+      handle: ({ challenge, user }) => runtime.submissions.read(challenge.uuid, user.id),
+    });
+    actions.push({
+      path: "workspace",
+      method: "PATCH",
+      access: {},
+      async handle({ request, challenge, user }) {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json({ error: "Invalid JSON" }, { status: 400 });
+        }
+        const values = params.valuesOf(challenge, flowConfigOf(challenge));
+        const result = await runtime.submissions.submit(challenge, user.id, body, submissionTable, {
+          selectionRole: submissions.selection ?? null,
+          async closed(role) {
+            const open = submissions.steps[role]?.open;
+            if (open === undefined || !values) return null;
+            return (await engine.eval(open, newState(challenge, user.id, values))) === true ? null : submissions.closed_message ?? "This step is closed";
+          },
+        });
+        if (result instanceof Response) return result;
+        if (result.submission) {
+          const event = { challengeId: challenge.uuid, userId: user.id, repoId: result.submission.repoId, url: result.submission.url };
+          runtime.evaluations.schedule(() => runSubmission(event, compiled, engine, params, submissionTable));
+        }
+        return { repo: result.repo };
+      },
+    });
+  }
+
   // ── Surfaces générées : release, progress, overview, export ─────────────
   const conflicts = generatedPathConflicts(model.lanes, actions.map((action) => action.path));
   if (conflicts.length > 0) {
@@ -244,11 +302,9 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     config: { version: 1, schema: params.configSchema },
     rules: { parse: (raw) => (params.rulesSchema.safeParse(raw ?? {}).success ? params.rulesSchema.parse(raw ?? {}) : null) },
     ruleKeys,
-    contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
+    contributionTypes: contributionTypesOf(shell, compiled, declared),
     uses: { board: Boolean(shell.presentation?.board), groups: compiled.groupLanes.size > 0 },
-    ...(shell.presentation?.contribution?.deliverables?.length
-      ? { deliverables: [{ contributionType: compiled.contribution.type, capabilities: shell.presentation.contribution.deliverables }] }
-      : {}),
+    ...(deliverablesOf(shell, compiled, declared).length ? { deliverables: deliverablesOf(shell, compiled, declared) } : {}),
     ...(deliverableOf(shell) ? { requires: { deliverableCapability: deliverableOf(shell)! } } : {}),
     rewards: {
       // L'avancement du challenge, comme `overview.resources` : le hero le lit.
@@ -258,10 +314,25 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     },
     actions,
     jobs,
-    ...(hasBackground(model)
+    ...(hasBackground(model) || submissions
       ? {
           evaluationHandlers: [
-            {
+            ...(submissions
+              ? [
+                  {
+                    key: submissions.evaluation_handler ?? SUBMISSION_HANDLER,
+                    // Un run échoué rejoue la soumission : sa lane reprend depuis le début, sur l'état du moment.
+                    async retry(payload: Record<string, unknown>) {
+                      const { challengeId, userId, repoId, url } = payload;
+                      if ([challengeId, userId, repoId, url].some((value) => typeof value !== "string")) return { ok: false as const, reason: "invalid_payload" };
+                      const event = { challengeId: challengeId as string, userId: userId as string, repoId: repoId as string, url: url as string };
+                      runtime.evaluations.schedule(() => runSubmission(event, compiled, engine, params, submissionTable));
+                      return { ok: true as const };
+                    },
+                  },
+                ]
+              : []),
+            ...(hasBackground(model) ? [{
               key: evaluationHandler,
               // La relance d'un run échoué : reprendre l'évaluation (toujours une à la fois) et rejouer la suite.
               async retry(payload: Record<string, unknown>) {
@@ -280,12 +351,12 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
                 runtime.evaluations.schedule(() => continueEvaluation(continuation, compiled, engine, params));
                 return { ok: true as const };
               },
-            },
+            }] : []),
           ],
         }
       : {}),
     hooks:
-      lifecycleAggregates.length > 0 || shell.workspace
+      lifecycleAggregates.length > 0 || shell.workspace || submissions
         ? {
             ...(lifecycleAggregates.length > 0
               ? {
@@ -307,6 +378,16 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
                   onGroupJoin: (ctx) => reprotectGroupBranch(ctx),
                 }
               : {}),
+            ...(submissions
+              ? {
+                  // Un dépôt par étape, avec son rôle ; une étape se retire par un champ de création à `false`.
+                  onCreate: ({ challenge, input }: { challenge: Challenge; input: Readonly<Record<string, unknown>> }) => ({
+                    repos: Object.entries(submissions.steps)
+                      .filter(([, step]) => !(step.unless_input && input[step.unless_input] === false))
+                      .map(([role, step]) => ({ title: `${challenge.title} — ${step.repo_title}`, type: step.repo, role: role as never })),
+                  }),
+                }
+              : {}),
           }
         : undefined,
   };
@@ -326,6 +407,102 @@ function readsQualified(ast: ReturnType<typeof parseExpr>): boolean {
   };
   visit(ast);
   return found;
+}
+
+/** Les types de contribution : ceux des étapes soumises, sinon celui de `presentation.contribution`. */
+function contributionTypesOf(shell: TemplateModel["shell"], t: CompiledTemplate, declared: (key: string) => string) {
+  if (!shell.submissions) return [{ key: t.contribution.type, countsAsContribution: true }];
+  const types = new Set(Object.values(shell.submissions.steps).map((step) => declared(step.contribution)));
+  if (shell.presentation?.contribution) types.add(t.contribution.type);
+  return [...types].map((key) => ({ key, countsAsContribution: true }));
+}
+
+/** Ce que les contributions livrent à une validation : celle de `presentation`, et celles des étapes. */
+function deliverablesOf(shell: TemplateModel["shell"], t: CompiledTemplate, declared: (key: string) => string) {
+  const deliverables: { contributionType: string; capabilities: string[] }[] = [];
+  if (shell.presentation?.contribution?.deliverables?.length) {
+    deliverables.push({ contributionType: t.contribution.type, capabilities: shell.presentation.contribution.deliverables });
+  }
+  for (const step of Object.values(shell.submissions?.steps ?? {})) {
+    if (step.deliverables?.length) deliverables.push({ contributionType: declared(step.contribution), capabilities: step.deliverables });
+  }
+  return deliverables;
+}
+
+export const SUBMISSION_HANDLER = "submission";
+
+/** Une soumission acceptée : qui, pour quel dépôt d'étape, avec quelle URL. */
+export interface SubmissionEvent {
+  challengeId: string;
+  /** L'appelant ; le porteur se résout au moment du run. */
+  userId: string;
+  repoId: string;
+  url: string;
+}
+
+/**
+ * La lane d'une étape soumise, en arrière-plan : la contribution de l'étape du
+ * porteur, sa lignée, puis les nœuds. Les gates de tête passent avant que
+ * l'évaluation ne soit marquée `running` ; un refus qui porte une raison
+ * (`skipped_reuse`) devient le statut de la contribution, sans rien écrire
+ * d'autre ; une erreur la marque `failed` et laisse le run rejouable. Le
+ * challenge ML (`MlRewardsService.award`), compilé.
+ */
+export async function runSubmission(event: SubmissionEvent, t: CompiledTemplate, engine: Engine, params: CompiledParams, table: SubmissionTable): Promise<void> {
+  const { runtime } = t;
+  const decl = t.model.shell.submissions;
+  const challenge = (await runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === event.challengeId);
+  if (!decl || !challenge) return;
+  const values = params.valuesOf(challenge, flowConfigOf(challenge));
+  if (!values) {
+    console.warn(`[interpreter] ${t.flowKey}: challenge ${challenge.uuid} has no readable rules — submission not scored`);
+    return;
+  }
+  const role = await runtime.submissions.role(challenge.uuid, event.repoId);
+  const lane = role ? t.model.lanes.find((candidate) => candidate.entry.trigger === "submission" && candidate.entry.step === role) : undefined;
+  if (!role || !lane || !table[role]) return;
+
+  const state = newState(challenge, event.userId, values);
+  await engine.bindParticipation(state, lane.id);
+  const holder = state.userId!;
+  const contribution = await runtime.submissions.contribution(challenge.uuid, holder, table[role].contributionType);
+  if (!contribution) return;
+  const lineage = await runtime.submissions.lineage(challenge.uuid, holder, table, decl.selection ?? null);
+  state.submission = {
+    contributionId: contribution.id,
+    origin: { handler: decl.evaluation_handler ?? SUBMISSION_HANDLER, payload: { ...event } },
+  };
+  state.bindings.submission = {
+    step: role,
+    url: event.url,
+    repo: event.repoId,
+    contribution: contribution.id,
+    lineage: { artifacts: lineage.artifacts as unknown as Value, selection: lineage.selection as unknown as Value },
+  };
+
+  const lead = lane.nodes.findIndex((node) => !(node.family === "gate" && node.body.all));
+  const head = lead < 0 ? lane.nodes : lane.nodes.slice(0, lead);
+  const rest = lead < 0 ? [] : lane.nodes.slice(lead);
+  try {
+    await engine.run(head, state);
+  } catch (error) {
+    if (error instanceof Refusal && error.reason) {
+      await runtime.evaluations.finish(contribution.id, { status: error.reason as "skipped_reuse" });
+      return;
+    }
+    throw error;
+  }
+
+  await runtime.evaluations.finish(contribution.id, { status: "running" });
+  try {
+    await engine.run(rest, state);
+    await engine.settleShares(state);
+    await runtime.evaluations.finish(contribution.id, { status: "done", ...(state.evaluation ? { evaluation: state.evaluation } : {}) });
+    await runtime.ledger.syncCompletion(challenge);
+  } catch (error) {
+    await runtime.evaluations.finish(contribution.id, { status: "failed", ...(state.evaluation ? { evaluation: state.evaluation } : {}) });
+    throw error;
+  }
 }
 
 function hasBackground(model: TemplateModel): boolean {
