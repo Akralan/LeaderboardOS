@@ -1041,8 +1041,20 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     }
 
     if (body.delete !== undefined) {
-      const { type } = expr(body.delete, scope, [...path, "delete"], id);
-      if (type.kind !== "resource" && type.kind !== "dyn") report("type", [...path, "delete"], `a delete takes a resource, got ${showType(type)}`, { node: id });
+      const guarded = typeof body.delete === "object" ? body.delete : null;
+      const at = guarded ? [...path, "delete", "resource"] : [...path, "delete"];
+      const { type } = expr(guarded ? guarded.resource : (body.delete as ExprSource), scope, at, id);
+      if (type.kind !== "resource" && type.kind !== "dyn") report("type", at, `a delete takes a resource, got ${showType(type)}`, { node: id });
+      if (guarded?.without_inputs) {
+        const aggregate = model.aggregates.find((candidate) => candidate.decl.id === guarded.without_inputs!.aggregate);
+        if (!aggregate) report("reference", [...path, "delete", "without_inputs", "aggregate"], `unknown aggregate '${guarded.without_inputs.aggregate}'`, { node: id });
+        else if (type.kind === "resource" && aggregate.decl.over !== type.name) {
+          report("type", [...path, "delete", "without_inputs", "aggregate"], `${aggregate.decl.id} resolves ${aggregate.decl.over}, not ${type.name}`, { node: id });
+        }
+      }
+      if (guarded?.unclaimed && type.kind === "resource" && !shell.resources[type.name]?.claim) {
+        report("claim", [...path, "delete", "unclaimed"], `${type.name} declares no claim mode`, { node: id });
+      }
       return T.record(output);
     }
 

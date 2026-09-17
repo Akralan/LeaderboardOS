@@ -102,7 +102,7 @@ Enable HTTPS with Certbot: `certbot --nginx -d lab.my-twin.io`
 
 ```
 web: cd apps/leaderboard-client && npm run start -- -p $PORT
-postdeploy: npm run db:apply-schema && npm run db:upgrade-flow-configs && npm run db:migrate-journey-resources && npm run db:seed-grids && npm run db:resync-rewards
+postdeploy: npm run db:apply-schema && npm run db:migrate-endpoint-validation && npm run db:upgrade-flow-configs && npm run db:migrate-journey-resources && npm run db:seed-grids && npm run db:resync-rewards
 ```
 
 The `postdeploy` hook is what keeps the database in step. It deliberately does **not** run `drizzle-kit push`: push has to disambiguate moved columns through an interactive prompt, and a deploy has no TTY. `scripts/db-apply-schema.ts` applies explicit, idempotent `IF NOT EXISTS` statements instead — so **a new column added to `drizzle.ts` must also be added there**. See [`database.md`](./database.md#migrations).

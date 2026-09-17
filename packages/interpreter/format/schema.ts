@@ -197,8 +197,22 @@ export const actBody = z.looseObject({
    * que la requête porte, `null` compris), `set` des expressions.
    */
   update: z.strictObject({ resource: exprSource, from: identifier.optional(), set: z.record(identifier, exprSource).optional() }).optional(),
-  /** Supprime une instance (et ses réclamations) ; les gardes s'écrivent en gates. */
-  delete: exprSource.optional(),
+  /**
+   * Supprime une instance (et ses réclamations). Les gardes que seul le moteur
+   * sait lire se déclarent ici, avec leur message (`{count}` y est remplacé) :
+   * `unclaimed`, aucune réclamation vivante ou livrée ; `without_inputs`, aucune
+   * entrée de cet aggregate. Refusée, 409.
+   */
+  delete: z
+    .union([
+      exprSource,
+      z.strictObject({
+        resource: exprSource,
+        unclaimed: z.string().min(1).optional(),
+        without_inputs: z.strictObject({ aggregate: identifier, message: z.string().min(1) }).optional(),
+      }),
+    ])
+    .optional(),
 });
 export type ActBody = z.infer<typeof actBody>;
 export const ACT_KEYS = new Set(Object.keys(actBody.shape));

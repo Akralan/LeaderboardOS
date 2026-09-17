@@ -120,3 +120,12 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | `reward.transfers: {floor, to}` | off-pool debit/credit pairs on the (clamped) base, with the reuser's floor — `computeReuseSplits` |
 | `reward.record_clamp`, `reward.label` | `rawPoints`/`clampedTo` on a clamped line; the ledger key's label |
 | `optional(<type>)` in a record param, camelCase param names | `model.metric.blockThreshold`; the `reward_rules` keys the ML flow stores (`apiPackaging`) |
+
+## Guarded deletions and managers' evidence (template parity, milestone 6)
+
+| Addition | Why |
+|---|---|
+| `act: {delete: {resource, unclaimed, without_inputs}}` | an admin removes a reference case nobody claimed and a target nobody voted on — facts only the engine reads (live or delivered claims, an aggregate's inputs); refused 409 with the flow's message |
+| `GET resources?type=` carries each delivered claim (`user`, `context`, `result`) | the managers' evidence view of `GET runs`: what each reviewer observed, the endpoint's answer, the verdict |
+| `<lane>/file?claim_id=` open to managers | the bytes of that evidence (the endpoint's response) |
+| endpoint-check quorum `count(inputs) >= required`, verdict `works` only on a strict majority | the hand-written resolution: a tie left by concurrent verdicts resolves `broken`, and a target is never stuck past its quorum |

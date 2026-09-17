@@ -68,16 +68,18 @@ describe("endpoint-check, a reviewer's run", () => {
   let api: ReturnType<typeof dispatcher>;
   let probes: unknown[];
   let down: boolean;
+  let answer: number;
 
   beforeEach(() => {
     probes = [];
     down = false;
+    answer = 200;
     runtime = memoryRuntime({
       observe: async (_capability, args, rt) => {
         if (down) throw new ObserverRefusal(502, "The API did not respond correctly: unreachable");
         probes.push(args.to);
         const response = await rt.blobs.store({ challengeId: "c-check", bytes: Buffer.from("tumor"), contentType: "text/plain", retentionDays: 365 });
-        return { status: 200, ok: true, content_type: "text/plain", response: response as never };
+        return { status: answer, ok: answer < 300, content_type: "text/plain", response: response as never };
       },
     });
     PlatformRegistry.reset();
@@ -236,5 +238,76 @@ describe("endpoint-check, a reviewer's run", () => {
     for (let n = 0; n < 2; n++) await writeCase(author, n);
     expect((await fullRun(r1, "works", 0)).status).toBe(200);
     expect((await fullRun(r1, "works", 1)).status).toBe(409);
+  });
+
+  // ── Parité P6 : ce que le flow écrit à la main tranchait encore seul ─────
+
+  it("keeps a 4xx/5xx answer as a valid claim: a failing endpoint is evidence, not an outage", async () => {
+    await expose();
+    await writeCase();
+    answer = 500;
+    const picked = await api.post(r1, "reviewer/pick", { target: idOf("target"), case: idOf("reference_case") });
+    expect(picked.status).toBe(200);
+    expect(picked.body.claim.context.probe.response).toMatchObject({ status: 500, ok: false });
+  });
+
+  it("resolves a tie left by concurrent verdicts as broken, and pays the broken side", async () => {
+    await expose();
+    for (let n = 0; n < 3; n++) await writeCase(author, n);
+    const target = idOf("target");
+    await fullRun(r1, "works", 0);
+    await fullRun(r2, "broken", 1);
+    // Un verdict concurrent, livré sans avoir résolu, et un quatrième cas né d'une course sur le quota.
+    runtime.claims.push({
+      uuid: "raced", resource_id: idOf("reference_case", 2), challenge_id: "c-check", user_id: "r3",
+      result: { verdict: "works", description: "raced" }, claimed_at: runtime.clock, expires_at: null,
+      consumed_at: new Date(runtime.clock.getTime() + 10_000), released_at: null,
+      scope_key: `target=${target}`, scope_exclusive: true, context: { $emits: { quorum: target }, observation: { text: "raced" } },
+    });
+    const [first] = runtime.instances.filter((instance) => instance.resource_type === "reference_case");
+    await runtime.resources.createMany("c-check", "reference_case", [{ payload: { ...first.payload } }], { createdBy: "author" });
+    runtime.clock = new Date(runtime.clock.getTime() + 60_000);
+
+    expect((await fullRun(r4, "broken", 3)).status).toBe(200);
+    const resolved = runtime.instances.find((instance) => instance.uuid === target)!;
+    expect([resolved.state, resolved.verdict]).toEqual(["closed", "broken"]);
+    expect(runtime.ledgerRows.map((row) => [row.user_id, row.points])).toEqual([["r2", 10], ["r4", 10]]);
+  });
+
+  it("removes a target nobody voted on and a case nobody claimed, and refuses the rest", async () => {
+    await expose();
+    await expose("sub-r1");
+    for (let n = 0; n < 3; n++) await writeCase(author, n);
+    const [voted, untouched] = [idOf("target", 0), idOf("target", 1)];
+    const [claimed, free] = [idOf("reference_case", 0), idOf("reference_case", 2)];
+    await fullRun(r1, "works", 0);
+
+    expect(await api.post(ADMIN, "withdraw_target/target_removal", { target: voted })).toEqual({ status: 409, body: { error: "Cannot remove a target that already has 1 vote(s)" } });
+    expect((await api.post(ADMIN, "withdraw_target/target_removal", { target: untouched })).status).toBe(200);
+    expect(await api.post(ADMIN, "withdraw_case/case_removal", { case: claimed })).toEqual({ status: 409, body: { error: "Cannot remove a reference case that already has 1 claim(s)" } });
+    expect((await api.post(author, "withdraw_own_case/own_case_removal", { case: claimed })).status).toBe(409);
+    // Pas l'auteur : le cas n'est pas un choix.
+    expect((await api.post(r2, "withdraw_own_case/own_case_removal", { case: free })).status).toBe(400);
+    expect((await api.post(r2, "withdraw_case/case_removal", { case: free })).status).toBe(403);
+    expect((await api.post(author, "withdraw_own_case/own_case_removal", { case: free })).status).toBe(200);
+    expect(runtime.instances.map((instance) => instance.uuid)).not.toContain(free);
+    expect(runtime.instances.map((instance) => instance.uuid)).not.toContain(untouched);
+  });
+
+  it("serves managers the evidence of every verdict: context, result and response bytes", async () => {
+    await expose();
+    for (let n = 0; n < 3; n++) await writeCase(author, n);
+    await fullRun(r1, "works", 0);
+
+    const evidence = await api.get(ADMIN, "resources?type=reference_case");
+    expect(evidence.status).toBe(200);
+    const claims = evidence.body.instances.flatMap((instance: { claims?: unknown[] }) => instance.claims ?? []);
+    expect(claims).toEqual([
+      expect.objectContaining({ user_id: "r1", result: { verdict: "works", description: "matches" }, context: expect.objectContaining({ observation: { text: "it said tumor" } }) }),
+    ]);
+    const claimId = claims[0].claim_id;
+    expect(await api.get(ADMIN, `reviewer/file?claim_id=${claimId}&path=context.probe.response.response`)).toEqual({ status: 200, body: "tumor" });
+    expect((await api.get(r2, `reviewer/file?claim_id=${claimId}&path=context.probe.response.response`)).status).toBe(404);
+    expect((await api.get(r2, "resources?type=reference_case")).status).toBe(403);
   });
 });

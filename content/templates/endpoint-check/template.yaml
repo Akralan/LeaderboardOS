@@ -17,7 +17,12 @@
 #   wrote (403);
 # - the observation comes before the reveal, the reveal before the verdict;
 # - at quorum the majority side is paid, earliest first, clamped to the pool;
-#   late verdicts are recorded without pay;
+#   a target resolves "works" only on a strict majority of works: a tie left by
+#   concurrent verdicts resolves "broken"; late verdicts are recorded without pay;
+# - a manager removes a target nobody voted on, an admin (or its author) a case
+#   nobody claimed (409 otherwise);
+# - a 4xx/5xx answer of the endpoint is a valid observation (it is evidence of a
+#   broken endpoint); only an unreachable endpoint refuses the claim;
 # - case files and endpoint responses are kept 12 months after close.
 #
 # claim, file, options, progress, overview and export are not written here:
@@ -74,8 +79,8 @@ lifecycle:
       over: target
       per_participation: 1
       resolve:
-        when:    "count(inputs) == params.required_validations"
-        verdict: "majority(inputs.map(i, i.verdict))"
+        when:    "count(inputs) >= params.required_validations"
+        verdict: 'count(inputs.filter(i, i.verdict == "works")) * 2 > count(inputs) ? "works" : "broken"'
         then:
           - transition: {resource: target, to: closed}
           - reward:
@@ -151,3 +156,40 @@ lanes:
             verdict:     {type: "enum(works, broken)"}
             description: {type: string, check: "size(value.trim()) > 0"}
           emit: {to: lifecycle.quorum, scope: pick.target}
+
+  - id: withdraw_target
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: target_removal
+          fields:
+            target: {type: "ref(target)"}
+      - act:
+          id: remove_target
+          delete:
+            resource: target_removal.target
+            without_inputs: {aggregate: quorum, message: "Cannot remove a target that already has {count} vote(s)"}
+
+  - id: withdraw_case
+    entry: {trigger: admin}
+    nodes:
+      - collect:
+          id: case_removal
+          fields:
+            case: {type: "ref(reference_case)"}
+      - act:
+          id: remove_case
+          delete: {resource: case_removal.case, unclaimed: "Cannot remove a reference case that already has {count} claim(s)"}
+
+  - id: withdraw_own_case
+    entry:
+      trigger: user
+      access: {mode: role, role: params.reviewer_qualification}
+    nodes:
+      - collect:
+          id: own_case_removal
+          fields:
+            case: {type: "ref(reference_case)", where: "case.author == participation.user"}
+      - act:
+          id: remove_own_case
+          delete: {resource: own_case_removal.case, unclaimed: "Cannot remove a reference case that already has {count} claim(s)"}

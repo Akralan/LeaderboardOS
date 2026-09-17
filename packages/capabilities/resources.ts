@@ -50,6 +50,7 @@ export type ResourceStore = Pick<
   | "upsert"
   | "updatePayload"
   | "deleteResource"
+  | "claimCount"
 > & {
   inDrawTransaction<T>(run: (tx: DrawTransaction) => Promise<T>): Promise<T>;
 };
@@ -294,6 +295,11 @@ export function resources(store?: ResourceStore) {
     /** Réécrit des champs de la charge ; `false` si l'instance n'existe plus. */
     async update(resourceId: string, patch: Record<string, unknown>): Promise<boolean> {
       return (await (await storeOf()).updatePayload(resourceId, patch)) !== null;
+    },
+
+    /** Les réclamations actives ou livrées d'une instance : ce qui la rend intouchable. */
+    async claimCount(resourceId: string): Promise<number> {
+      return (await storeOf()).claimCount(resourceId);
     },
 
     /** Supprime une instance avec ses réclamations ; `false` si elle n'existait plus. */

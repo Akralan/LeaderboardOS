@@ -312,6 +312,10 @@ export function memoryRuntime(options: {
         return true;
       },
 
+      async claimCount(resourceId) {
+        return runtime.claims.filter((claim) => claim.resource_id === resourceId && (claim.consumed_at || claimState(claim, runtime.clock) === "active")).length;
+      },
+
       async remove(resourceId) {
         const index = runtime.instances.findIndex((candidate) => candidate.uuid === resourceId);
         if (index < 0) return false;

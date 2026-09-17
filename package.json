@@ -19,6 +19,7 @@
     "db:seed-grids": "tsx scripts/db-seed-grids.ts",
     "db:upgrade-flow-configs": "tsx scripts/db-upgrade-flow-configs.ts",
     "db:migrate-journey-resources": "tsx scripts/db-migrate-journey-resources.ts",
+    "db:migrate-endpoint-validation": "tsx scripts/db-migrate-endpoint-validation.ts",
     "db:preview-slugs": "tsx scripts/db-preview-slugs.ts",
     "db:seed:force": "tsx db_data/seed.ts --force",
     "db:seed:demo": "tsx db_data/seed-demo.ts",

@@ -72,7 +72,7 @@ A node is a mapping with exactly ONE family key:
     claim: {resource: <type or ref field like pick.case>, where?: <expr>, scope?: {<key>: <expr>}, substitute?: {resource: <type>, rate: <expr>}}
     create: <type>, from?: <collect id>, many?: {from_file: <expr>}, set?: {<field>: <expr>}, upsert?: {by: [author | <field>...], overwrite?: bool}
     update: {resource: <expr>, from?: <collect id: only the fields the request sent>, set?: {<field>: <expr>}}
-    delete: <expr of a resource>
+    delete: <expr of a resource> | {resource: <expr>, unclaimed?: "<409 message, {count}>", without_inputs?: {aggregate: <id>, message: "<409 message, {count}>"}}
     transition: {resource: <expr>, to: closed | open, verdict?: <expr or word>, from?: <verdict>, resolution?: {<key>: <expr>}}
     grant: {field: <resource field expr>, to: participation}
     capability: <catalog name>, store?: <snake>, <capability args>: <expr>

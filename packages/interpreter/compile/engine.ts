@@ -456,7 +456,17 @@ export class Engine {
     }
 
     if (body.delete !== undefined) {
-      const instance = await this.designated(body.delete, state);
+      const guarded = typeof body.delete === "object" ? body.delete : null;
+      const instance = await this.designated(guarded ? guarded.resource : (body.delete as ExprSource), state);
+      const refuse = (message: string, count: number) => new Refusal(409, message.replace(/\{count\}/g, String(count)));
+      if (guarded?.unclaimed) {
+        const claims = await this.t.runtime.resources.claimCount(instance.uuid);
+        if (claims > 0) throw refuse(guarded.unclaimed, claims);
+      }
+      if (guarded?.without_inputs) {
+        const inputs = await this.inputs(guarded.without_inputs.aggregate, instance.uuid, state.bindings.params as Record<string, Value>);
+        if (inputs.length > 0) throw refuse(guarded.without_inputs.message, inputs.length);
+      }
       if (!(await this.t.runtime.resources.remove(instance.uuid))) throw new Refusal(404, `This ${instance.resource_type} no longer exists`);
       if (this.shell.resources[instance.resource_type]?.ordered_by) await this.renumber(state.challenge.uuid, instance.resource_type, null);
       return;

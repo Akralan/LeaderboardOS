@@ -289,6 +289,15 @@ export class ResourceRepository {
     return row ? toInstance(row) : null;
   }
 
+  /** Les réclamations vivantes ou livrées d'une instance. */
+  async claimCount(resourceId: string): Promise<number> {
+    const [row] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(resource_claims)
+      .where(and(eq(resource_claims.resource_id, resourceId), countsTowardK));
+    return row?.total ?? 0;
+  }
+
   /** Supprime une instance, ses réclamations et ses grants (cascade) ; `false` si elle n'existait plus. */
   async deleteResource(resourceId: string): Promise<boolean> {
     const rows = await db.delete(resource_instances).where(eq(resource_instances.uuid, resourceId)).returning({ uuid: resource_instances.uuid });

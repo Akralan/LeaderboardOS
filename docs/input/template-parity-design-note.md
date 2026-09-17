@@ -28,7 +28,7 @@ The strangler already bit twice: `data-annotation` was flipped with data continu
 - A test holds the catalog to its bindings.
 - Verified live on the dev database.
 
-### P2 — Asynchronous evaluation, and paying the delta
+### P2 — Asynchronous evaluation, and paying the delta — **done** (Sept. 17)
 
 **Asynchronous evaluation** (gap D13). A gesture that reaches an `ai_grid` node does not wait for the agent:
 
@@ -47,7 +47,7 @@ The generated UI polls the contribution while it is `running` (the overview alre
 
 **Proof.** A `graded-submission`-like conformance case, an equivalence suite of `basis: delta` against `computeCodeAward` (scores up and down, pool clamp, rule edits), and the continuation replayed by retry.
 
-### P3 — `code`
+### P3 — `code` — **done** (Sept. 17)
 
 - **Task board** (gap D10) — a core capability read, `board.total` and `board.done` in scope for the participation's holder. The template gates evaluation on `board.total > 0 && board.done == board.total`. Join copies the template tasks: a lane `on_join` effect `copy_board`.
 - **Workspace** (gaps E14, D13 inputs):
@@ -63,7 +63,7 @@ The generated UI polls the contribution while it is `running` (the overview alre
 - **Around the flow** — promotion from a sandbox keeps the `code` proposable (the template reuses it through the flow key), and the onboarding events (`evaluation.requested`, `contribution.evaluated`) are emitted by the engine's evaluation path.
 - **Proof and flip** — equivalence against the code flow's services on Postgres (a real branch is not required: the provider is stubbed at the runtime port), then `code` switches to the template.
 
-### P4 — `journey-validation`, and resource edits
+### P4 — `journey-validation`, and resource edits — **done** (Sept. 17)
 
 - **Update and delete a resource** (gap C8) — `act: {update: {resource, set}}` and `act: {delete: {resource}}`, with guards expressed as gates. This covers the scenario steps (edit, reorder with dense renumbering, delete) and the endpoint admin deletions (unclaimed case, target without verdicts).
 - **Multi-request runs** (gap D11) — a persisted run per (lane, participant, scope), resumable, whose gestures upsert keyed step results. This compiles the `multi-segment run` support gap (`flow_runs`).
@@ -75,7 +75,7 @@ The generated UI polls the contribution while it is `running` (the overview alre
 - **UI** — a generic "app frame" field kind in the generated UI (`url` shown in an iframe).
 - **Proof and flip** — equivalence against `scenario-walkthrough.service.ts`, then `journey-validation` switches.
 
-### P5 — `ml`
+### P5 — `ml` — **done** (Sept. 17)
 
 - **First-submitter ownership** (gap C7) — compile `match_or_create` on a resource keyed by the normalized artifact URL. A reuse is recorded, never scored, paid 0.
 - **Challenge-wide reads** (gap B4) — `best(<rule_key>.<meta field>, except: participation.user)` and `mine(…)` over ledger meta. This yields the beat-best condition (`takesTheLead`) and `blockThreshold`.
@@ -83,7 +83,7 @@ The generated UI polls the contribution while it is `running` (the overview alre
 - **Metric** — `kaggle_metadata.metrics.<name>` from P1; `baseline` normalization in expressions.
 - **Proof and flip** — equivalence against `computeMlAward` (lead changes, reuse chains, floor, clamp before splits, groups), then `ml` switches.
 
-### P6 — `endpoint-validation` residuals
+### P6 — `endpoint-validation` residuals — **done** (Sept. 17)
 
 - Admin deletions (from P4).
 - A managers' evidence read (inputs and responses per verdict).

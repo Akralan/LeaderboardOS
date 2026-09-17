@@ -40,6 +40,7 @@ export type RuntimeResources = Pick<
   | "upsert"
   | "update"
   | "remove"
+  | "claimCount"
 >;
 
 export interface RuntimeLedger {
@@ -264,6 +265,7 @@ export function defaultRuntime(
       upsert: lazy("upsert"),
       update: lazy("update"),
       remove: lazy("remove"),
+      claimCount: lazy("claimCount"),
     },
     blobs: {
       async store(input) {

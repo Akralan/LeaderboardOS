@@ -310,10 +310,13 @@ export function generatedActions(
   }
 
   // ── claim en cours, fichiers ─────────────────────────────────────────────
+  /** La réclamation de l'appelant ; toute réclamation du challenge pour un manager, qui lit les preuves. */
   const holderOf = async (ctx: ActionContext) => {
     const claimId = new URL(ctx.request.url).searchParams.get("claim_id");
     const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
-    return claim && claim.user_id === ctx.user.id && claim.challenge_id === ctx.challenge.uuid ? claim : null;
+    if (!claim || claim.challenge_id !== ctx.challenge.uuid) return null;
+    if (claim.user_id === ctx.user.id) return claim;
+    return ctx.access.isAdmin() || (await ctx.access.isManager()) ? claim : null;
   };
   const projectedFor = async (ctx: ActionContext, values: Record<string, Value>, resourceId: string, claimant: boolean) => {
     const instance = await t.runtime.resources.resource(resourceId);
@@ -327,7 +330,9 @@ export function generatedActions(
 
   for (const lane of t.model.lanes) {
     if (lane.entry.trigger === "cron" || lane.entry.trigger === "submission" || !lane.nodes.some((node) => node.family === "act" && node.body.claim)) continue;
-    const access = laneAccess(lane);
+    // Les managers lisent les preuves des réclamations (la réponse observée, le fichier éprouvé).
+    const entered = laneAccess(lane);
+    const access: ActionAccess = Object.keys(entered).length === 0 ? entered : { ...entered, roles: [...new Set([...(entered.roles ?? []), "admin"])], manager: true };
 
     actions.push({
       path: `${lane.id}/claim`,
@@ -438,7 +443,13 @@ export function generatedActions(
       if (!decl) return jsonError(404, `No resource type ${type}`);
       const viewer = adminViewer(ctx, values);
       const instances = await engine.instancesOf(ctx.challenge.uuid, type);
-      const names = await t.runtime.names([...new Set(instances.map((instance) => instance.created_by).filter((id): id is string => Boolean(id)))]);
+      // Les preuves : chaque réclamation livrée, avec ce que la lane a gardé et le résultat du geste final.
+      const claimsOf = new Map<string, Awaited<ReturnType<typeof t.runtime.resources.consumedClaims>>>();
+      if (t.replays.has(type)) {
+        for (const instance of instances) claimsOf.set(instance.uuid, await t.runtime.resources.consumedClaims(instance.uuid));
+      }
+      const people = [...instances.map((instance) => instance.created_by), ...[...claimsOf.values()].flat().map((claim) => claim.user_id)];
+      const names = await t.runtime.names([...new Set(people.filter((id): id is string => Boolean(id)))]);
       return {
         type,
         instances: await Promise.all(
@@ -451,6 +462,18 @@ export function generatedActions(
             resolution: (instance.resolution ?? null) as Value,
             created_at: instance.created_at.toISOString(),
             fields: await project(await resourceValue(instance, t.runtime, t.resourceTypes), decl, viewer),
+            ...(claimsOf.has(instance.uuid)
+              ? {
+                  claims: (claimsOf.get(instance.uuid) ?? []).map((claim) => ({
+                    claim_id: claim.claim_id,
+                    user_id: claim.user_id,
+                    user_name: names[claim.user_id] ?? null,
+                    consumed_at: claim.consumed_at.toISOString(),
+                    context: Object.fromEntries(Object.entries(claim.context ?? {}).filter(([key]) => !key.startsWith("$"))) as Value,
+                    result: claim.result as Value,
+                  })),
+                }
+              : {}),
           }))
         ),
       };
