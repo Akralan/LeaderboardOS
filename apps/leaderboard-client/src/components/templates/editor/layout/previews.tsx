@@ -323,8 +323,118 @@ function WalkthroughsPreview({ block }: { block: BlockView }) {
   );
 }
 
+function ProjectPreview() {
+  return (
+    <div className={card}>
+      <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] px-3 py-2">
+        <span className={`${skeleton} h-4 w-4 rounded`} />
+        <span className={`${skeleton} h-2.5 w-1/3`} />
+        <span className="ml-auto rounded-full bg-green-500/15 px-2 py-0.5 text-[9px] font-bold text-green-400">ready</span>
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-3 gap-2">
+        {['To do', 'Doing', 'Done'].map((column, index) => (
+          <div key={column} className="flex flex-col gap-1.5 rounded-lg bg-white/[0.03] p-2">
+            <span className="text-[10px] font-semibold text-white/45">{column}</span>
+            {Array.from({ length: 2 - (index % 2) }, (_, row) => <span key={row} className={`${skeleton} h-5`} />)}
+          </div>
+        ))}
+      </div>
+      <span className="w-fit rounded-lg bg-brandCP/15 px-3 py-1 text-[10px] font-semibold text-brandCP">Launch evaluation</span>
+    </div>
+  );
+}
+
+function SubmissionsPreview() {
+  const steps = ['Dataset', 'Model', 'API'];
+  return (
+    <div className={card}>
+      <div className="flex items-center px-4">
+        {steps.map((step, index) => (
+          <div key={step} className="flex flex-1 items-center last:flex-none">
+            <span className={`flex h-7 w-7 items-center justify-center rounded-full border-2 text-[9px] font-semibold ${index === 0 ? 'border-brandCP text-brandCP' : 'border-white/15 text-white/40'}`}>{index + 1}</span>
+            {index < steps.length - 1 && <span className="mx-2 h-px flex-1 bg-white/[0.08]" />}
+          </div>
+        ))}
+      </div>
+      <Title meta="Kaggle · GitHub">Submission</Title>
+      <div className="flex gap-2">
+        <span className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 text-[10px] text-white/35">https://www.kaggle.com/…</span>
+        <span className="rounded-lg bg-brandCP/15 px-2 py-1.5 text-[10px] font-semibold text-brandCP">Submit</span>
+      </div>
+      <Rows count={1} columns={2} />
+    </div>
+  );
+}
+
+function SubmissionListPreview() {
+  return (
+    <div className={card}>
+      {['Dataset', 'Model'].map((step) => (
+        <div key={step} className="flex flex-col gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-white/40">{step}</span>
+          <Rows count={2} columns={2} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ComputePreview() {
+  return (
+    <div className={card}>
+      <Title meta="compute extension">GPU compute</Title>
+      <div className="flex items-center gap-2">
+        <span className="rounded-lg bg-brandCP/15 px-3 py-1 text-[10px] font-semibold text-brandCP">Request a GPU</span>
+        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-bold text-amber-300">Pending approval</span>
+      </div>
+    </div>
+  );
+}
+
+function AnnotationPreview() {
+  return (
+    <div className={card}>
+      <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg" style={{ backgroundImage: 'repeating-linear-gradient(135deg, rgb(255 255 255 / 0.05) 0 8px, transparent 8px 16px)' }}>
+        <span className="font-mono text-[10px] text-white/40">image_url</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {['Option A', 'Option B', 'Skip'].map((option, index) => (
+          <span key={option} className={`rounded-full border px-2.5 py-1 text-[10px] ${index === 2 ? 'border-white/10 text-white/40' : 'border-brandCP/40 text-brandCP'}`}>{option}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CampaignPreview() {
+  return (
+    <div className={card}>
+      <div className="grid grid-cols-2 gap-2">
+        {['Import items', 'Import golds'].map((label) => (
+          <span key={label} className="rounded-lg border border-dashed border-white/15 px-2 py-2 text-center text-[10px] text-white/40">{label}</span>
+        ))}
+      </div>
+      <Title meta="labeled · contested">Progress</Title>
+      <span className={`${skeleton} h-1.5 w-full`} />
+      <Rows count={2} columns={3} />
+    </div>
+  );
+}
+
 export function BlockPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
   switch (block.component) {
+    case 'project':
+      return <ProjectPreview />;
+    case 'submissions':
+      return <SubmissionsPreview />;
+    case 'submission_list':
+      return <SubmissionListPreview />;
+    case 'compute':
+      return <ComputePreview />;
+    case 'annotation':
+      return <AnnotationPreview />;
+    case 'campaign':
+      return <CampaignPreview />;
     case 'walkthrough':
       return <WalkthroughPreview block={block} />;
     case 'targets':

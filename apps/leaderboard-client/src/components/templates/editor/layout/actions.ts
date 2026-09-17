@@ -25,6 +25,7 @@ export function layoutSourceOf(model: ReturnType<typeof useEditor>['model']) {
     lanes: model.lanes.map((lane) => ({ id: lane.id, trigger: String(lane.entry.body.trigger ?? '') })),
     board: isRec(model.doc.presentation) && model.doc.presentation.board === true,
     workspace: isRec(model.doc.workspace),
+    submissions: isRec(model.doc.submissions),
   };
 }
 

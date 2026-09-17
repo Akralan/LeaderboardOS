@@ -51,8 +51,12 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
         if (before !== undefined) report([...path, "component"], `'${block.component}' is placed once per screen (already at block ${before})`);
         else singles.set(spec.name, index);
       }
-      if (spec.requires === "board" && !model.shell.presentation?.board) report([...path, "component"], "'board' needs `presentation.board: true`");
-      if (spec.requires === "workspace" && !model.shell.workspace) report([...path, "component"], "'workspace' needs a `workspace` declaration");
+      if (spec.requires === "board" && !model.shell.presentation?.board) report([...path, "component"], `'${block.component}' needs \`presentation.board: true\``);
+      if (spec.requires === "workspace" && !model.shell.workspace) report([...path, "component"], `'${block.component}' needs a \`workspace\` declaration`);
+      for (const laneId of spec.expects?.lanes ?? []) {
+        if (!lanes.has(laneId) && !brokenLanes.has(laneId)) report([...path, "component"], `'${block.component}' plays the lane '${laneId}', which this template does not declare`);
+      }
+      if (spec.expects?.submissions && !model.shell.submissions) report([...path, "component"], `'${block.component}' needs a \`submissions\` declaration`);
 
       if (block.at.x + block.at.w > UI_COLUMNS) shape([...path, "at"], `block '${block.id}' overflows the ${UI_COLUMNS}-column grid (x ${block.at.x} + w ${block.at.w})`);
       if (block.at.w < spec.size.minW || block.at.h < spec.size.minH) {

@@ -15,6 +15,9 @@ function lockOf(spec: UiComponentSpec, placed: readonly { component: string }[],
   if (spec.single && placed.some((block) => block.component === spec.name)) return 'Already on this screen';
   if (spec.requires === 'board' && !source.board) return 'Needs presentation.board: true';
   if (spec.requires === 'workspace' && !source.workspace) return 'Needs a workspace declaration';
+  const missing = (spec.expects?.lanes ?? []).filter((lane) => !source.lanes.some((candidate) => candidate.id === lane));
+  if (missing.length) return `Plays the lane${missing.length > 1 ? 's' : ''} ${missing.join(', ')} — not on this template`;
+  if (spec.expects?.submissions && !source.submissions) return 'Needs a submissions declaration';
   return null;
 }
 

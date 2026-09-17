@@ -35,6 +35,12 @@ export interface UiComponentSpec {
   single?: boolean;
   /** Ce que le template doit déclarer pour que le composant ait quelque chose à montrer. */
   requires?: "board" | "workspace";
+  /**
+   * Un écran écrit à la main, entré au catalogue tel quel : les lanes qu'il
+   * joue par leur nom, la déclaration `submissions` qu'il lit. Le validateur
+   * refuse un template qui ne les a pas.
+   */
+  expects?: { lanes?: readonly string[]; submissions?: boolean };
 }
 
 export const UI_CATALOG: readonly UiComponentSpec[] = [
@@ -202,6 +208,71 @@ export const UI_CATALOG: readonly UiComponentSpec[] = [
     },
     size: { w: 12, h: 6, minW: 6, minH: 3 },
     single: true,
+  },
+
+  // ── Les écrans écrits à la main des flows code, ml et data-annotation ──
+  // Entrés tels quels : chacun joue les lanes du template dont il porte le
+  // nom (`expects`), sans argument. Un template qui les compose a la forme du
+  // flow d'origine ; le validateur le vérifie par les noms.
+  {
+    name: "project",
+    label: "Project",
+    role: "the code challenge panel: workspace, personal board, and the project evaluation",
+    screens: ["contributor"],
+    props: {},
+    size: { w: 12, h: 8, minW: 8, minH: 5 },
+    single: true,
+    requires: "board",
+    expects: { lanes: ["project_evaluation"] },
+  },
+  {
+    name: "submissions",
+    label: "Submissions",
+    role: "the ML submission steps: dataset, model, API packaging, with the community picks and the compute request",
+    screens: ["contributor"],
+    props: {},
+    size: { w: 12, h: 8, minW: 8, minH: 5 },
+    single: true,
+    expects: { submissions: true },
+  },
+  {
+    name: "submission_list",
+    label: "Submission list",
+    role: "every submitted URL, step by step, for the manager",
+    screens: ["manage"],
+    props: {},
+    size: { w: 12, h: 5, minW: 6, minH: 3 },
+    single: true,
+    expects: { submissions: true },
+  },
+  {
+    name: "compute",
+    label: "Compute",
+    role: "GPU compute requests (compute extension): the request for a participant, the decisions for a manager",
+    screens: ["contributor", "manage"],
+    props: {},
+    size: { w: 12, h: 3, minW: 6, minH: 2 },
+    single: true,
+  },
+  {
+    name: "annotation",
+    label: "Annotation",
+    role: "the labeling workbench: one item at a time, the answers of the label schema, a skip",
+    screens: ["contributor"],
+    props: { schema_param: { kind: "text", label: "Schema param", hint: "the param holding {options: [{key, label}]} (label_schema)" } },
+    size: { w: 12, h: 8, minW: 8, minH: 5 },
+    single: true,
+    expects: { lanes: ["annotator"] },
+  },
+  {
+    name: "campaign",
+    label: "Campaign",
+    role: "the annotation campaign: imports, progress, annotators' accuracy, contested items, export",
+    screens: ["manage"],
+    props: { schema_param: { kind: "text", label: "Schema param", hint: "the param holding {options: [{key, label}]} (label_schema)" } },
+    size: { w: 12, h: 8, minW: 8, minH: 5 },
+    single: true,
+    expects: { lanes: ["import", "resolve"] },
   },
 ];
 

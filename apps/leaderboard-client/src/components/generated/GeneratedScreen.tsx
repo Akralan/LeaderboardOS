@@ -13,6 +13,7 @@ import { GeneratedOverview } from './GeneratedOverview';
 import { GeneratedMine, GeneratedResources } from './GeneratedResources';
 import { GeneratedWorkspace } from './GeneratedWorkspace';
 import { StepsBlock, TargetsBlock, WalkthroughBlock, WalkthroughsBlock } from './journeyBlocks';
+import { AnnotationBlock, CampaignBlock, ComputeBlock, ProjectBlock, SubmissionListBlock, SubmissionsBlock } from './flowBlocks';
 import { fgAt } from './format';
 
 /**
@@ -36,6 +37,8 @@ export interface ScreenData {
   participants: { user_id: string; workspace_status?: string | null; group_owner_id?: string | null }[];
   repoActivity: Record<string, any> | null;
   rewards: ChallengeRewards | null;
+  /** Scaleway est connecté : les demandes de calcul se décident sur la plateforme (écran manager). */
+  computeConnected: boolean;
 }
 
 export interface ScreenRuntime {
@@ -49,8 +52,15 @@ export interface ScreenRuntime {
   /** Les qualifications que le visiteur tient ; `null` tant qu'elles chargent. */
   held: string[] | null;
   /** Le contexte du contributeur ; absent sur l'écran manager. */
-  contributor: Pick<ContributorSlotContext, 'isMember' | 'myTasks' | 'myParticipation' | 'reloadBoard'> | null;
+  contributor: Pick<ContributorSlotContext, 'isMember' | 'myTasks' | 'templateTasks' | 'myParticipation' | 'myProjectContribution' | 'reloadBoard'> | null;
   data: ScreenData;
+}
+
+/** Le mode de workspace d'un challenge : le paramètre que la surface nomme, ou le mode écrit. */
+export function workspaceModeOf(runtime: ScreenRuntime): 'provided_repo' | 'own_repo' | null {
+  const workspace = runtime.description.surface.workspace;
+  if (!workspace) return null;
+  return (workspace.param ? configOf(runtime.challenge)[workspace.param] : workspace.mode) === 'own_repo' ? 'own_repo' : 'provided_repo';
 }
 
 export function configOf(challenge: { flow_config?: unknown }): Record<string, unknown> {
@@ -135,9 +145,8 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   },
   workspace: (_block, runtime) => {
     const contributor = runtime.contributor;
-    const workspace = runtime.description.surface.workspace;
-    if (!contributor?.isMember || !workspace) return null;
-    const mode = (workspace.param ? configOf(runtime.challenge)[workspace.param] : workspace.mode) === 'own_repo' ? 'own_repo' : 'provided_repo';
+    const mode = workspaceModeOf(runtime);
+    if (!contributor?.isMember || !mode) return null;
     return <GeneratedWorkspace challengeId={runtime.challengeId} mode={mode} participation={contributor.myParticipation} onSaved={contributor.reloadBoard} />;
   },
   overview: (_block, runtime) => <GeneratedOverview challengeId={runtime.challengeId} resources={runtime.description.surface.resources} />,
@@ -155,6 +164,13 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   targets: (block, runtime) => <TargetsBlock block={block} runtime={runtime} />,
   steps: (block, runtime) => <StepsBlock block={block} runtime={runtime} />,
   walkthroughs: (block, runtime) => <WalkthroughsBlock block={block} runtime={runtime} />,
+  // Les écrans écrits à la main des flows code, ml et data-annotation, montés tels quels.
+  project: (block, runtime) => <ProjectBlock block={block} runtime={runtime} />,
+  submissions: (block, runtime) => <SubmissionsBlock block={block} runtime={runtime} />,
+  submission_list: (block, runtime) => <SubmissionListBlock block={block} runtime={runtime} />,
+  compute: (block, runtime) => <ComputeBlock block={block} runtime={runtime} />,
+  annotation: (block, runtime) => <AnnotationBlock block={block} runtime={runtime} />,
+  campaign: (block, runtime) => <CampaignBlock block={block} runtime={runtime} />,
 };
 
 /** Les blocs dans l'ordre de lecture : la colonne d'un téléphone les empile ainsi. */

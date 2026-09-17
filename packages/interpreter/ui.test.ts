@@ -158,3 +158,39 @@ describe("the scenario components", () => {
     ]);
   });
 });
+
+describe("the hand-written flow screens in the catalogue", () => {
+  it("require the lanes and declarations they play, by name", () => {
+    const source = withUi(
+      [
+        "  contributor:",
+        "    blocks:",
+        "      - {id: p, component: project, at: {x: 0, y: 0, w: 12, h: 8}}",
+        "      - {id: s, component: submissions, at: {x: 0, y: 8, w: 12, h: 8}}",
+        "      - {id: a, component: annotation, at: {x: 0, y: 16, w: 12, h: 8}}",
+        "  manage:",
+        "    blocks:",
+        "      - {id: c, component: campaign, at: {x: 0, y: 0, w: 12, h: 8}}",
+        "      - {id: k, component: compute, at: {x: 0, y: 8, w: 12, h: 3}}",
+      ].join("\n")
+    );
+    expect(errorsOf(source)).toEqual([
+      ["reference", "ui.contributor.blocks.0.component", "'project' needs `presentation.board: true`"],
+      ["reference", "ui.contributor.blocks.0.component", "'project' plays the lane 'project_evaluation', which this template does not declare"],
+      ["reference", "ui.contributor.blocks.1.component", "'submissions' needs a `submissions` declaration"],
+      ["reference", "ui.contributor.blocks.2.component", "'annotation' plays the lane 'annotator', which this template does not declare"],
+      ["reference", "ui.manage.blocks.0.component", "'campaign' plays the lane 'import', which this template does not declare"],
+      ["reference", "ui.manage.blocks.0.component", "'campaign' plays the lane 'resolve', which this template does not declare"],
+    ]);
+  });
+
+  it("accept them on the templates they come from", () => {
+    const compose = (key: string, ui: string) => `${readFileSync(path.join(ROOT, `content/templates/${key}/template.yaml`), "utf8").replace(/\r\n/g, "\n").trimEnd()}\n\nui:\n${ui}\n`;
+    const code = compose("code", "  contributor: {blocks: [{id: p, component: project, at: {x: 0, y: 0, w: 12, h: 8}}]}");
+    const ml = compose("ml", "  contributor: {blocks: [{id: s, component: submissions, at: {x: 0, y: 0, w: 12, h: 8}}, {id: k, component: compute, at: {x: 0, y: 8, w: 12, h: 3}}]}\n  manage: {blocks: [{id: l, component: submission_list, at: {x: 0, y: 0, w: 12, h: 5}}]}");
+    const annotation = compose("data-annotation", "  contributor: {blocks: [{id: a, component: annotation, at: {x: 0, y: 0, w: 12, h: 8}}]}\n  manage: {blocks: [{id: c, component: campaign, at: {x: 0, y: 0, w: 12, h: 8}}]}");
+    for (const [key, source] of [["code", code], ["ml", ml], ["data-annotation", annotation]] as const) {
+      expect(checkTemplateSource(source, key).errors, key).toEqual([]);
+    }
+  });
+});

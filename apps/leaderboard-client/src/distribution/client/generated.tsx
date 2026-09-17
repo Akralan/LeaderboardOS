@@ -114,7 +114,7 @@ function ComposedContributor({ ctx, description, screen }: { ctx: ContributorSlo
   const lanes = description.surface.lanes;
   const needsQualification = screen.blocks.some((block) => block.component === 'lane' && lanes.find((lane) => lane.id === block.props.lane)?.role);
   const held = useHeldQualifications(needsQualification);
-  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards };
+  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards, computeConnected: false };
   return (
     <GeneratedScreen
       blocks={screen.blocks}
@@ -125,7 +125,7 @@ function ComposedContributor({ ctx, description, screen }: { ctx: ContributorSlo
 
 function ComposedManage({ ctx, description, screen }: { ctx: ManageSlotContext; description: DescribedTemplate; screen: SurfaceScreen }) {
   const [version, setVersion] = useState(0);
-  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards };
+  const data = { team: ctx.team, contributions: ctx.contributions, tasks: ctx.tasks, participants: ctx.participants, repoActivity: ctx.repoActivity, rewards: ctx.rewards, computeConnected: ctx.computeConnected };
   return (
     <GeneratedScreen
       blocks={screen.blocks}
