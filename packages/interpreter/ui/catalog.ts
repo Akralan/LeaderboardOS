@@ -14,7 +14,7 @@ import type { UiScreen } from "../format/schema.js";
 export const UI_COLUMNS = 12;
 
 /** `values` : des champs d'un segment fixés par l'écran (`{app: $app}`), jamais saisis. Un `text` peut aussi lire une variable (`$app.app_url`). */
-export type UiPropKind = "lane" | "resource" | "text" | "markdown" | "bool" | "values";
+export type UiPropKind = "lane" | "resource" | "text" | "markdown" | "bool" | "int" | "values";
 
 /** Une liaison : `$name` ou `$name.field`. */
 export const BINDING = /^\$([a-z][a-z0-9_]*)(?:\.([a-z][a-z0-9_]*))?$/;
@@ -47,11 +47,16 @@ export interface UiComponentSpec {
   expects?: { lanes?: readonly string[]; submissions?: boolean };
   /**
    * Le bloc peut choisir pour l'écran (`selects`) : une instance de la
-   * ressource que sa lane désigne (`resource`), ou ce qu'un geste a créé ou
-   * réclamé (`created`, dont seul l'identifiant est connu).
+   * ressource que sa lane désigne (`resource`), ce qu'un geste a créé ou
+   * réclamé (`created` : l'identifiant, et les champs de la ressource
+   * réclamée quand le segment pose un claim), ou une étape à soumettre
+   * (`submission`).
    */
-  selects?: "resource" | "created";
+  selects?: "resource" | "created" | "submission";
 }
+
+/** Ce qu'une étape à soumettre (`$step`) porte : `SurfaceSubmissionStep`. */
+export const SUBMISSION_FIELDS = ["key", "repo", "repo_title", "contribution", "title", "artifact", "gated", "removable"] as const;
 
 export const UI_CATALOG: readonly UiComponentSpec[] = [
   {
@@ -191,10 +196,11 @@ export const UI_CATALOG: readonly UiComponentSpec[] = [
   {
     name: "form",
     label: "Form",
-    role: "the first segment of a lane, some fields fixed by the screen's choices, the others asked",
+    role: "a segment of a lane, some fields fixed by the screen's choices, the others asked",
     screens: ["contributor", "manage"],
     props: {
       lane: { kind: "lane", label: "Lane", required: true },
+      segment: { kind: "int", label: "Segment", hint: "which call of the lane: 0, the first; a later one resumes the claim in `values: {claim_id: $card}`" },
       values: { kind: "values", label: "Fixed fields", hint: "field: $variable — a field the screen fixes, never asked" },
       label: { kind: "text", label: "Button", hint: "the submit button's label" },
     },
@@ -208,6 +214,57 @@ export const UI_CATALOG: readonly UiComponentSpec[] = [
     screens: ["contributor", "manage"],
     props: { url: { kind: "text", label: "URL", required: true, hint: "$app.app_url — a variable's url field, or an address" } },
     size: { w: 8, h: 8, minW: 4, minH: 4 },
+  },
+  {
+    name: "image",
+    label: "Image",
+    role: "an image at the URL of a choice — the item a claim drew, for instance",
+    screens: ["contributor", "manage"],
+    props: { src: { kind: "text", label: "Source", required: true, hint: "$card.image_url — a variable's url field, or an address" } },
+    size: { w: 8, h: 6, minW: 3, minH: 3 },
+  },
+  {
+    name: "progress",
+    label: "Progress",
+    role: "what the participant delivered and earned, and their counters",
+    screens: ["contributor"],
+    props: {},
+    size: { w: 4, h: 3, minW: 3, minH: 2 },
+    single: true,
+  },
+
+  // ── Les soumissions par URL (capacité `submissions`) ────────────────────
+  // Une `steps_bar` choisit l'étape (`$step`), un `submit_url` soumet l'URL du
+  // dépôt de l'étape choisie, un `community` garde les URL des autres pour
+  // l'étape de sélection. L'écran ML s'écrit avec ces trois briques.
+  {
+    name: "steps_bar",
+    label: "Steps",
+    role: "the steps to submit, in order, with what is done and what is locked; one chosen for the screen",
+    screens: ["contributor"],
+    props: {},
+    size: { w: 12, h: 2, minW: 6, minH: 1 },
+    single: true,
+    expects: { submissions: true },
+    selects: "submission",
+  },
+  {
+    name: "submit_url",
+    label: "Submit URL",
+    role: "the URL of my repository for a step, one form per repository of that step",
+    screens: ["contributor"],
+    props: { step: { kind: "text", label: "Step", required: true, hint: "$step — the chosen step, or a step key (dataset)" } },
+    size: { w: 8, h: 4, minW: 4, minH: 2 },
+    expects: { submissions: true },
+  },
+  {
+    name: "community",
+    label: "Community picks",
+    role: "the URLs the other participants submitted for a step, each kept or not for my own work",
+    screens: ["contributor"],
+    props: { step: { kind: "text", label: "Step", required: true, hint: "$step — the chosen step, or a step key (dataset)" } },
+    size: { w: 8, h: 4, minW: 4, minH: 2 },
+    expects: { submissions: true },
   },
 
   // ── Un scénario parcouru dans des applications (journey-validation) ────

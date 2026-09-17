@@ -14,7 +14,8 @@ import { GeneratedMine, GeneratedResources } from './GeneratedResources';
 import { GeneratedWorkspace } from './GeneratedWorkspace';
 import { StepsBlock, TargetsBlock, WalkthroughBlock, WalkthroughsBlock } from './journeyBlocks';
 import { AnnotationBlock, CampaignBlock, ComputeBlock, ProjectBlock, SubmissionListBlock, SubmissionsBlock } from './flowBlocks';
-import { FormBlock, FrameBlock, PickerBlock, ScreenVarsContext, StepperBlock } from './screenBlocks';
+import { FormBlock, FrameBlock, ImageBlock, PickerBlock, ProgressBlock, ScreenVarsContext, StepperBlock } from './screenBlocks';
+import { CommunityBlock, StepsBarBlock, SubmitUrlBlock } from './submissionBlocks';
 import { fgAt } from './format';
 
 /**
@@ -177,6 +178,11 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   stepper: (block, runtime) => <StepperBlock block={block} runtime={runtime} />,
   form: (block, runtime) => <FormBlock block={block} runtime={runtime} />,
   frame: (block, runtime) => <FrameBlock block={block} runtime={runtime} />,
+  image: (block, runtime) => <ImageBlock block={block} runtime={runtime} />,
+  progress: (block, runtime) => <ProgressBlock block={block} runtime={runtime} />,
+  steps_bar: (block, runtime) => <StepsBarBlock block={block} runtime={runtime} />,
+  submit_url: (block, runtime) => <SubmitUrlBlock block={block} runtime={runtime} />,
+  community: (block, runtime) => <CommunityBlock block={block} runtime={runtime} />,
 };
 
 /** Les blocs dans l'ordre de lecture : la colonne d'un téléphone les empile ainsi. */

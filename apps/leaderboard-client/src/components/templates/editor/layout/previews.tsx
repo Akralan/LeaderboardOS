@@ -481,8 +481,85 @@ function FramePreview({ block }: { block: BlockView }) {
   );
 }
 
+function ImagePreview({ block }: { block: BlockView }) {
+  return (
+    <div className={`${card} items-center justify-center`} style={{ backgroundImage: 'repeating-linear-gradient(135deg, rgb(255 255 255 / 0.05) 0 8px, transparent 8px 16px)' }}>
+      <span className="text-[10px] text-white/40">Image</span>
+      <Binding value={block.props.src} />
+    </div>
+  );
+}
+
+function ProgressPreview() {
+  return (
+    <div className={card}>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        {['Delivered', 'Earned', 'Gold seen'].map((label) => (
+          <span key={label} className="flex items-baseline gap-1.5 text-[11px]"><span className="text-white/45">{label}</span><span className="font-semibold text-white">—</span></span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StepsBarPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
+  const steps = surface?.submissions?.steps.map((step) => step.repoTitle) ?? ['Step 1', 'Step 2', 'Step 3'];
+  return (
+    <div className={card}>
+      <div className="flex items-center px-3">
+        {steps.map((step, index) => (
+          <div key={step} className="flex flex-1 items-center last:flex-none">
+            <span className={`flex h-7 w-7 items-center justify-center rounded-full border-2 text-[9px] font-semibold ${index === 0 ? 'border-brandCP text-brandCP' : 'border-white/15 text-white/40'}`} title={step}>{index + 1}</span>
+            {index < steps.length - 1 && <span className="mx-2 h-px flex-1 bg-white/[0.08]" />}
+          </div>
+        ))}
+      </div>
+      <span className="text-[10px] text-white/35">{steps.join(' · ')}{block.selects ? ` — selects $${block.selects}` : ''}</span>
+    </div>
+  );
+}
+
+function SubmitUrlPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title>Submit</Title>
+      <span className="flex items-center gap-1.5 text-[10px] text-white/45">step = <Binding value={block.props.step} /></span>
+      <div className="flex gap-2">
+        <span className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 text-[10px] text-white/35">https://</span>
+        <span className="rounded-lg bg-brandCP/15 px-2 py-1.5 text-[10px] font-semibold text-brandCP">Submit</span>
+      </div>
+    </div>
+  );
+}
+
+function CommunityPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <span className="flex items-center gap-1.5 text-[10px] text-white/45">From the community · step = <Binding value={block.props.step} /></span>
+      <div className="grid grid-cols-2 gap-2">
+        {[0, 1].map((row) => (
+          <div key={row} className={`flex flex-col gap-1.5 rounded-lg border p-2 ${row === 0 ? 'border-brandCP/35 bg-brandCP/[0.06]' : 'border-white/[0.06]'}`}>
+            <span className={`${skeleton} h-2.5 w-1/2`} />
+            <span className={`${skeleton} h-2 w-full`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function BlockPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
   switch (block.component) {
+    case 'image':
+      return <ImagePreview block={block} />;
+    case 'progress':
+      return <ProgressPreview />;
+    case 'steps_bar':
+      return <StepsBarPreview block={block} surface={surface} />;
+    case 'submit_url':
+      return <SubmitUrlPreview block={block} />;
+    case 'community':
+      return <CommunityPreview block={block} />;
     case 'picker':
       return <PickerPreview block={block} />;
     case 'stepper':

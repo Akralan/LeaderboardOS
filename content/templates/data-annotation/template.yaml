@@ -192,9 +192,17 @@ lanes:
 # The screens, composed on the UI catalogue: the labeling workbench for an
 # annotator, the campaign panel for a manager.
 ui:
+  # The annotator's screen in bricks: a form on the first segment of the
+  # annotator lane draws a card ($card, the claim and the item it can read),
+  # the image shows it, a form on the second segment labels it with the claim
+  # fixed, the progress shows what was delivered. The `annotation` component
+  # of the catalogue is the same screen in one block, with a skip.
   contributor:
     blocks:
-      - {id: annotation, component: annotation, at: {x: 0, y: 0, w: 12, h: 8}, props: {schema_param: label_schema}}
+      - {id: draw, component: form, selects: card, at: {x: 0, y: 0, w: 4, h: 2}, props: {lane: annotator, label: Draw the next item}}
+      - {id: progress, component: progress, at: {x: 4, y: 0, w: 8, h: 2}}
+      - {id: item, component: image, at: {x: 0, y: 2, w: 8, h: 7}, props: {src: $card.image_url}}
+      - {id: label, component: form, at: {x: 8, y: 2, w: 4, h: 7}, props: {lane: annotator, segment: 1, values: {claim_id: $card}, label: Label it}}
   manage:
     blocks:
       - {id: campaign, component: campaign, at: {x: 0, y: 0, w: 12, h: 8}, props: {schema_param: label_schema}}

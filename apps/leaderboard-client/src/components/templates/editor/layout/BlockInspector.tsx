@@ -76,6 +76,12 @@ function PropControl({ block, name, spec }: { block: BlockView; name: string; sp
           <YamlSnippet value={value} onCommit={commit} disabled={readOnly} rows={3} />
         </FieldShell>
       );
+    case 'int':
+      return (
+        <FieldShell label={spec.label} hint={spec.hint} issues={issues}>
+          <NumberField label="" value={typeof value === 'number' ? value : 0} min={0} max={99} onCommit={(next) => commit(next === 0 ? undefined : next)} disabled={readOnly} />
+        </FieldShell>
+      );
     case 'markdown':
       return (
         <FieldShell label={spec.label} hint={spec.hint} issues={issues}>

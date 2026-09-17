@@ -219,10 +219,17 @@ lanes:
 # metrics for a participant; the submitted URLs, the metrics and the compute
 # decisions for a manager.
 ui:
+  # The participant's screen in bricks: the steps to submit ($step), my URL
+  # for the chosen step's repositories, the community's URLs for it, the
+  # compute request, the metrics. The `submissions` component of the
+  # catalogue is the same screen in one block.
   contributor:
     blocks:
-      - {id: submissions, component: submissions, at: {x: 0, y: 0, w: 12, h: 8}}
-      - {id: metrics, component: metrics, at: {x: 0, y: 8, w: 12, h: 5}}
+      - {id: steps, component: steps_bar, selects: step, at: {x: 0, y: 0, w: 12, h: 2}}
+      - {id: submit, component: submit_url, at: {x: 0, y: 2, w: 6, h: 4}, props: {step: $step}}
+      - {id: community, component: community, at: {x: 6, y: 2, w: 6, h: 4}, props: {step: $step}}
+      - {id: compute, component: compute, at: {x: 0, y: 6, w: 12, h: 3}}
+      - {id: metrics, component: metrics, at: {x: 0, y: 9, w: 12, h: 5}}
   manage:
     blocks:
       - {id: submission_list, component: submission_list, at: {x: 0, y: 0, w: 12, h: 5}}

@@ -54,13 +54,14 @@ function Hint({ children }: { children: string }) {
 
 const card = 'space-y-3 rounded-[20px] border border-white/[0.08] bg-white/[0.02] p-4';
 
-/** La lane d'un bloc et son premier segment, ou la raison de leur absence. */
+/** La lane d'un bloc et le segment qu'il joue (`segment`, le premier sinon), ou la raison de leur absence. */
 function laneOf(block: SurfaceBlock, runtime: ScreenRuntime): { lane: SurfaceLane; segment: SurfaceSegment } | string {
   const id = typeof block.props.lane === 'string' ? block.props.lane : '';
   const lane = runtime.description.surface.lanes.find((candidate) => candidate.id === id);
   if (!lane) return `Lane '${id}' is not on this template.`;
-  const segment = lane.segments[0];
-  if (!segment) return `Lane '${id}' has no segment to play.`;
+  const index = typeof block.props.segment === 'number' ? block.props.segment : 0;
+  const segment = lane.segments[index];
+  if (!segment) return `Lane '${id}' has no segment ${index} to play.`;
   return { lane, segment };
 }
 
@@ -309,7 +310,9 @@ export function FormBlock({ block, runtime }: { block: SurfaceBlock; runtime: Sc
       const body = await res.json();
       const createdId = body.created && typeof body.created === 'object' ? Object.values(body.created as Record<string, unknown>).find((value) => typeof value === 'string') : undefined;
       const claimId = body.claim?.claim_id;
-      if (selects) setVar(selects, { id: createdId ?? claimId ?? null, ...body });
+      // Un claim posé : la ressource tirée se lit sur la variable (`$card.image_url`), son identifiant vaut le claim.
+      const claimed = body.claim?.resource && typeof body.claim.resource === 'object' ? (body.claim.resource as Record<string, unknown>) : {};
+      if (selects) setVar(selects, { ...claimed, ...body, id: claimId ?? createdId ?? null });
       setValues({});
       setDone({ cp: typeof body.cp_awarded === 'number' ? body.cp_awarded : null, scheduled: res.status === 202 && Boolean(body.scheduled) });
       runtime.onRecorded();
@@ -323,7 +326,9 @@ export function FormBlock({ block, runtime }: { block: SurfaceBlock; runtime: Sc
   if (typeof resolved === 'string') return <Hint>{resolved}</Hint>;
   const { lane, segment } = resolved;
   const asked = segment.fields.filter((field) => !(field.name in fixedDecl));
-  const label = typeof block.props.label === 'string' && block.props.label ? block.props.label : asked.length === 0 ? (segment.final ? 'Submit' : 'Start') : segment.final ? 'Submit' : 'Continue';
+  const label = typeof block.props.label === 'string' && block.props.label ? block.props.label : asked.length === 0 ? (segment.final ? 'Submit' : segment.opensClaim ? 'Draw' : 'Start') : segment.final ? 'Submit' : 'Continue';
+  // Un segment qui reprend un claim l'attend dans `values: {claim_id: $card}` ; sans, il ne peut pas jouer.
+  const claimMissing = segment.needsClaim && !('claim_id' in fixedDecl);
   const siblingsOf = (name: string) =>
     Object.fromEntries(asked.filter((field) => field.name !== name && (field.kind === 'ref' || field.kind === 'link') && typeof values[field.name] === 'string' && values[field.name]).map((field) => [field.name, values[field.name] as string]));
 
@@ -331,6 +336,7 @@ export function FormBlock({ block, runtime }: { block: SurfaceBlock; runtime: Sc
     <form className={card} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       <p className="text-sm font-semibold text-white">{humanize(segment.path.split('/')[1] ?? lane.id)}</p>
       {missing.length > 0 && <Hint>{`Choose ${missing.map((name) => humanize(name).toLowerCase()).join(' and ')} first.`}</Hint>}
+      {claimMissing && <Hint>This segment resumes a claim: fix claim_id on the form that drew it.</Hint>}
       {asked.map((field) => (
         <GeneratedField
           key={`${field.gesture}.${field.name}`}
@@ -348,11 +354,61 @@ export function FormBlock({ block, runtime }: { block: SurfaceBlock; runtime: Sc
           <CheckCircle2 className="h-4 w-4" /> {done.scheduled ? 'Evaluation in progress…' : `Recorded${done.cp ? ` · +${done.cp} CP` : ''}`}
         </p>
       )}
-      <button type="submit" disabled={busy || missing.length > 0} style={{ color: '#000' }} className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-semibold hover:bg-white/90 disabled:opacity-50">
+      <button type="submit" disabled={busy || missing.length > 0 || claimMissing} style={{ color: '#000' }} className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-semibold hover:bg-white/90 disabled:opacity-50">
         {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
         {label}
       </button>
     </form>
+  );
+}
+
+// ─── Image et progression ───────────────────────────────────────────────────
+
+export function ImageBlock({ block }: { block: SurfaceBlock; runtime: ScreenRuntime }) {
+  const { vars } = useScreenVars();
+  const { bound, value } = resolveBinding(block.props.src, vars);
+  const src = typeof value === 'string' && /^https?:\/\//.test(value) ? value : null;
+  if (!src) {
+    const name = bindingName(block.props.src);
+    return <Hint>{bound && name ? `Nothing drawn yet: ${humanize(name).toLowerCase()} is empty.` : 'No image to show.'}</Hint>;
+  }
+  return (
+    <div className="flex h-full min-h-[240px] items-center justify-center overflow-hidden rounded-[14px] border border-white/10 bg-black/20">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={src} alt="" className="max-h-full max-w-full object-contain" />
+    </div>
+  );
+}
+
+/** `GET progress`, généré : ce que l'appelant a livré et gagné, ses compteurs. */
+interface Progress {
+  delivered?: number;
+  cp?: number;
+  counters?: Record<string, number>;
+}
+
+export function ProgressBlock({ runtime }: { block: SurfaceBlock; runtime: ScreenRuntime }) {
+  const [progress, setProgress] = useState<Progress | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(flowActionUrl(runtime.challengeId, 'progress'))
+      .then(async (res) => (res.ok ? ((await res.json()) as Progress) : null))
+      .then((body) => !cancelled && setProgress(body))
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [runtime.challengeId, runtime.version]);
+  if (!progress) return <Hint>Loading…</Hint>;
+  const counters = Object.entries(progress.counters ?? {});
+  return (
+    <div className={card}>
+      <div className="flex flex-wrap gap-x-5 gap-y-1">
+        <span className="flex items-baseline gap-1.5 text-sm"><span style={{ color: fgAt(0.5) }}>Delivered</span><span className="font-semibold text-white">{progress.delivered ?? 0}</span></span>
+        <span className="flex items-baseline gap-1.5 text-sm"><span style={{ color: fgAt(0.5) }}>Earned</span><span className="font-semibold text-brandCP">{progress.cp ?? 0} CP</span></span>
+        {counters.map(([name, value]) => (
+          <span key={name} className="flex items-baseline gap-1.5 text-sm"><span style={{ color: fgAt(0.5) }}>{humanize(name)}</span><span className="font-semibold text-white">{value}</span></span>
+        ))}
+      </div>
+    </div>
   );
 }
 

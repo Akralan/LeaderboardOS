@@ -118,6 +118,26 @@ export interface SurfaceScreen {
 /** Les écrans composés du template ; un écran absent est généré (empilé). */
 export type SurfaceUi = Partial<Record<UiScreen, SurfaceScreen>>;
 
+/** Une étape à soumettre (capacité `submissions`) : ce que `GET workspace` rend par dépôt, sous le rôle `key`. */
+export interface SurfaceSubmissionStep {
+  key: string;
+  repo: string;
+  repoTitle: string;
+  contribution: string;
+  title: string;
+  artifact: boolean;
+  /** L'étape se ferme sur une condition (`open`). */
+  gated: boolean;
+  /** L'étape peut manquer au challenge (`unless_input`). */
+  removable: boolean;
+}
+
+export interface SurfaceSubmissions {
+  /** L'étape dont le dépôt garde la sélection de datasets (`dataset_urls`). */
+  selection: string | null;
+  steps: SurfaceSubmissionStep[];
+}
+
 export interface TemplateSurface {
   lanes: SurfaceLane[];
   resources: SurfaceResource[];
@@ -128,6 +148,8 @@ export interface TemplateSurface {
   workspace?: { param: string | null; mode: string | null };
   /** Les écrans que le template compose lui-même (bloc `ui`), sur le catalogue de composants. */
   ui?: SurfaceUi;
+  /** Les étapes soumises par URL (`submissions`), dans l'ordre déclaré. */
+  submissions?: SurfaceSubmissions;
 }
 
 export function descriptorOf(shell: DocumentShell): FlowDescriptor {
@@ -262,6 +284,23 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
     ...(model.shell.presentation?.board ? { board: true } : {}),
     ...(model.shell.workspace ? { workspace: { param: modeParam, mode: modeParam ? null : typeof modeSource === "string" ? modeSource.replace(/^"|"$/g, "") : null } } : {}),
     ...(model.shell.ui ? { ui: uiOf(model.shell.ui) } : {}),
+    ...(model.shell.submissions ? { submissions: submissionsOf(model.shell.submissions) } : {}),
+  };
+}
+
+function submissionsOf(decl: NonNullable<DocumentShell["submissions"]>): SurfaceSubmissions {
+  return {
+    selection: decl.selection ?? null,
+    steps: Object.entries(decl.steps).map(([key, step]) => ({
+      key,
+      repo: step.repo,
+      repoTitle: step.repo_title,
+      contribution: step.contribution,
+      title: step.title,
+      artifact: step.artifact ?? false,
+      gated: step.open !== undefined,
+      removable: step.unless_input !== undefined,
+    })),
   };
 }
 

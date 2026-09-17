@@ -211,8 +211,8 @@ describe("the system templates", () => {
       return [surface.ui?.contributor?.blocks.map((block) => block.component), surface.ui?.manage?.blocks.map((block) => block.component)];
     };
     expect(composed("code")).toEqual([["project", "activity"], ["pool", "participants", "activity"]]);
-    expect(composed("ml")).toEqual([["submissions", "metrics"], ["submission_list", "metrics", "compute"]]);
-    expect(composed("data-annotation")).toEqual([["annotation"], ["campaign"]]);
+    expect(composed("ml")).toEqual([["steps_bar", "submit_url", "community", "compute", "metrics"], ["submission_list", "metrics", "compute"]]);
+    expect(composed("data-annotation")).toEqual([["form", "progress", "image", "form"], ["campaign"]]);
     expect(composed("endpoint-check")).toEqual([["lane", "lane", "lane", "mine"], ["lane", "lane", "lane", "pool", "overview", "resources"]]);
   });
 });
@@ -248,7 +248,7 @@ describe("the screen's variables", () => {
       ["ui.contributor.blocks.2.selects", "'frame' chooses nothing for the screen — only picker, stepper and form do"],
       ["ui.contributor.blocks.3.props.url", "'app' has no field 'homepage' — it has contribution, app_url"],
       ["ui.contributor.blocks.4.props.values.app", "'$walk' is chosen by no block of this screen — a picker, a stepper or a form must `selects: walk`"],
-      ["ui.contributor.blocks.4.props.values.target", "'open' collects no 'target' — it collects app"],
+      ["ui.contributor.blocks.4.props.values.target", "segment 0 of 'open' collects no 'target' — it collects app"],
       ["ui.contributor.blocks.5.props.values.walkthrough", "'$run' is what a form created: only '$run.id' is known"],
       ["ui.contributor.blocks.6.props.url", "'$' is not a binding — write $variable or $variable.field"],
     ]);
@@ -257,5 +257,41 @@ describe("the screen's variables", () => {
   it("refuse a picker on a lane that picks nothing", () => {
     const source = journeyWith(["{id: apps, component: picker, selects: app, at: {x: 0, y: 0, w: 4, h: 6}, props: {lane: complete, field: global_feedback}}"]);
     expect(errors(source)).toEqual([["ui.contributor.blocks.0.props.field", "'global_feedback' is a string, not a ref or link field"]]);
+  });
+});
+
+describe("a form that draws a claim", () => {
+  const ANNOTATION = bare(readFileSync(path.join(ROOT, "content/templates/data-annotation/template.yaml"), "utf8"));
+  const annotationWith = (blocks: string[]) => `${ANNOTATION.trimEnd()}\n\nui:\n  contributor:\n    blocks:\n${blocks.map((block) => `      - ${block}`).join("\n")}\n`;
+  const errors = (source: string) => checkTemplateSource(source, "data-annotation").errors.map((issue) => [issue.path.join("."), issue.message]);
+
+  it("exposes the claimed item's fields, and its claim resumes on a later segment", () => {
+    const source = annotationWith([
+      "{id: draw, component: form, selects: card, at: {x: 0, y: 0, w: 4, h: 2}, props: {lane: annotator}}",
+      "{id: item, component: image, at: {x: 0, y: 2, w: 8, h: 6}, props: {src: $card.image_url}}",
+      "{id: label, component: form, at: {x: 8, y: 2, w: 4, h: 6}, props: {lane: annotator, segment: 1, values: {claim_id: $card}}}",
+    ]);
+    expect(errors(source)).toEqual([]);
+    const { surface } = describeTemplate(source, "data-annotation");
+    expect(surface.submissions).toBeUndefined();
+  });
+
+  it("refuses a field the claimed item lacks, a claim on the first segment, a segment the lane lacks", () => {
+    const source = annotationWith([
+      "{id: draw, component: form, selects: card, at: {x: 0, y: 0, w: 4, h: 2}, props: {lane: annotator, values: {claim_id: $card}}}",
+      "{id: item, component: image, at: {x: 0, y: 2, w: 8, h: 6}, props: {src: $card.expected}}",
+      "{id: label, component: form, at: {x: 8, y: 2, w: 4, h: 6}, props: {lane: annotator, segment: 3}}",
+    ]);
+    expect(errors(source)).toEqual([
+      ["ui.contributor.blocks.0.props.values.claim_id", "segment 0 of 'annotator' collects no 'claim_id' — it collects nothing"],
+      ["ui.contributor.blocks.1.props.src", "'item' has no field 'expected' — it has image_url, class"],
+      ["ui.contributor.blocks.2.props.segment", "'annotator' has no segment 3"],
+    ]);
+  });
+
+  it("describes the submission steps of the ml template, for the steps bar", () => {
+    const { surface } = describeTemplate(readFileSync(path.join(ROOT, "content/templates/ml/template.yaml"), "utf8").replace(/\r\n/g, "\n"), "ml");
+    expect(surface.submissions?.selection).toBe("dataset");
+    expect(surface.submissions?.steps.map((step) => `${step.key}:${step.repo}${step.artifact ? "!" : ""}${step.gated ? "?" : ""}${step.removable ? "-" : ""}`)).toEqual(["dataset:kaggle_dataset!?", "model:kaggle_model!?", "model_code:github?", "api:github!-"]);
   });
 });

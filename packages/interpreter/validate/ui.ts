@@ -1,9 +1,10 @@
 import type { UiScreen } from "../format/schema.js";
 import { UI_SCREENS } from "../format/schema.js";
 import type { TemplateIssue, TemplatePath } from "../issues.js";
-import { BINDING, LANE_TRIGGER_OF_SCREEN, UI_CATALOG, UI_COLUMNS, uiComponent, type UiPropKind } from "../ui/catalog.js";
+import { gestureFields, segmentsOf } from "../compile/segments.js";
+import { BINDING, LANE_TRIGGER_OF_SCREEN, SUBMISSION_FIELDS, UI_CATALOG, UI_COLUMNS, uiComponent, type UiPropKind } from "../ui/catalog.js";
 import { overlaps } from "../ui/layout.js";
-import type { TemplateModel } from "./format.js";
+import type { NodeModel, TemplateModel } from "./format.js";
 
 /**
  * Passe sur les écrans composés
@@ -27,13 +28,24 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
   const lanes = new Map(model.lanes.map((lane) => [lane.id, lane.entry.trigger]));
   const brokenLanes = model.broken.lanes;
 
-  /** Les champs du premier Collect d'une lane, avec leur type écrit : ce qu'un `form` ou un `picker` joue. */
-  const firstCollectFields = (laneId: unknown): Record<string, string> | null => {
+  /** Un segment d'une lane : ses champs avec leur type écrit, s'il pose ou reprend un claim, et la ressource réclamée. */
+  const segmentOf = (laneId: unknown, index = 0): { fields: Record<string, string>; opensClaim: boolean; needsClaim: boolean; claimed: string | null } | null => {
     const lane = typeof laneId === "string" ? model.lanes.find((candidate) => candidate.id === laneId) : undefined;
-    const collect = lane?.nodes.find((node) => node.family === "collect");
-    if (!collect || collect.family !== "collect") return null;
-    return Object.fromEntries(Object.entries(collect.body.fields).map(([name, decl]) => [name, typeof decl.type === "string" ? decl.type : "json"]));
+    if (!lane) return null;
+    const segments = segmentsOf(lane);
+    const segment = segments[index];
+    if (!segment) return null;
+    const claimAct = (nodes: NodeModel[]) => nodes.find((node) => node.family === "act" && node.body.claim);
+    const claimIndex = segments.findIndex((candidate) => claimAct(candidate.nodes));
+    const act = claimAct(segment.nodes);
+    const claimed = act && act.family === "act" && act.body.claim && typeof act.body.claim.resource === "string" ? act.body.claim.resource : null;
+    const fields: Record<string, string> = {};
+    for (const gesture of segment.gestures) for (const [name, decl] of Object.entries(gestureFields(gesture))) fields[name] = typeof decl.type === "string" ? decl.type : "json";
+    return { fields, opensClaim: index === claimIndex, needsClaim: claimIndex >= 0 && index > claimIndex, claimed };
   };
+  /** Les champs du premier segment d'une lane : ce qu'un `picker` ou un `stepper` joue. */
+  const firstCollectFields = (laneId: unknown): Record<string, string> | null => segmentOf(laneId)?.fields ?? null;
+  const segmentIndexOf = (props: Record<string, unknown>) => (typeof props.segment === "number" && Number.isInteger(props.segment) && props.segment >= 0 ? props.segment : 0);
   /** Ce qu'un champ `ref(x)` désigne ; `$link` pour un champ `link` (id, author, title, url, members). */
   const pickedOf = (type: string | undefined): string | null => {
     if (!type) return null;
@@ -43,8 +55,13 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
   };
   const LINK_FIELDS = ["id", "author", "author_name", "title", "url", "members"];
 
-  /** Les variables d'un écran : qui les choisit, et de quelle ressource elles sont une instance. */
-  type ScreenVar = { block: string; resource: string | null; created: boolean };
+  /**
+   * Les variables d'un écran : qui les choisit, et ce qu'elles portent — une
+   * instance d'une ressource (ses champs), ce qu'un geste a créé (`id`, et
+   * les champs de la ressource réclamée si le segment pose un claim), une
+   * étape à soumettre (`SUBMISSION_FIELDS`).
+   */
+  type ScreenVar = { block: string; resource: string | null; created: boolean; submission: boolean };
   let vars = new Map<string, ScreenVar>();
 
   for (const screen of UI_SCREENS) {
@@ -70,10 +87,20 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
         return;
       }
       const props = block.props ?? {};
+      if (spec.selects === "submission") {
+        vars.set(block.selects, { block: block.id, resource: null, created: false, submission: true });
+        return;
+      }
+      if (spec.selects === "created") {
+        // Un segment qui pose un claim rend la ressource réclamée : ses champs se lisent sur la variable.
+        const segment = segmentOf(props.lane, segmentIndexOf(props));
+        vars.set(block.selects, { block: block.id, resource: segment?.opensClaim ? segment.claimed : null, created: true, submission: false });
+        return;
+      }
       const fields = firstCollectFields(props.lane);
       const fieldName = typeof props.field === "string" ? props.field : fields ? Object.keys(fields).find((name) => pickedOf(fields[name])) : undefined;
-      const resource = spec.selects === "resource" && fields && fieldName ? pickedOf(fields[fieldName]) : null;
-      vars.set(block.selects, { block: block.id, resource, created: spec.selects === "created" });
+      const resource = fields && fieldName ? pickedOf(fields[fieldName]) : null;
+      vars.set(block.selects, { block: block.id, resource, created: false, submission: false });
     });
 
     decl.blocks.forEach((block, index) => {
@@ -114,8 +141,11 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
           if (prop.required) report([...path, "props"], `'${block.component}' needs '${name}'`);
           continue;
         }
-        if (prop.kind === "values") checkValues(block.component, props.lane, value, [...path, "props", name]);
+        if (prop.kind === "values") checkValues(props.lane, segmentIndexOf(props), value, [...path, "props", name]);
         else checkProp(prop.kind, name, value, screen, [...path, "props", name]);
+      }
+      if (block.component === "form" && typeof props.lane === "string" && lanes.has(props.lane) && !segmentOf(props.lane, segmentIndexOf(props))) {
+        report([...path, "props", "segment"], `'${props.lane}' has no segment ${segmentIndexOf(props)}`);
       }
       // Un picker ou un stepper choisit par un champ ref ou link de son premier segment.
       if (spec.selects === "resource" && typeof props.lane === "string" && lanes.has(props.lane)) {
@@ -152,10 +182,15 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
       return true;
     }
     if (!field) return true;
-    if (variable.created) {
+    if (variable.submission) {
+      if (!(SUBMISSION_FIELDS as readonly string[]).includes(field)) report(path, `a submission step has ${SUBMISSION_FIELDS.join(", ")} — not '${field}'`);
+      return true;
+    }
+    if (variable.created && !variable.resource) {
       if (field !== "id") report(path, `'$${name}' is what a form created: only '$${name}.id' is known`);
       return true;
     }
+    if (variable.created && field === "id") return true;
     if (variable.resource === "$link") {
       if (!LINK_FIELDS.includes(field)) report(path, `a link has ${LINK_FIELDS.join(", ")} — not '${field}'`);
       return true;
@@ -168,23 +203,29 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
     return true;
   }
 
-  /** `values` : des champs du premier segment de la lane, fixés par une liaison ou une valeur. */
-  function checkValues(component: string, laneId: unknown, value: unknown, path: TemplatePath) {
+  /** `values` : des champs du segment joué, fixés par une liaison ou une valeur ; `claim_id` sur un segment qui reprend un claim. */
+  function checkValues(laneId: unknown, index: number, value: unknown, path: TemplatePath) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       report(path, `'values' is a mapping of fields to $variables or values`);
       return;
     }
-    const fields = typeof laneId === "string" && lanes.has(laneId) ? firstCollectFields(laneId) : null;
+    const segment = typeof laneId === "string" && lanes.has(laneId) ? segmentOf(laneId, index) : null;
     for (const [field, bound] of Object.entries(value as Record<string, unknown>)) {
-      if (fields && !(field in fields)) report([...path, field], `'${laneId}' collects no '${field}' — it collects ${Object.keys(fields).join(", ") || "nothing"}`);
+      if (segment && !(field in segment.fields) && !(field === "claim_id" && segment.needsClaim)) {
+        const known = [...Object.keys(segment.fields), ...(segment.needsClaim ? ["claim_id"] : [])];
+        report([...path, field], `segment ${index} of '${laneId}' collects no '${field}' — it collects ${known.join(", ") || "nothing"}`);
+      }
       if (typeof bound === "string") checkBinding(bound, [...path, field]);
     }
-    void component;
   }
 
   function checkProp(kind: UiPropKind, name: string, value: unknown, screen: UiScreen, path: TemplatePath) {
     if (kind === "bool") {
       if (typeof value !== "boolean") report(path, `'${name}' is true or false`);
+      return;
+    }
+    if (kind === "int") {
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) report(path, `'${name}' is a whole number`);
       return;
     }
     if (typeof value !== "string") {
