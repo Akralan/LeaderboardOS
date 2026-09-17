@@ -188,3 +188,13 @@ lanes:
           amount: {reverse: annotation}
           rule_key: annotation_clawback
           pool: params.pool
+
+# The screens, composed on the UI catalogue: the labeling workbench for an
+# annotator, the campaign panel for a manager.
+ui:
+  contributor:
+    blocks:
+      - {id: annotation, component: annotation, at: {x: 0, y: 0, w: 12, h: 8}, props: {schema_param: label_schema}}
+  manage:
+    blocks:
+      - {id: campaign, component: campaign, at: {x: 0, y: 0, w: 12, h: 8}, props: {schema_param: label_schema}}

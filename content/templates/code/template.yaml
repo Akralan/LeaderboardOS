@@ -82,3 +82,17 @@ lanes:
           pool: params.pool
           clamp: pool
           meta: {agentScore: "grade.score * 10"}
+
+# The screens, composed on the UI catalogue: the code panel the distribution
+# renders by hand (workspace, board, evaluation) and the activity; for the
+# manager, the pool, each participant's progress and the activity.
+ui:
+  contributor:
+    blocks:
+      - {id: project, component: project, at: {x: 0, y: 0, w: 12, h: 8}}
+      - {id: activity, component: activity, at: {x: 0, y: 8, w: 12, h: 6}}
+  manage:
+    blocks:
+      - {id: pool, component: pool, at: {x: 0, y: 0, w: 12, h: 2}}
+      - {id: participants, component: participants, at: {x: 0, y: 2, w: 12, h: 5}, props: {workspace_status: true}}
+      - {id: activity, component: activity, at: {x: 0, y: 7, w: 12, h: 6}}

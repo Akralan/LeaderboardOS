@@ -214,3 +214,17 @@ lanes:
           clamp: pool
           record_clamp: true
           meta: {agentScore: grade.score}
+
+# The screens, composed on the UI catalogue: the submission steps and the
+# metrics for a participant; the submitted URLs, the metrics and the compute
+# decisions for a manager.
+ui:
+  contributor:
+    blocks:
+      - {id: submissions, component: submissions, at: {x: 0, y: 0, w: 12, h: 8}}
+      - {id: metrics, component: metrics, at: {x: 0, y: 8, w: 12, h: 5}}
+  manage:
+    blocks:
+      - {id: submission_list, component: submission_list, at: {x: 0, y: 0, w: 12, h: 5}}
+      - {id: metrics, component: metrics, at: {x: 0, y: 5, w: 12, h: 5}}
+      - {id: compute, component: compute, at: {x: 0, y: 10, w: 12, h: 3}}

@@ -15,7 +15,9 @@ import { defaultScreen, freeSpot, overlaps } from "./ui/layout.js";
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const SOURCE = readFileSync(path.join(ROOT, "content/templates/endpoint-check/template.yaml"), "utf8").replace(/\r\n/g, "\n");
+/** Un template système sans les écrans qu'il compose lui-même : les tests posent les leurs. */
+const bare = (yaml: string) => yaml.replace(/\r\n/g, "\n").replace(/\nui:[\s\S]*$/, "\n");
+const SOURCE = bare(readFileSync(path.join(ROOT, "content/templates/endpoint-check/template.yaml"), "utf8"));
 
 const withUi = (ui: string) => `${SOURCE.trimEnd()}\n\nui:\n${ui}\n`;
 
@@ -185,12 +187,25 @@ describe("the hand-written flow screens in the catalogue", () => {
   });
 
   it("accept them on the templates they come from", () => {
-    const compose = (key: string, ui: string) => `${readFileSync(path.join(ROOT, `content/templates/${key}/template.yaml`), "utf8").replace(/\r\n/g, "\n").trimEnd()}\n\nui:\n${ui}\n`;
+    const compose = (key: string, ui: string) => `${bare(readFileSync(path.join(ROOT, `content/templates/${key}/template.yaml`), "utf8")).trimEnd()}\n\nui:\n${ui}\n`;
     const code = compose("code", "  contributor: {blocks: [{id: p, component: project, at: {x: 0, y: 0, w: 12, h: 8}}]}");
     const ml = compose("ml", "  contributor: {blocks: [{id: s, component: submissions, at: {x: 0, y: 0, w: 12, h: 8}}, {id: k, component: compute, at: {x: 0, y: 8, w: 12, h: 3}}]}\n  manage: {blocks: [{id: l, component: submission_list, at: {x: 0, y: 0, w: 12, h: 5}}]}");
     const annotation = compose("data-annotation", "  contributor: {blocks: [{id: a, component: annotation, at: {x: 0, y: 0, w: 12, h: 8}}]}\n  manage: {blocks: [{id: c, component: campaign, at: {x: 0, y: 0, w: 12, h: 8}}]}");
     for (const [key, source] of [["code", code], ["ml", ml], ["data-annotation", annotation]] as const) {
       expect(checkTemplateSource(source, key).errors, key).toEqual([]);
     }
+  });
+});
+
+describe("the system templates", () => {
+  it("compose their screens on the catalogue", () => {
+    const composed = (key: string) => {
+      const { surface } = describeTemplate(readFileSync(path.join(ROOT, `content/templates/${key}/template.yaml`), "utf8").replace(/\r\n/g, "\n"), key);
+      return [surface.ui?.contributor?.blocks.map((block) => block.component), surface.ui?.manage?.blocks.map((block) => block.component)];
+    };
+    expect(composed("code")).toEqual([["project", "activity"], ["pool", "participants", "activity"]]);
+    expect(composed("ml")).toEqual([["submissions", "metrics"], ["submission_list", "metrics", "compute"]]);
+    expect(composed("data-annotation")).toEqual([["annotation"], ["campaign"]]);
+    expect(composed("endpoint-check")).toEqual([["lane", "lane", "lane", "mine"], ["lane", "lane", "lane", "pool", "overview", "resources"]]);
   });
 });

@@ -193,3 +193,22 @@ lanes:
       - act:
           id: remove_own_case
           delete: {resource: own_case_removal.case, unclaimed: "Cannot remove a reference case that already has {count} claim(s)"}
+
+# The screens, composed on the UI catalogue: exactly the stack the generated
+# UI plays — the author's and the reviewer's lanes side by side over the
+# participant's work; the manager's lanes, the overview and the resources.
+ui:
+  contributor:
+    blocks:
+      - {id: author, component: lane, at: {x: 0, y: 0, w: 6, h: 6}, props: {lane: author}}
+      - {id: reviewer, component: lane, at: {x: 6, y: 0, w: 6, h: 6}, props: {lane: reviewer}}
+      - {id: withdraw_own_case, component: lane, at: {x: 0, y: 6, w: 6, h: 3}, props: {lane: withdraw_own_case}}
+      - {id: mine, component: mine, at: {x: 6, y: 6, w: 6, h: 3}}
+  manage:
+    blocks:
+      - {id: admin, component: lane, at: {x: 0, y: 0, w: 6, h: 5}, props: {lane: admin}}
+      - {id: withdraw_target, component: lane, at: {x: 6, y: 0, w: 6, h: 5}, props: {lane: withdraw_target}}
+      - {id: withdraw_case, component: lane, at: {x: 0, y: 5, w: 6, h: 3}, props: {lane: withdraw_case}}
+      - {id: pool, component: pool, at: {x: 6, y: 5, w: 6, h: 3}}
+      - {id: overview, component: overview, at: {x: 0, y: 8, w: 12, h: 4}}
+      - {id: resources, component: resources, at: {x: 0, y: 12, w: 12, h: 5}}
