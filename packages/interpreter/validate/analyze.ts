@@ -950,14 +950,19 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       checkClaimUse(body.claim, scope, [...path, "claim"], id);
     }
 
+    if (body.snapshot !== undefined && body.kind !== "ai_grid") report("shape", [...path, "snapshot"], "snapshot applies to an ai_grid assessment", { node: id });
+
     switch (body.kind) {
       case "ai_grid":
       case "self": {
         if (body.grid === undefined) report("shape", path, `a ${body.kind} assessment names its grid`, { node: id });
         else checkGrid(body.grid, scope, [...path, "grid"], id);
         for (const [i, input] of (body.input ?? []).entries()) expr(input, scope, [...path, "input", i], id);
-        if (body.kind === "ai_grid") output = T.record({ score: T.number });
-        else {
+        if (body.kind === "ai_grid") {
+          // L'évaluation note un artefact : une URL GitHub ou Kaggle parmi les entrées.
+          if (!body.input?.length) report("shape", path, "an ai_grid assessment takes its artifact URL in input", { node: id });
+          output = T.record({ score: T.number });
+        } else {
           if (body.gating !== false) report("shape", path, "a self assessment is formative: gating: false", { node: id });
           if (body.emit) report("shape", [...path, "emit"], "a self assessment emits nothing", { node: id });
           gap("self assessment", path, "formative self-evaluation is not compiled in v1", id);

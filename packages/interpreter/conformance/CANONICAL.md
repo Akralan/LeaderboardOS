@@ -57,3 +57,15 @@ Reconciling `content/templates/data-annotation/template.yaml` with the hand-writ
 | `claim: {ttl: <expression>}` | a TTL can come from a param (`params.ttl_hours`), in hours |
 | `ttl` on `unique_per` claims | a gold is claimed once per annotator and still expires; only `unbounded` refuses a TTL |
 | `amount: {reverse: <rule_key or lane.node>}` | the exact negative of what a reward paid for each recipient's claim, net of earlier reversals (spec §3.5, clawback); aggregate inputs expose `claim` for it |
+
+## Runtime bindings (template parity, milestone 1)
+
+The catalog's executable half is bound in `compile/bindings.ts`; a test holds every `v1: true` capability to a binding.
+
+| Addition | Why |
+|---|---|
+| `assess: {kind: ai_grid, input: [<artifact URL>, …]}` scores on **0..1** (`globalScore / 9`) | the ML flow's `agentScore`; the code flow's `score10` is `10 × score`. The first GitHub or Kaggle URL among the inputs is the artifact; the other inputs go to the agent's context |
+| `assess: {kind: ai_grid, snapshot: history \| latest}` | what is graded: a GitHub branch's recent history (`github-snapshot`, the code flow — default on GitHub) or an artifact's latest state (`kaggle-artifact`, the ML flow — default on Kaggle) |
+| `kaggle_metadata` output `{ref, kind, url, title, versions, metrics: {auc, f1, accuracy}}` | typed; each metric is the latest model version that reports it, `0` when none does — the ML flow's `readKaggleMetric` |
+| `github_fetch` output `{slug, url, branch, commits, last_commit, last_commit_at}` | typed; up to 100 commits of the branch |
+| An evaluation or observer failure refuses the gesture (`502`), without effect | a failed agent call or connector read never writes a partial run |

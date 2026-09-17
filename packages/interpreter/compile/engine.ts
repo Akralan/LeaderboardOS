@@ -607,7 +607,13 @@ export class Engine {
       case "ai_grid": {
         const grid = await this.eval(body.grid!, state);
         const inputs = await Promise.all((body.input ?? []).map((input) => this.eval(input, state)));
-        const score = await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs });
+        let score: number;
+        try {
+          score = await this.t.runtime.evaluate({ challenge: state.challenge, userId: state.userId!, grid: String(grid), inputs, ...(body.snapshot ? { snapshot: body.snapshot } : {}) });
+        } catch (error) {
+          if (error instanceof ObserverRefusal) throw new Refusal(error.status, error.message);
+          throw error;
+        }
         output = { score };
         break;
       }

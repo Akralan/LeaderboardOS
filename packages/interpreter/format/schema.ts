@@ -140,6 +140,8 @@ export const assessBody = z.strictObject({
   kind: z.enum(["ai_grid", "human", "metric", "self"]),
   grid: exprSource.optional(),
   input: z.array(exprSource).optional(),
+  /** `ai_grid` sur un dépôt : son historique récent (défaut GitHub) ou son dernier état (défaut Kaggle). */
+  snapshot: z.enum(["history", "latest"]).optional(),
   fields: fields.optional(),
   from: identifier.optional(),
   value: exprSource.optional(),

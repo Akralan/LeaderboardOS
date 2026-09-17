@@ -51,6 +51,8 @@ export interface EvaluateBinding {
   userId: string;
   grid: string;
   inputs: Value[];
+  /** Ce qui est noté d'un dépôt : son historique récent (défaut GitHub), ou son dernier état (défaut Kaggle). */
+  snapshot?: "history" | "latest";
 }
 
 export type RuntimeBlobs = Pick<Blobs, "store" | "get">;
@@ -82,7 +84,7 @@ export interface TemplateRuntime {
   /** Les contributions d'un challenge source, pour les champs `link`. */
   contributions: RuntimeContributions;
   ledger: RuntimeLedger;
-  /** Le score global d'une évaluation par grille. */
+  /** Le score d'une évaluation par grille, sur 0..1. */
   evaluate(request: EvaluateBinding): Promise<number>;
   /** Un observateur du catalogue (`http_proxy`, un connecteur…). */
   observe(capability: string, args: Record<string, Value>, context: ObserveContext): Promise<Value>;
@@ -203,13 +205,13 @@ export function defaultRuntime(
     },
     evaluate:
       bindings.evaluate ??
-      (async ({ grid }) => {
-        throw new RuntimeBindingError(`no evaluation binding installed for grid ${grid}`);
-      }),
+      (async (request) => (await import("./bindings.js")).evaluateGrid(request)),
     observe:
       bindings.observe ??
       (async (capability, args, context) => {
         if (capability === "http_proxy") return httpProxy(args, context);
+        const { BOUND_CAPABILITIES, observeConnector } = await import("./bindings.js");
+        if (BOUND_CAPABILITIES.has(capability)) return observeConnector(capability, args);
         throw new RuntimeBindingError(`no binding installed for capability ${capability}`);
       }),
     challengesOf: bindings.challengesOf ?? (async (flowKey) => {
