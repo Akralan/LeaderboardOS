@@ -259,12 +259,19 @@ lanes:
 # the manager's pool, targets, scenario and walkthroughs — the screens the
 # hand-written flow had, on the template's lanes and resources.
 ui:
+  # The validator's screen in bricks that share the screen's choices: the
+  # exposed apps ($app), the walkthrough the open lane creates ($run), the
+  # scenario one step at a time ($step); the app in a frame; the record and
+  # complete forms with those choices fixed. The `walkthrough` component of the
+  # catalogue is the same screen in one block.
   contributor:
     blocks:
-      - id: walkthrough
-        component: walkthrough
-        at: {x: 0, y: 0, w: 12, h: 8}
-        props: {targets: app, steps: step, open: open, record: record, complete: complete, reward_param: cp_per_validation, expert_param: expert_comment_qualification}
+      - {id: apps, component: picker, selects: app, at: {x: 0, y: 0, w: 4, h: 10}, props: {lane: open, status: walkthrough}}
+      - {id: start, component: form, selects: run, at: {x: 4, y: 0, w: 8, h: 2}, props: {lane: open, values: {app: $app}, label: Start the walkthrough}}
+      - {id: app, component: frame, at: {x: 4, y: 2, w: 8, h: 8}, props: {url: $app.app_url}}
+      - {id: steps, component: stepper, selects: step, at: {x: 0, y: 10, w: 4, h: 5}, props: {lane: record}}
+      - {id: record, component: form, at: {x: 4, y: 10, w: 8, h: 5}, props: {lane: record, values: {walkthrough: $run, step: $step}, label: Save this step}}
+      - {id: complete, component: form, at: {x: 0, y: 15, w: 12, h: 3}, props: {lane: complete, values: {walkthrough: $run}, label: Finish the walkthrough}}
   manage:
     blocks:
       - {id: pool, component: pool, at: {x: 0, y: 0, w: 12, h: 2}}

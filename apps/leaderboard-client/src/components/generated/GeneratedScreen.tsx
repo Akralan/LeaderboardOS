@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { SurfaceBlock, TemplateDescription } from '../../../../../packages/interpreter/describe';
 import type { UiScreen } from '../../../../../packages/interpreter/format/schema';
 import type { ChallengeRewards, ContributorSlotContext, SlotChallenge, SlotTeamMember } from '@/lib/flowSlots';
@@ -14,6 +14,7 @@ import { GeneratedMine, GeneratedResources } from './GeneratedResources';
 import { GeneratedWorkspace } from './GeneratedWorkspace';
 import { StepsBlock, TargetsBlock, WalkthroughBlock, WalkthroughsBlock } from './journeyBlocks';
 import { AnnotationBlock, CampaignBlock, ComputeBlock, ProjectBlock, SubmissionListBlock, SubmissionsBlock } from './flowBlocks';
+import { FormBlock, FrameBlock, PickerBlock, ScreenVarsContext, StepperBlock } from './screenBlocks';
 import { fgAt } from './format';
 
 /**
@@ -171,6 +172,11 @@ const BLOCKS: Readonly<Record<string, BlockRenderer>> = {
   compute: (block, runtime) => <ComputeBlock block={block} runtime={runtime} />,
   annotation: (block, runtime) => <AnnotationBlock block={block} runtime={runtime} />,
   campaign: (block, runtime) => <CampaignBlock block={block} runtime={runtime} />,
+  // Les briques, coordonnées par les variables de l'écran.
+  picker: (block, runtime) => <PickerBlock block={block} runtime={runtime} />,
+  stepper: (block, runtime) => <StepperBlock block={block} runtime={runtime} />,
+  form: (block, runtime) => <FormBlock block={block} runtime={runtime} />,
+  frame: (block, runtime) => <FrameBlock block={block} runtime={runtime} />,
 };
 
 /** Les blocs dans l'ordre de lecture : la colonne d'un téléphone les empile ainsi. */
@@ -179,19 +185,25 @@ export function readingOrder<T extends { at: { x: number; y: number } }>(blocks:
 }
 
 export function GeneratedScreen({ blocks, runtime }: { blocks: readonly SurfaceBlock[]; runtime: ScreenRuntime }) {
+  // Les variables de l'écran : ce que ses pickers, steppers et forms ont choisi.
+  const [vars, setVars] = useState<Record<string, unknown>>({});
+  const set = useCallback((name: string, value: unknown) => setVars((current) => (current[name] === value ? current : { ...current, [name]: value })), []);
+  const screenVars = useMemo(() => ({ vars, set }), [vars, set]);
   return (
-    <div className="ui-screen">
-      {readingOrder(blocks).map((block) => {
+    <ScreenVarsContext.Provider value={screenVars}>
+      <div className="ui-screen">
+        {readingOrder(blocks).map((block) => {
         const render = BLOCKS[block.component];
         const content = render ? render(block, runtime) : <Missing what={`Unknown component '${block.component}'.`} />;
         if (content === null) return null;
         const placement = { '--gx': block.at.x + 1, '--gy': block.at.y + 1, '--gw': block.at.w, '--gh': block.at.h } as CSSProperties;
-        return (
-          <div key={block.id} className="ui-block" style={placement}>
-            {content}
-          </div>
-        );
-      })}
-    </div>
+          return (
+            <div key={block.id} className="ui-block" style={placement}>
+              {content}
+            </div>
+          );
+        })}
+      </div>
+    </ScreenVarsContext.Provider>
   );
 }

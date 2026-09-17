@@ -433,11 +433,17 @@ export const uiPlacement = z.strictObject({
 });
 export type UiPlacement = z.infer<typeof uiPlacement>;
 
+/**
+ * Un bloc peut choisir quelque chose pour l'écran (`selects: app`) ; un autre
+ * bloc lit ce choix dans un argument (`url: $app.app_url`, `walkthrough: $run`).
+ * Les variables sont celles de l'écran ; le validateur en connaît le type.
+ */
 export const uiBlockDecl = z.strictObject({
   id: identifier,
   component: identifier,
   at: uiPlacement,
   props: z.record(identifier, z.unknown()).optional(),
+  selects: identifier.optional(),
 });
 export type UiBlockDecl = z.infer<typeof uiBlockDecl>;
 

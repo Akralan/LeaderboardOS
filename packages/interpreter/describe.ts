@@ -107,6 +107,8 @@ export interface SurfaceBlock {
   component: string;
   at: UiPlacement;
   props: Record<string, unknown>;
+  /** La variable de l'écran que le bloc choisit ; les autres blocs la lisent par `$nom`. */
+  selects?: string;
 }
 
 export interface SurfaceScreen {
@@ -269,7 +271,15 @@ function uiOf(ui: NonNullable<DocumentShell["ui"]>): SurfaceUi {
   for (const screen of UI_SCREENS) {
     const decl = ui[screen];
     if (!decl) continue;
-    screens[screen] = { blocks: decl.blocks.map((block) => ({ id: block.id, component: block.component, at: { ...block.at }, props: { ...(block.props ?? {}) } })) };
+    screens[screen] = {
+      blocks: decl.blocks.map((block) => ({
+        id: block.id,
+        component: block.component,
+        at: { ...block.at },
+        props: { ...(block.props ?? {}) },
+        ...(block.selects ? { selects: block.selects } : {}),
+      })),
+    };
   }
   return screens;
 }

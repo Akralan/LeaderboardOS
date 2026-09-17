@@ -129,6 +129,8 @@ export interface BlockView {
   component: string;
   at: { x: number; y: number; w: number; h: number };
   props: Rec;
+  /** La variable de l'écran que le bloc choisit. */
+  selects: string | null;
 }
 
 export interface EditorModel {
@@ -611,6 +613,7 @@ export function buildModel(source: string, previous?: EditorModel): EditorModel 
           component: str(block.component),
           at: { x: int(at.x, 0), y: int(at.y, 0), w: int(at.w, 12), h: int(at.h, 2) },
           props: isRec(block.props) ? block.props : {},
+          selects: typeof block.selects === 'string' ? block.selects : null,
         };
       });
       return [screen, blocks];

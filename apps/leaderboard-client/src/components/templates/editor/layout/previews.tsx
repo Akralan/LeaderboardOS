@@ -421,8 +421,76 @@ function CampaignPreview() {
   );
 }
 
+function Binding({ value }: { value: unknown }) {
+  return <span className="rounded bg-brandCP/10 px-1.5 py-px font-mono text-[10px] text-brandCP">{typeof value === 'string' ? value : '—'}</span>;
+}
+
+function PickerPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta={block.selects ? `selects $${block.selects}` : 'selects nothing'}>{typeof block.props.lane === 'string' ? `${humanize(block.props.lane)} · pick` : 'Picker'}</Title>
+      {Array.from({ length: 3 }, (_, row) => (
+        <div key={row} className={`flex flex-col gap-1 rounded-lg border px-2.5 py-2 ${row === 0 ? 'border-brandCP/60 bg-brandCP/10' : 'border-white/[0.08]'}`}>
+          <span className={`${skeleton} h-2.5 w-1/2`} />
+          <span className={`${skeleton} h-2 w-3/4`} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StepperPreview({ block }: { block: BlockView }) {
+  return (
+    <div className={card}>
+      <Title meta={block.selects ? `selects $${block.selects}` : 'selects nothing'}>Step 1 of n</Title>
+      <span className={`${skeleton} h-1 w-full`} />
+      <span className={`${skeleton} h-3 w-2/3`} />
+      <span className={`${skeleton} h-2 w-full`} />
+      <span className="text-[10px] text-white/30">← → one step at a time</span>
+    </div>
+  );
+}
+
+function FormPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
+  const laneId = typeof block.props.lane === 'string' ? block.props.lane : '';
+  const segment = surface?.lanes.find((lane) => lane.id === laneId)?.segments[0];
+  const fixed = block.props.values && typeof block.props.values === 'object' ? (block.props.values as Record<string, unknown>) : {};
+  const asked = segment?.fields.filter((field) => !(field.name in fixed)) ?? [];
+  return (
+    <div className={card}>
+      <Title meta={block.selects ? `selects $${block.selects}` : undefined}>{laneId ? humanize(laneId) : 'Form'}</Title>
+      {Object.entries(fixed).map(([field, bound]) => (
+        <span key={field} className="flex items-center gap-1.5 text-[10px] text-white/45">{humanize(field)} = <Binding value={bound} /></span>
+      ))}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+        {asked.map((field) => <PreviewField key={`${field.gesture}.${field.name}`} field={field} />)}
+        {segment && asked.length === 0 && <span className="text-xs text-white/45">A single action — no field.</span>}
+        {!segment && <span className="text-[11px] text-red-300">{laneId ? `No lane '${laneId}' on this template.` : 'Pick a lane in the inspector.'}</span>}
+      </div>
+      <span className="w-fit rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-black/80">{typeof block.props.label === 'string' && block.props.label ? block.props.label : asked.length === 0 ? 'Start' : 'Submit'}</span>
+    </div>
+  );
+}
+
+function FramePreview({ block }: { block: BlockView }) {
+  return (
+    <div className={`${card} items-center justify-center`} style={{ backgroundImage: 'repeating-linear-gradient(135deg, rgb(255 255 255 / 0.05) 0 8px, transparent 8px 16px)' }}>
+      <span className="text-[10px] text-white/40">Application under test</span>
+      <Binding value={block.props.url} />
+    </div>
+  );
+}
+
 export function BlockPreview({ block, surface }: { block: BlockView; surface: TemplateSurface | null }) {
   switch (block.component) {
+    case 'picker':
+      return <PickerPreview block={block} />;
+    case 'stepper':
+      return <StepperPreview block={block} />;
+    case 'form':
+      return <FormPreview block={block} surface={surface} />;
+    case 'frame':
+      return <FramePreview block={block} />;
     case 'project':
       return <ProjectPreview />;
     case 'submissions':

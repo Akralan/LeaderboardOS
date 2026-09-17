@@ -133,7 +133,14 @@ describe("the scenario components", () => {
 
   it("compose the journey-validation template's screens, whose surface names the referenced resources", () => {
     const { surface } = describeTemplate(JOURNEY, "journey-validation");
-    expect(surface.ui?.contributor?.blocks.map((block) => block.component)).toEqual(["walkthrough"]);
+    expect(surface.ui?.contributor?.blocks.map((block) => `${block.component}${block.selects ? `>$${block.selects}` : ""}`)).toEqual([
+      "picker>$app",
+      "form>$run",
+      "frame",
+      "stepper>$step",
+      "form",
+      "form",
+    ]);
     expect(surface.ui?.manage?.blocks.map((block) => block.component)).toEqual(["pool", "targets", "steps", "walkthroughs"]);
     const walkthrough = surface.resources.find((resource) => resource.type === "walkthrough");
     expect(walkthrough?.fields).toEqual([{ name: "app", kind: "ref", resource: "app" }]);
@@ -207,5 +214,48 @@ describe("the system templates", () => {
     expect(composed("ml")).toEqual([["submissions", "metrics"], ["submission_list", "metrics", "compute"]]);
     expect(composed("data-annotation")).toEqual([["annotation"], ["campaign"]]);
     expect(composed("endpoint-check")).toEqual([["lane", "lane", "lane", "mine"], ["lane", "lane", "lane", "pool", "overview", "resources"]]);
+  });
+});
+
+describe("the screen's variables", () => {
+  const JOURNEY = bare(readFileSync(path.join(ROOT, "content/templates/journey-validation/template.yaml"), "utf8"));
+  const journeyWith = (blocks: string[]) => `${JOURNEY.trimEnd()}\n\nui:\n  contributor:\n    blocks:\n${blocks.map((block) => `      - ${block}`).join("\n")}\n`;
+  const errors = (source: string) => checkTemplateSource(source, "journey-validation").errors.map((issue) => [issue.path.join("."), issue.message]);
+
+  it("let a form fix its fields on what a picker, a stepper or another form chose", () => {
+    const source = journeyWith([
+      "{id: apps, component: picker, selects: app, at: {x: 0, y: 0, w: 4, h: 6}, props: {lane: open, status: walkthrough}}",
+      "{id: start, component: form, selects: run, at: {x: 4, y: 0, w: 8, h: 2}, props: {lane: open, values: {app: $app}}}",
+      "{id: app, component: frame, at: {x: 4, y: 2, w: 8, h: 4}, props: {url: $app.app_url}}",
+      "{id: steps, component: stepper, selects: step, at: {x: 0, y: 6, w: 4, h: 4}, props: {lane: record}}",
+      "{id: record, component: form, at: {x: 4, y: 6, w: 8, h: 4}, props: {lane: record, values: {walkthrough: $run, step: $step}}}",
+    ]);
+    expect(errors(source)).toEqual([]);
+  });
+
+  it("refuse a variable nobody chooses, a field the choice does not have, a field the segment does not collect", () => {
+    const source = journeyWith([
+      "{id: apps, component: picker, selects: app, at: {x: 0, y: 0, w: 4, h: 6}, props: {lane: open}}",
+      "{id: twice, component: picker, selects: app, at: {x: 4, y: 0, w: 4, h: 6}, props: {lane: open}}",
+      "{id: quiet, component: frame, selects: nope, at: {x: 8, y: 0, w: 4, h: 6}, props: {url: $app.app_url}}",
+      "{id: app, component: frame, at: {x: 0, y: 6, w: 4, h: 4}, props: {url: $app.homepage}}",
+      "{id: start, component: form, selects: run, at: {x: 4, y: 6, w: 4, h: 4}, props: {lane: open, values: {app: $walk, target: $app}}}",
+      "{id: record, component: form, at: {x: 8, y: 6, w: 4, h: 4}, props: {lane: record, values: {walkthrough: $run.app}}}",
+      "{id: text, component: frame, at: {x: 0, y: 10, w: 4, h: 4}, props: {url: $}}",
+    ]);
+    expect(errors(source)).toEqual([
+      ["ui.contributor.blocks.1.selects", "'$app' is already chosen by block 'apps'"],
+      ["ui.contributor.blocks.2.selects", "'frame' chooses nothing for the screen — only picker, stepper and form do"],
+      ["ui.contributor.blocks.3.props.url", "'app' has no field 'homepage' — it has contribution, app_url"],
+      ["ui.contributor.blocks.4.props.values.app", "'$walk' is chosen by no block of this screen — a picker, a stepper or a form must `selects: walk`"],
+      ["ui.contributor.blocks.4.props.values.target", "'open' collects no 'target' — it collects app"],
+      ["ui.contributor.blocks.5.props.values.walkthrough", "'$run' is what a form created: only '$run.id' is known"],
+      ["ui.contributor.blocks.6.props.url", "'$' is not a binding — write $variable or $variable.field"],
+    ]);
+  });
+
+  it("refuse a picker on a lane that picks nothing", () => {
+    const source = journeyWith(["{id: apps, component: picker, selects: app, at: {x: 0, y: 0, w: 4, h: 6}, props: {lane: complete, field: global_feedback}}"]);
+    expect(errors(source)).toEqual([["ui.contributor.blocks.0.props.field", "'global_feedback' is a string, not a ref or link field"]]);
   });
 });

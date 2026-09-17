@@ -1,7 +1,7 @@
 import type { UiScreen } from "../format/schema.js";
 import { UI_SCREENS } from "../format/schema.js";
 import type { TemplateIssue, TemplatePath } from "../issues.js";
-import { LANE_TRIGGER_OF_SCREEN, UI_CATALOG, UI_COLUMNS, uiComponent, type UiPropKind } from "../ui/catalog.js";
+import { BINDING, LANE_TRIGGER_OF_SCREEN, UI_CATALOG, UI_COLUMNS, uiComponent, type UiPropKind } from "../ui/catalog.js";
 import { overlaps } from "../ui/layout.js";
 import type { TemplateModel } from "./format.js";
 
@@ -27,11 +27,55 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
   const lanes = new Map(model.lanes.map((lane) => [lane.id, lane.entry.trigger]));
   const brokenLanes = model.broken.lanes;
 
+  /** Les champs du premier Collect d'une lane, avec leur type écrit : ce qu'un `form` ou un `picker` joue. */
+  const firstCollectFields = (laneId: unknown): Record<string, string> | null => {
+    const lane = typeof laneId === "string" ? model.lanes.find((candidate) => candidate.id === laneId) : undefined;
+    const collect = lane?.nodes.find((node) => node.family === "collect");
+    if (!collect || collect.family !== "collect") return null;
+    return Object.fromEntries(Object.entries(collect.body.fields).map(([name, decl]) => [name, typeof decl.type === "string" ? decl.type : "json"]));
+  };
+  /** Ce qu'un champ `ref(x)` désigne ; `$link` pour un champ `link` (id, author, title, url, members). */
+  const pickedOf = (type: string | undefined): string | null => {
+    if (!type) return null;
+    const ref = /^ref\(\s*([a-z][a-z0-9_]*)\s*\)$/.exec(type);
+    if (ref) return ref[1];
+    return type === "link" ? "$link" : null;
+  };
+  const LINK_FIELDS = ["id", "author", "author_name", "title", "url", "members"];
+
+  /** Les variables d'un écran : qui les choisit, et de quelle ressource elles sont une instance. */
+  type ScreenVar = { block: string; resource: string | null; created: boolean };
+  let vars = new Map<string, ScreenVar>();
+
   for (const screen of UI_SCREENS) {
     const decl = ui[screen];
     if (!decl) continue;
     const seen = new Map<string, number>();
     const singles = new Map<string, number>();
+
+    // Les choix d'abord : une liaison peut lire un bloc posé plus bas.
+    vars = new Map();
+    decl.blocks.forEach((block, index) => {
+      if (!block.selects) return;
+      const path: TemplatePath = ["ui", screen, "blocks", index, "selects"];
+      const spec = uiComponent(block.component);
+      if (!spec) return;
+      if (!spec.selects) {
+        report(path, `'${block.component}' chooses nothing for the screen — only picker, stepper and form do`);
+        return;
+      }
+      const taken = vars.get(block.selects);
+      if (taken) {
+        report(path, `'$${block.selects}' is already chosen by block '${taken.block}'`);
+        return;
+      }
+      const props = block.props ?? {};
+      const fields = firstCollectFields(props.lane);
+      const fieldName = typeof props.field === "string" ? props.field : fields ? Object.keys(fields).find((name) => pickedOf(fields[name])) : undefined;
+      const resource = spec.selects === "resource" && fields && fieldName ? pickedOf(fields[fieldName]) : null;
+      vars.set(block.selects, { block: block.id, resource, created: spec.selects === "created" });
+    });
+
     decl.blocks.forEach((block, index) => {
       const path: TemplatePath = ["ui", screen, "blocks", index];
       const first = seen.get(block.id);
@@ -70,7 +114,16 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
           if (prop.required) report([...path, "props"], `'${block.component}' needs '${name}'`);
           continue;
         }
-        checkProp(prop.kind, name, value, screen, [...path, "props", name]);
+        if (prop.kind === "values") checkValues(block.component, props.lane, value, [...path, "props", name]);
+        else checkProp(prop.kind, name, value, screen, [...path, "props", name]);
+      }
+      // Un picker ou un stepper choisit par un champ ref ou link de son premier segment.
+      if (spec.selects === "resource" && typeof props.lane === "string" && lanes.has(props.lane)) {
+        const fields = firstCollectFields(props.lane);
+        const fieldName = typeof props.field === "string" ? props.field : fields ? Object.keys(fields).find((name) => pickedOf(fields[name])) : undefined;
+        if (!fields || !fieldName) report([...path, "props", "lane"], `'${block.component}' picks by a ref or link field of '${props.lane}', which collects none`);
+        else if (!(fieldName in fields)) report([...path, "props", "field"], `'${props.lane}' collects no '${fieldName}' — it collects ${Object.keys(fields).join(", ")}`);
+        else if (!pickedOf(fields[fieldName])) report([...path, "props", "field"], `'${fieldName}' is a ${fields[fieldName]}, not a ref or link field`);
       }
       for (const name of Object.keys(props)) {
         if (!(name in spec.props)) report([...path, "props", name], `'${block.component}' has no '${name}' — it takes ${Object.keys(spec.props).join(", ") || "nothing"}`);
@@ -88,6 +141,47 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
   }
   return issues;
 
+  /** Une liaison `$name` ou `$name.field` : la variable est choisie sur cet écran, le champ existe sur ce qu'elle désigne. */
+  function checkBinding(value: string, path: TemplatePath): boolean {
+    const match = BINDING.exec(value);
+    if (!match) return false;
+    const [, name, field] = match;
+    const variable = vars.get(name);
+    if (!variable) {
+      report(path, `'$${name}' is chosen by no block of this screen — a picker, a stepper or a form must \`selects: ${name}\``);
+      return true;
+    }
+    if (!field) return true;
+    if (variable.created) {
+      if (field !== "id") report(path, `'$${name}' is what a form created: only '$${name}.id' is known`);
+      return true;
+    }
+    if (variable.resource === "$link") {
+      if (!LINK_FIELDS.includes(field)) report(path, `a link has ${LINK_FIELDS.join(", ")} — not '${field}'`);
+      return true;
+    }
+    if (!variable.resource) return true;
+    const resource = model.shell.resources[variable.resource];
+    if (resource && !(field in resource.fields) && !["id", "author", "author_name", "open", "closed", "verdict"].includes(field)) {
+      report(path, `'${variable.resource}' has no field '${field}' — it has ${Object.keys(resource.fields).join(", ")}`);
+    }
+    return true;
+  }
+
+  /** `values` : des champs du premier segment de la lane, fixés par une liaison ou une valeur. */
+  function checkValues(component: string, laneId: unknown, value: unknown, path: TemplatePath) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      report(path, `'values' is a mapping of fields to $variables or values`);
+      return;
+    }
+    const fields = typeof laneId === "string" && lanes.has(laneId) ? firstCollectFields(laneId) : null;
+    for (const [field, bound] of Object.entries(value as Record<string, unknown>)) {
+      if (fields && !(field in fields)) report([...path, field], `'${laneId}' collects no '${field}' — it collects ${Object.keys(fields).join(", ") || "nothing"}`);
+      if (typeof bound === "string") checkBinding(bound, [...path, field]);
+    }
+    void component;
+  }
+
   function checkProp(kind: UiPropKind, name: string, value: unknown, screen: UiScreen, path: TemplatePath) {
     if (kind === "bool") {
       if (typeof value !== "boolean") report(path, `'${name}' is true or false`);
@@ -95,6 +189,10 @@ export function checkUi(model: TemplateModel): TemplateIssue[] {
     }
     if (typeof value !== "string") {
       report(path, `'${name}' is a text`);
+      return;
+    }
+    if (kind === "text" && value.startsWith("$")) {
+      if (!checkBinding(value, path)) report(path, `'${value}' is not a binding — write $variable or $variable.field`);
       return;
     }
     if (kind === "resource") {

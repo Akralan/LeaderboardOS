@@ -70,6 +70,12 @@ function PropControl({ block, name, spec }: { block: BlockView; name: string; sp
           <ToggleChip on={value === true} label={value === true ? 'yes' : 'no'} onToggle={() => commit(value !== true)} disabled={readOnly} />
         </FieldShell>
       );
+    case 'values':
+      return (
+        <FieldShell label={spec.label} hint={spec.hint} issues={issues}>
+          <YamlSnippet value={value} onCommit={commit} disabled={readOnly} rows={3} />
+        </FieldShell>
+      );
     case 'markdown':
       return (
         <FieldShell label={spec.label} hint={spec.hint} issues={issues}>
@@ -86,9 +92,10 @@ function PropControl({ block, name, spec }: { block: BlockView; name: string; sp
 }
 
 export function BlockInspector({ block }: { block: BlockView }) {
-  const { source, readOnly, apply, selectBlock, blockIssues } = useEditor();
+  const { source, model, readOnly, apply, selectBlock, blockIssues, issuesAt, screen } = useEditor();
   const { placeBlock, removeBlock } = useLayoutActions();
   const spec = uiComponent(block.component);
+  const screenVars = (model.screens[screen] ?? []).map((candidate) => candidate.selects).filter((name): name is string => Boolean(name));
   const issues = blockIssues.get(block.key) ?? [];
   const at = block.at;
   const place = (patch: Partial<BlockView['at']>) => placeBlock(block, { ...at, ...patch });
@@ -121,6 +128,15 @@ export function BlockInspector({ block }: { block: BlockView }) {
       <FieldShell label="Block id" type="snake_case">
         <TextInput value={block.id} onCommit={(next) => apply(setAt(source, [...block.path, 'id'], next.trim()), `id:${block.key}`)} disabled={readOnly} />
       </FieldShell>
+
+      {spec?.selects && (
+        <FieldShell label="Selects" type={spec.selects === 'resource' ? 'instance' : 'created'} hint="a screen variable: other blocks read $name" issues={issuesAt([...block.path, 'selects'])}>
+          <TextInput value={block.selects ?? ''} onCommit={(next) => apply(setAt(source, [...block.path, 'selects'], next.trim() || undefined), `selects:${block.key}`)} placeholder="app" disabled={readOnly} />
+        </FieldShell>
+      )}
+      {screenVars.length > 0 && (
+        <span className="text-[11px] leading-snug text-white/35">Variables on this screen: {screenVars.map((name) => `$${name}`).join(', ')} — an argument can read one, or a field of it ($app.app_url).</span>
+      )}
 
       {spec && Object.keys(spec.props).length > 0 && (
         <div className="flex flex-col gap-3">

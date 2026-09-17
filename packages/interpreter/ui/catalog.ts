@@ -13,7 +13,11 @@ import type { UiScreen } from "../format/schema.js";
 
 export const UI_COLUMNS = 12;
 
-export type UiPropKind = "lane" | "resource" | "text" | "markdown" | "bool";
+/** `values` : des champs d'un segment fixés par l'écran (`{app: $app}`), jamais saisis. Un `text` peut aussi lire une variable (`$app.app_url`). */
+export type UiPropKind = "lane" | "resource" | "text" | "markdown" | "bool" | "values";
+
+/** Une liaison : `$name` ou `$name.field`. */
+export const BINDING = /^\$([a-z][a-z0-9_]*)(?:\.([a-z][a-z0-9_]*))?$/;
 
 export interface UiPropSpec {
   kind: UiPropKind;
@@ -41,6 +45,12 @@ export interface UiComponentSpec {
    * refuse un template qui ne les a pas.
    */
   expects?: { lanes?: readonly string[]; submissions?: boolean };
+  /**
+   * Le bloc peut choisir pour l'écran (`selects`) : une instance de la
+   * ressource que sa lane désigne (`resource`), ou ce qu'un geste a créé ou
+   * réclamé (`created`, dont seul l'identifiant est connu).
+   */
+  selects?: "resource" | "created";
 }
 
 export const UI_CATALOG: readonly UiComponentSpec[] = [
@@ -145,6 +155,59 @@ export const UI_CATALOG: readonly UiComponentSpec[] = [
     props: {},
     size: { w: 12, h: 5, minW: 6, minH: 3 },
     single: true,
+  },
+
+  // ── Les briques : elles se coordonnent par les variables de l'écran ────
+  // Un `picker` choisit une instance (`$app`), un `stepper` une étape
+  // (`$step`), un `form` fixe des champs d'un segment sur ces choix et garde ce
+  // que le geste a créé (`$run`), un `frame` montre l'URL du choix. Le
+  // walkthrough de journey-validation s'écrit avec ces quatre briques.
+  {
+    name: "picker",
+    label: "Picker",
+    role: "the instances a lane's field can pick, one chosen for the screen",
+    screens: ["contributor", "manage"],
+    props: {
+      lane: { kind: "lane", label: "Lane", required: true, hint: "the lane whose first segment picks the instance (its options read)" },
+      field: { kind: "text", label: "Field", hint: "the ref or link field of that segment; its first one by default" },
+      status: { kind: "resource", label: "Status from", hint: "a resource I create that refers to the picked instance: shows mine on each (in progress, completed)" },
+    },
+    size: { w: 4, h: 8, minW: 3, minH: 3 },
+    selects: "resource",
+  },
+  {
+    name: "stepper",
+    label: "Stepper",
+    role: "the instances a lane's field can pick, walked one at a time in order",
+    screens: ["contributor", "manage"],
+    props: {
+      lane: { kind: "lane", label: "Lane", required: true, hint: "the lane whose first segment picks the step (its options read)" },
+      field: { kind: "text", label: "Field", hint: "the ref field of that segment; its first one by default" },
+      order: { kind: "text", label: "Order by", hint: "the field that orders the steps (position)" },
+    },
+    size: { w: 4, h: 4, minW: 3, minH: 2 },
+    selects: "resource",
+  },
+  {
+    name: "form",
+    label: "Form",
+    role: "the first segment of a lane, some fields fixed by the screen's choices, the others asked",
+    screens: ["contributor", "manage"],
+    props: {
+      lane: { kind: "lane", label: "Lane", required: true },
+      values: { kind: "values", label: "Fixed fields", hint: "field: $variable — a field the screen fixes, never asked" },
+      label: { kind: "text", label: "Button", hint: "the submit button's label" },
+    },
+    size: { w: 8, h: 4, minW: 3, minH: 2 },
+    selects: "created",
+  },
+  {
+    name: "frame",
+    label: "Frame",
+    role: "an application under test, in a frame, at the URL of a choice",
+    screens: ["contributor", "manage"],
+    props: { url: { kind: "text", label: "URL", required: true, hint: "$app.app_url — a variable's url field, or an address" } },
+    size: { w: 8, h: 8, minW: 4, minH: 4 },
   },
 
   // ── Un scénario parcouru dans des applications (journey-validation) ────
