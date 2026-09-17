@@ -407,6 +407,21 @@ export async function poolState(challengeId: string): Promise<{ pool: number; di
   return res.ok ? res.json() : null;
 }
 
+/** L'état du pool du panneau partagé (`ValidationRewardsPanel`) : les validateurs payés, nommés. */
+export async function journeyRewards(challengeId: string, routes: JourneyRoutes, cpPerValidation: number) {
+  const [rewards, walkthroughs] = await Promise.all([poolState(challengeId), routes.walkthroughs ? resources(challengeId, routes.walkthroughs).catch(() => []) : Promise.resolve([])]);
+  if (!rewards) return null;
+  const names = new Map(walkthroughs.map((run) => [run.author, run.author_name]));
+  return {
+    pool: rewards.pool,
+    distributed: rewards.distributed,
+    remaining: rewards.remaining,
+    requiredValidations: 0,
+    cpPerValidation,
+    breakdown: rewards.breakdown.map((row) => ({ ...row, userName: names.get(row.userId) ?? 'Unknown' })),
+  };
+}
+
 /** Les cibles de l'éditeur partagé (`ValidationTargetsEditor`), sur les routes du template. */
 export function journeyTargets(challengeId: string, routes: JourneyRoutes) {
   return {
