@@ -42,8 +42,43 @@ export interface RuntimeLedger {
   distributed(challengeId: string): Promise<number>;
   entries(challengeId: string): Promise<RewardEntry[]>;
   /** La contribution qui porte les lignes d'un participant ; créée au premier paiement. */
-  contribution(challenge: Challenge, userId: string, contribution: { type: string; title: string }): Promise<string>;
+  contribution(challenge: Challenge, userId: string, contribution: { type: string; title: string; description?: string | null }): Promise<string>;
   write(drafts: RewardEntryDraft[]): Promise<void>;
+  /** `challenges.completion` : la part du pool drainée. */
+  syncCompletion(challenge: Challenge): Promise<void>;
+}
+
+/** Le workspace du porteur, tel que `challenge_teams` le garde. */
+export interface WorkspaceView {
+  provider: string | null;
+  url: string | null;
+  ref: string | null;
+  status: string | null;
+  /** Évaluable : une URL GitHub lisible (`external`), ou une branche prête (`github`). */
+  ready: boolean;
+}
+
+/** Ce que la participation d'un appelant engage : son groupe, son porteur, le workspace de celui-ci. */
+export interface ParticipationContext {
+  /** L'appelant a une participation. */
+  participant: boolean;
+  /** Le porteur du workspace, du board, de la contribution et du ledger : l'appelant en solo. */
+  holder: string;
+  groupId: string | null;
+  /** Tous les membres, porteur inclus ; `[appelant]` en solo. */
+  members: string[];
+  /** Le bonus de groupe de la plateforme : 1, 1.4, 1.8. */
+  multiplier: number;
+  workspace: WorkspaceView | null;
+}
+
+/** Les capacités `groups`, `board` et `workspaces` du core, lues depuis un template. */
+export interface RuntimeParticipations {
+  context(challengeId: string, userId: string): Promise<ParticipationContext>;
+  /** L'avancement du board personnel du porteur. */
+  board(challengeId: string, holderId: string): Promise<{ total: number; done: number }>;
+  /** Les parts d'un delta de CP entre les membres d'un groupe, cumulées sur la contribution. */
+  addShares(contributionId: string, shares: readonly { userId: string; points: number }[]): Promise<void>;
 }
 
 export interface EvaluateBinding {
@@ -120,6 +155,7 @@ export interface TemplateRuntime {
   /** Les contributions d'un challenge source, pour les champs `link`. */
   contributions: RuntimeContributions;
   ledger: RuntimeLedger;
+  participations: RuntimeParticipations;
   /** Le score d'une évaluation par grille, sur 0..1. */
   evaluate(request: EvaluateBinding): Promise<EvaluateResult>;
   evaluations: RuntimeEvaluations;
@@ -149,6 +185,18 @@ export class ObserverRefusal extends Error {
 export interface ObserveContext {
   challenge: Challenge;
   userId: string | null;
+}
+
+/**
+ * Le workspace d'une ligne `challenge_teams`. Prêt comme le challenge code le
+ * lit : une URL GitHub lisible en `external`, une branche prête et son URL en
+ * `github`.
+ */
+export function workspaceView(row: { workspace_provider?: string | null; workspace_url?: string | null; workspace_ref?: string | null; workspace_status?: string | null }): WorkspaceView {
+  const url = row.workspace_url ?? null;
+  const readable = !!url && /github\.com\/[^/?#]+\/[^/?#]+?(?:\.git)?(?:\/tree\/[^?#]+)?(?:[?#]|$)/.test(url);
+  const ready = row.workspace_provider === "external" ? readable : row.workspace_status === "ready" && !!row.workspace_ref && readable;
+  return { provider: row.workspace_provider ?? null, url, ref: row.workspace_ref ?? null, status: row.workspace_status ?? null, ready };
 }
 
 /** Le port branché sur les capacités et les repositories du core. */
@@ -222,11 +270,12 @@ export function defaultRuntime(
         const { RewardEntryRepository } = await repositories();
         return new RewardEntryRepository().findByChallenge(challengeId);
       },
-      async contribution(challenge, userId, { type, title }) {
+      async contribution(challenge, userId, { type, title, description }) {
         const { ContributionRepository } = await repositories();
         const { contribution } = await new ContributionRepository().createIfAbsent({
           title,
           type,
+          ...(description ? { description } : {}),
           reward: 0,
           user_id: userId,
           challenge_id: challenge.uuid,
@@ -238,6 +287,37 @@ export function defaultRuntime(
       async write(drafts) {
         const { RewardEntryRepository } = await repositories();
         await new RewardEntryRepository().createManyAndSyncRewards(drafts);
+      },
+      async syncCompletion(challenge) {
+        const { RewardEntryRepository, ChallengeRepository } = await repositories();
+        const { distributedFromPool, poolCompletion } = await import("../../capabilities/pool.js");
+        const distributed = await distributedFromPool(new RewardEntryRepository(), challenge.uuid);
+        await new ChallengeRepository().update(challenge.uuid, { completion: poolCompletion(challenge.contribution_points_reward, distributed) });
+      },
+    },
+    participations: {
+      async context(challengeId, userId) {
+        const { ChallengeTeamRepository } = await repositories();
+        const { groupContextFrom } = await import("../../capabilities/groups.js");
+        const teams = await new ChallengeTeamRepository().findByChallenge(challengeId);
+        const group = groupContextFrom(teams, userId);
+        const row = teams.find((team) => team.user_id === group.ownerId);
+        return {
+          participant: teams.some((team) => team.user_id === userId),
+          holder: group.ownerId,
+          groupId: group.groupId,
+          members: group.memberIds,
+          multiplier: group.multiplier,
+          workspace: row ? workspaceView(row) : null,
+        };
+      },
+      async board(challengeId, holderId) {
+        const { boardProgress } = await import("../../capabilities/board.js");
+        return boardProgress(challengeId, holderId);
+      },
+      async addShares(contributionId, shares) {
+        const { ContributionMemberRepository } = await repositories();
+        await new ContributionMemberRepository().addShares(shares.map((share) => ({ contribution_id: contributionId, user_id: share.userId, share_cp: share.points })));
       },
     },
     evaluate:

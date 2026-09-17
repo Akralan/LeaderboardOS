@@ -213,7 +213,7 @@ describe("a background evaluation paid as a delta (template parity P2)", () => {
     scores.push(0.8);
     const pending = runtime.evaluations.pending;
     runtime.evaluations.status.set(contribution("alice"), { status: "running", since: runtime.clock, artifactUrl: null });
-    expect(await call("alice", { repo_url: "https://github.com/alice/app" })).toEqual({ status: 409, body: { error: "An evaluation is already running" } });
+    expect(await call("alice", { repo_url: "https://github.com/alice/app" })).toEqual({ status: 409, body: { error: "Cannot start evaluation", reason: "already_running" } });
     expect(pending).toHaveLength(0);
 
     runtime.clock = new Date(runtime.clock.getTime() + 31 * 60 * 1000);

@@ -11,7 +11,8 @@ import { z } from "zod";
  * Le delta itératif est calculé ailleurs (content/flows/code/reward.ts).
  */
 export const codeRewardRulesV1Schema = z.object({
-  version: z.literal(1),
+  // Absente des règles qu'écrit le formulaire généré du template `code` : la v1 est la seule.
+  version: z.literal(1).default(1),
   delivery: z.object({
     /** Part acquise dès qu'une évaluation aboutit, quelle que soit la note. */
     fixed: z.number().int().nonnegative(),

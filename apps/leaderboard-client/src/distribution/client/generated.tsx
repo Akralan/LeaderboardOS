@@ -6,6 +6,8 @@ import type { HeroStat } from '@/components/challenges/HeroStats';
 import type { ChallengeRewards, FlowUiSlots, RulesChallenge, SlotChallenge } from '@/lib/flowSlots';
 import { GeneratedLane } from '@/components/generated/GeneratedLane';
 import { GeneratedOverview } from '@/components/generated/GeneratedOverview';
+import { GeneratedWorkspace } from '@/components/generated/GeneratedWorkspace';
+import { ContributorTaskBoard } from '@/components/contributor/ContributorTaskBoard';
 import { FlowArrow, FlowBox, SectionLabel } from '@/components/challenges/rules/RuleFlow';
 import { fgAt, humanize } from '@/components/generated/format';
 
@@ -117,7 +119,21 @@ export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
     contributorTabs: (ctx) => [
       {
         label: description.descriptor.label,
-        panel: <QualifiedLanes challenge={ctx.challenge} lanes={userLanes} render={(lane) => <GeneratedLane challengeId={ctx.challengeId} lane={lane} />} />,
+        panel: (
+          <div className="space-y-4">
+            {/* Le workspace et le board du porteur (capacités `workspaces` et `board`), avant les lanes qui les lisent. */}
+            {ctx.isMember && description.surface.workspace && (
+              <GeneratedWorkspace
+                challengeId={ctx.challengeId}
+                mode={(description.surface.workspace.param ? configOf(ctx.challenge)[description.surface.workspace.param] : description.surface.workspace.mode) === 'own_repo' ? 'own_repo' : 'provided_repo'}
+                participation={ctx.myParticipation}
+                onSaved={ctx.reloadBoard}
+              />
+            )}
+            {ctx.isMember && description.surface.board && <ContributorTaskBoard challengeId={ctx.challengeId} tasks={ctx.myTasks} onReload={ctx.reloadBoard} />}
+            <QualifiedLanes challenge={ctx.challenge} lanes={userLanes} render={(lane) => <GeneratedLane challengeId={ctx.challengeId} lane={lane} />} />
+          </div>
+        ),
       },
     ],
     contributorHeroStat: (ctx) => heroStat(description, ctx.rewards, ctx.contributions.length),

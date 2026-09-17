@@ -11,6 +11,7 @@ import {
   gateBody,
   paramDecl,
   presentationDecl,
+  workspaceDecl,
   requiresDecl,
   resourceDecl,
   statesDecl,
@@ -290,6 +291,7 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
   const resources = entries(resourceDecl, raw.resources, ["resources"], issues, broken.resources);
   const counters = entries(counterDecl, raw.counters, ["counters"], issues, broken.counters);
   const presentation = raw.presentation === undefined ? undefined : section(presentationDecl.optional(), raw.presentation, ["presentation"], undefined, issues);
+  const workspace = raw.workspace === undefined ? undefined : section(workspaceDecl.optional(), raw.workspace, ["workspace"], undefined, issues);
 
   const lifecycleRaw = raw.lifecycle === undefined ? {} : raw.lifecycle;
   const lifecycle: DocumentShell["lifecycle"] = { aggregates: [], on_close: [] };
@@ -356,6 +358,6 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
     });
   }
 
-  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, lifecycle, lanes: laneShells };
+  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, workspace, lifecycle, lanes: laneShells };
   return { model: { shell, lanes, aggregates, onClose, broken }, issues, complete: issues.length === 0 };
 }

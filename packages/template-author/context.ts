@@ -31,7 +31,9 @@ template: {id: <kebab-case key>, version: <semver>, name: <short name>, summary:
 params:            # the configuration surface, set when a challenge is created
   <snake_name>: {type: <type>, mutable: <bool>, default?: <value>, check?: "<expr on value>", checks?: {<message_as_snake_case>: "<expr on value>"}}
 requires: {core: 1}
-presentation?:     {icon?, long_label?, join_caption?, brief_required?: bool, public?: bool, contribution?: {type: <snake>, title: <text>}}
+presentation?:     {icon?, long_label?, join_caption?, brief_required?: bool, public?: bool, board?: bool, evaluation_handler?: <snake>,
+                    contribution?: {type: <snake>, title: <text>, description?: <expr on challenge>, deliverables?: [<capability>]}}
+workspace?:        {mode: <expr: provided_repo | own_repo>}   # a branch per participant on the challenge repo, or their own GitHub repo (PATCH workspace)
 resources:         # shared work units
   <snake_name>:
     fields: {<field>: {type: <type>, visibility?: [claimant | author | admin | "role(params.x)"], check?, from?, deliverable?, unique?, retention?: {days_after_close: N}}}
@@ -52,13 +54,13 @@ lifecycle?:
   on_close?: [ effects ]
 lanes:             # at least one
   - id: <snake>
-    entry: {trigger: user | admin | cron, access?: {mode: open | role | author_of, role?: params.<role param>, resource?: <type>, runs_per_participation?: N},
+    entry: {trigger: user | admin | cron, access?: {mode: open | role | author_of, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},
             schedule?: "<cron>", over?: {resource: <type>, where?: <expr>, sample?: <expr>}, cursor?: engine}
     nodes: [ <node>, ... ]   # a strict top-down sequence; no cycles
 
 A node is a mapping with exactly ONE family key:
 - collect: {id, fields: {<field>: {type, when?: <expr>, check?: <expr>, where?: <expr>}}}      # a form the actor fills
-- gate:    {id, all: ["<expr>", ...], refuse?: 403 | 409 | 422}                                 # blocking check
+- gate:    {id, all: ["<expr>", ...], refuse?: 400 | 403 | 409 | 422, message?: <text>, reason?: <snake>}   # blocking check
 - gate:    {id, branch: [ {when: "<expr>", nodes: [...]}, ..., {else: {nodes: [...]}} ]}        # routing; branches reconverge below the gate
 - act:     {id, kind?: effector | observer | grant, ...}
     claim: {resource: <type or ref field like pick.case>, where?: <expr>, scope?: {<key>: <expr>}, substitute?: {resource: <type>, rate: <expr>}}
@@ -79,7 +81,9 @@ Expressions are a closed CEL-like subset, always YAML strings when they contain 
   methods: .map(x, e) .filter(x, e) .exists(x, e) .all(x, e) .size() .trim()
   functions: size count exists majority mode mean min max has age int double string now()
   Enum literals are quoted strings: 'judge.outcome == "failed"'. A bare word is a name.
-In scope: params.*, counters.*, challenge.state, participation.user, aggregates.<id>.inputs / .verdict,
+In scope: params.*, counters.*, challenge.state, challenge.title, participation.user, aggregates.<id>.inputs / .verdict,
+  participation.holder, participation.group.{size, multiplier, members}, participation.workspace.{provider, url, ref, status, ready},
+  board.{total, done} (with presentation.board),
   every upstream node by id (collect fields: form.field; claim: draw.<type>, draw.substituted; stored observation: probe.<store>; assess: check.value; ai_grid: grade.score on 0..1),
   in a param check: value; in an aggregate: inputs, verdict.
 

@@ -55,7 +55,7 @@ export function CodeChallengePanel({
   const launchEvaluation = async () => {
     setLaunching(true); setError('');
     try {
-      const res = await fetch(flowActionUrl(challengeId, 'project-evaluation'), { method: 'POST' });
+      const res = await fetch(flowActionUrl(challengeId, 'project_evaluation'), { method: 'POST' });
       if (!res.ok) { const d = await res.json().catch(() => ({})); setError(d.error || 'Cannot start evaluation'); return; }
       await onReload();
     } catch { setError('Network error'); }

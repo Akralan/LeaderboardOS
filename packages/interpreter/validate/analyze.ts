@@ -74,6 +74,18 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
     gaps.push({ feature, path, message, node });
   };
 
+  // ── Workspace ───────────────────────────────────────────────────────────
+  const checkWorkspace = (scope: Scope) => {
+    if (!shell.workspace) return;
+    const { type } = expr(shell.workspace.mode, scope, ["workspace", "mode"]);
+    const modes = type.kind === "enum" && type.values ? type.values : null;
+    if (modes && modes.some((mode) => mode !== "provided_repo" && mode !== "own_repo")) {
+      report("type", ["workspace", "mode"], `a workspace mode is provided_repo or own_repo, got ${showType(type)}`);
+    } else if (!(type.kind === "enum" || type.kind === "string" || type.kind === "dyn")) {
+      report("type", ["workspace", "mode"], `a workspace mode is provided_repo or own_repo, got ${showType(type)}`);
+    }
+  };
+
   // ── Header ──────────────────────────────────────────────────────────────
   if (shell.requires.core > options.coreVersion) {
     report("reference", ["requires", "core"], `requires core ${shell.requires.core}, this engine provides ${options.coreVersion}`);
@@ -249,12 +261,20 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
   const baseBindings: Record<string, Type> = {
     params: T.record(paramTypes),
     counters: T.record(counterTypes),
-    challenge: T.record({ state: T.enum(["draft", "open", "closed"]) }),
-    participation: T.record({ user: T.user }),
+    challenge: T.record({ state: T.enum(["draft", "open", "closed"]), title: T.string }),
+    // Le porteur, le groupe et le workspace de l'appelant (capacités `groups` et `workspaces`) ; en solo, le porteur est l'appelant.
+    participation: T.record({
+      user: T.user,
+      holder: T.user,
+      group: T.record({ size: T.int, multiplier: T.number, members: T.list(T.user) }),
+      workspace: T.record({ provider: T.string, url: T.string, ref: T.string, status: T.string, ready: T.bool }),
+    }),
   };
+  if (shell.presentation?.board) baseBindings.board = T.record({ total: T.int, done: T.int });
   for (const name of resourceNames) baseBindings[name] = T.list(T.resource(name));
   for (const name of brokenResources) baseBindings[name] = T.dyn;
   const base = Scope.root(baseBindings);
+  checkWorkspace(base);
 
   /** Les règles de visibilité : `author`, `admin`, `claimant`, `everyone`, `role(params.x)`. */
   const checkVisibility = (entries: readonly string[] | undefined, path: TemplatePath) => {
@@ -586,9 +606,12 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
         else bindings[access.resource] = T.resource(access.resource);
       }
       if (access.group !== undefined) {
-        expr(access.group, base, [...accessPath, "group"]);
-        bindings.group = T.record({ members: T.list(T.user) });
-        gap("group participation", [...accessPath, "group"], "group multipliers are not compiled in v1");
+        bindings.group = T.record({ members: T.list(T.user), size: T.int, multiplier: T.number });
+        // `group: true` : la politique de groupe de la plateforme (3 membres, bonus 1 / 1.4 / 1.8), compilée.
+        if (access.group !== true) {
+          expr(access.group, base, [...accessPath, "group"]);
+          gap("group participation", [...accessPath, "group"], "a custom group policy is not compiled in v1; group: true uses the platform's");
+        }
       }
       if (access.stake) {
         const { type } = expr(access.stake.amount, base, [...accessPath, "stake", "amount"]);
@@ -1030,7 +1053,8 @@ export function analyzeTemplate(model: TemplateModel, options: AnalyzeOptions) {
       return;
     }
     const { type } = expr(grid, scope, path, node);
-    expectType(type, (t) => t.kind === "grid" || t.kind === "dyn", "a grid reference must be of type grid_ref", path, node);
+    // Un slug écrit en littéral (`'"code"'`) vaut une référence : la grille publiée de ce slug.
+    expectType(type, (t) => t.kind === "grid" || t.kind === "string" || t.kind === "dyn", "a grid reference must be of type grid_ref", path, node);
   }
 
   function checkTransition(body: TransitionBody, scope: Scope, path: TemplatePath, closer: "aggregate" | "transition" | "admin_act", node?: string) {

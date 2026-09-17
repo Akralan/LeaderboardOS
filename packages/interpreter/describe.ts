@@ -102,6 +102,10 @@ export interface TemplateSurface {
   lanes: SurfaceLane[];
   resources: SurfaceResource[];
   params: SurfaceParam[];
+  /** Un board personnel par participant : l'UI générée affiche le kanban du porteur. */
+  board?: boolean;
+  /** Où le participant livre : le paramètre qui porte le mode (`provided_repo` | `own_repo`), ou le mode écrit. */
+  workspace?: { param: string | null; mode: string | null };
 }
 
 export function descriptorOf(shell: DocumentShell): FlowDescriptor {
@@ -217,5 +221,13 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
       checks: Object.keys(decl.checks ?? {}),
     };
   });
-  return { lanes, resources, params };
+  const modeSource = model.shell.workspace?.mode;
+  const modeParam = typeof modeSource === "string" ? /^\s*params\.([a-z][a-z0-9_]*)\s*$/.exec(modeSource)?.[1] ?? null : null;
+  return {
+    lanes,
+    resources,
+    params,
+    ...(model.shell.presentation?.board ? { board: true } : {}),
+    ...(model.shell.workspace ? { workspace: { param: modeParam, mode: modeParam ? null : typeof modeSource === "string" ? modeSource.replace(/^"|"$/g, "") : null } } : {}),
+  };
 }

@@ -360,8 +360,11 @@ function TemplatePanel() {
       <FieldShell label="Version" hint="chosen when you publish" issues={issuesAt(['template', 'version'])}>
         <TextInput value={model.header.version} disabled onCommit={() => {}} />
       </FieldShell>
-      <FieldShell label="Presentation" hint="icon · long_label · join_caption · public · contribution" issues={issuesAt(['presentation'])}>
+      <FieldShell label="Presentation" hint="icon · long_label · join_caption · public · board · contribution" issues={issuesAt(['presentation'])}>
         <YamlSnippet value={presentation} rows={7} disabled={readOnly} onCommit={(value) => apply(setAt(source, ['presentation'], value))} />
+      </FieldShell>
+      <FieldShell label="Workspace" hint="mode: provided_repo | own_repo" issues={issuesAt(['workspace'])}>
+        <YamlSnippet value={isRec(model.doc.workspace) ? model.doc.workspace : undefined} rows={2} disabled={readOnly} onCommit={(value) => apply(setAt(source, ['workspace'], value))} />
       </FieldShell>
     </div>
   );

@@ -172,7 +172,10 @@ export const gateBody = z.strictObject({
   id: identifier,
   all: z.array(exprSource).min(1).optional(),
   /** Le statut d'un refus de `all` : 422 par défaut, 403 quand la règle dit « pas toi ». */
-  refuse: z.union([z.literal(403), z.literal(409), z.literal(422)]).optional(),
+  refuse: z.union([z.literal(400), z.literal(403), z.literal(409), z.literal(422)]).optional(),
+  /** Le message du refus (`Refused by <id>` sinon) et la raison lisible par une interface. */
+  message: z.string().min(1).optional(),
+  reason: identifier.optional(),
   branch: z.array(z.record(z.string(), z.unknown())).min(1).optional(),
 });
 export type GateBody = z.infer<typeof gateBody>;
@@ -276,13 +279,33 @@ export const presentationDecl = z.strictObject({
   /** Un visiteur anonyme peut ouvrir un challenge public de ce flow ; faux par défaut. */
   public: z.boolean().optional(),
   /** La contribution qui porte les lignes du ledger d'un participant. */
-  contribution: z.strictObject({ type: identifier, title: z.string().min(1) }).optional(),
+  contribution: z
+    .strictObject({
+      type: identifier,
+      title: z.string().min(1),
+      /** Une expression sur `challenge` : la description écrite à la création de la contribution. */
+      description: exprSource.optional(),
+      /** Ce que cette contribution livre, qu'un challenge de validation peut éprouver (`deployed_app`). */
+      deliverables: z.array(identifier).optional(),
+    })
+    .optional(),
+  /** Un board personnel par participant (le porteur, en groupe), copié du template au join ; `board.total`, `board.done`. */
+  board: z.boolean().optional(),
+  /** La clé du handler qui rejoue une évaluation en arrière-plan échouée (`continue` sinon) : celle d'un flow repris. */
+  evaluation_handler: identifier.optional(),
 });
+
+/**
+ * Où un participant livre son code (capacité `workspaces`) : `provided_repo`,
+ * une branche perso sur le dépôt du challenge, ou `own_repo`, son propre dépôt
+ * déclaré par `PATCH workspace`. `participation.workspace` le lit.
+ */
+export const workspaceDecl = z.strictObject({ mode: exprSource });
 
 export const statesDecl = z.union([z.literal("standard"), z.strictObject({ close_at: exprSource.optional() })]);
 
 /** Les clés d'un document : ce que le parse de sauvetage lit section par section (validate/format.ts). */
-export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "lifecycle", "lanes"] as const;
+export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "workspace", "lifecycle", "lanes"] as const;
 export const LIFECYCLE_KEYS = ["states", "aggregates", "on_close"] as const;
 
 export const documentShell = z.strictObject({
@@ -293,6 +316,7 @@ export const documentShell = z.strictObject({
   resources: z.record(identifier, resourceDecl).default({}),
   counters: z.record(identifier, counterDecl).default({}),
   presentation: presentationDecl.optional(),
+  workspace: workspaceDecl.optional(),
   lifecycle: z
     .strictObject({
       states: statesDecl.optional(),

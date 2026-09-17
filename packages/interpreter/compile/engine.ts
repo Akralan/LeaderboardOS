@@ -5,7 +5,8 @@ import { evaluate, type Value } from "../expr/evaluator.js";
 import { parseExpr } from "../expr/parser.js";
 import type { AggregateDecl, ClaimUse, ExprSource, RewardBody, TransitionBody } from "../format/schema.js";
 import type { EffectModel, NodeModel, TemplateModel } from "../validate/format.js";
-import { ObserverRefusal, type TemplateRuntime } from "./runtime.js";
+import { ObserverRefusal, type ParticipationContext, type TemplateRuntime } from "./runtime.js";
+import { splitShares } from "../../database-service/domain/share.js";
 import { parseCsv } from "./csv.js";
 import { zodOf } from "./params.js";
 import { deserializeValue, resourceValue, serializeValue, type ResourceTypes } from "./values.js";
@@ -27,7 +28,12 @@ import { deserializeValue, resourceValue, serializeValue, type ResourceTypes } f
  */
 
 export class Refusal extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    /** La raison lisible par une interface (`tasks_not_done`…). */
+    readonly reason?: string
+  ) {
     super(message);
   }
 }
@@ -70,6 +76,12 @@ export interface CompiledTemplate {
   contribution: { type: string; title: string };
   /** Les aggregates qui reçoivent des entrées d'un claim posé sur une autre ressource (un case, émis vers un target). */
   crossEmits: ReadonlySet<string>;
+  /** Le template lit la participation (groupe, workspace, board) : elle se charge avant chaque exécution. */
+  participationContext: boolean;
+  /** Les lanes jouées en groupe (`access.group: true`) : le porteur agit pour tous. */
+  groupLanes: ReadonlySet<string>;
+  /** La description de la contribution, une expression sur `challenge`. */
+  contributionDescription: ExprSource | null;
 }
 
 /** Le segment qui livre le travail d'un claim : l'Act qui l'a tiré, les gestes qui l'ont rempli, les nœuds à rejouer. */
@@ -106,6 +118,10 @@ export interface RunState {
   awarded: number;
   /** Ce que la réponse peut dire du claim tiré. */
   drawn: { claimId: string; resourceId: string; expiresAt: Date | null } | null;
+  /** Qui a fait le geste ; `userId` est le porteur quand la lane se joue en groupe. */
+  caller: string | null;
+  /** Le groupe du porteur, dans une lane jouée en groupe. */
+  group: ParticipationContext | null;
 }
 
 export function newState(challenge: Challenge, userId: string | null, params: Record<string, Value>): RunState {
@@ -113,11 +129,13 @@ export function newState(challenge: Challenge, userId: string | null, params: Re
   return {
     challenge,
     userId,
-    bindings: { params, challenge: { state }, participation: { user: userId } },
+    bindings: { params, challenge: { state, title: challenge.title }, participation: { user: userId } },
     claim: null,
     result: {},
     awarded: 0,
     drawn: null,
+    caller: userId,
+    group: null,
   };
 }
 
@@ -237,6 +255,52 @@ export class Engine {
     return replayed;
   }
 
+  // ── Participation ───────────────────────────────────────────────────────
+
+  /**
+   * La participation de l'appelant (capacités `groups`, `workspaces`, `board`) :
+   * son porteur, son groupe, le workspace et le board du porteur. Dans une lane
+   * jouée en groupe, le porteur agit pour tous — contribution, ledger et
+   * évaluation sont les siens, comme au challenge code.
+   */
+  async bindParticipation(state: RunState, laneId: string): Promise<void> {
+    if (!this.t.participationContext || !state.caller) return;
+    const { runtime } = this.t;
+    const context = await runtime.participations.context(state.challenge.uuid, state.caller);
+    const group = { size: context.members.length, multiplier: context.multiplier, members: context.members };
+    state.bindings.participation = {
+      user: state.caller,
+      holder: context.holder,
+      group,
+      workspace: { ...(context.workspace ?? { provider: "", url: "", ref: "", status: "", ready: false }) } as Record<string, Value>,
+    };
+    if (this.t.groupLanes.has(laneId)) {
+      state.userId = context.holder;
+      state.group = context;
+      state.bindings.group = group;
+    }
+    if (this.shell.presentation?.board) state.bindings.board = await runtime.participations.board(state.challenge.uuid, context.holder);
+  }
+
+  /** La contribution qui porte le travail et le ledger d'un participant ; créée au premier besoin. */
+  async contributionFor(state: RunState, userId: string): Promise<string> {
+    const description = this.t.contributionDescription === null ? null : String(await this.eval(this.t.contributionDescription, state));
+    return this.t.runtime.ledger.contribution(state.challenge, userId, { ...this.t.contribution, description });
+  }
+
+  /**
+   * Les parts d'un groupe : ce que l'exécution a versé au porteur, réparti entre
+   * les membres présents (`splitShares`, le reste au porteur), cumulé sur la
+   * contribution. Rien pour un solo.
+   */
+  async settleShares(state: RunState): Promise<void> {
+    const group = state.group;
+    if (!group || group.members.length <= 1 || state.awarded <= 0 || !state.userId) return;
+    const contributionId = await this.contributionFor(state, state.userId);
+    const shares = splitShares(state.awarded, group.members, group.holder);
+    await this.t.runtime.participations.addShares(contributionId, [...shares].map(([userId, points]) => ({ userId, points })));
+  }
+
   // ── Nœuds ───────────────────────────────────────────────────────────────
 
   async run(nodes: readonly NodeModel[], state: RunState): Promise<void> {
@@ -258,7 +322,9 @@ export class Engine {
       case "gate":
         if (node.body.all) {
           for (const condition of node.body.all) {
-            if ((await this.eval(condition, state)) !== true) throw new Refusal(node.body.refuse ?? 422, `Refused by ${node.id}`);
+            if ((await this.eval(condition, state)) !== true) {
+              throw new Refusal(node.body.refuse ?? 422, node.body.message ?? `Refused by ${node.id}`, node.body.reason);
+            }
           }
           return;
         }
@@ -826,7 +892,7 @@ export class Engine {
       if (body.basis === "delta" && points < due) entryMeta.clampedTo = points;
       if (points === 0) continue;
 
-      const contributionId = await runtime.ledger.contribution(state.challenge, userId, this.t.contribution);
+      const contributionId = await this.contributionFor(state, userId);
       drafts.push({ challenge_id: challengeId, user_id: userId, contribution_id: contributionId, rule_key: ruleKey, points, meta: entryMeta });
       if (body.pool !== undefined) distributed += points;
       if (userId === state.userId) state.awarded += points;
@@ -856,7 +922,7 @@ export class Engine {
       const net = own.reduce((sum, entry) => sum + entry.points, 0);
       if (net <= 0) continue;
       const contributionId = own.find((entry) => entry.contribution_id)?.contribution_id
-        ?? (await runtime.ledger.contribution(state.challenge, user, this.t.contribution));
+        ?? (await this.contributionFor(state, user));
       drafts.push({
         challenge_id: state.challenge.uuid,
         user_id: user,

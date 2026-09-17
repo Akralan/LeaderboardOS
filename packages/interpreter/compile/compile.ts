@@ -19,6 +19,8 @@ import { descriptorOf } from "../describe.js";
 import type { LaneModel, NodeModel, TemplateModel } from "../validate/format.js";
 import { Deferred, Engine, Refusal, newState, scoreOf, type CompiledTemplate, type ReplaySpec, type RunState } from "./engine.js";
 import { artifactOf } from "./bindings.js";
+import { evaluate as evaluateExpr } from "../expr/evaluator.js";
+import { provisionWorkspace, reprotectGroupBranch, setOwnRepo, workspaceCreationRepos, workspaceModeOf, type WorkspaceMode } from "../../capabilities/workspaces.js";
 import type { EvaluationDetail } from "./runtime.js";
 import { compileParams, poolParamOf, zodOf, type CompiledParams } from "./params.js";
 import { defaultRuntime, type TemplateRuntime } from "./runtime.js";
@@ -149,6 +151,22 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       ? { ...shell.presentation.contribution, type: declared(shell.presentation.contribution.type) }
       : { type: flowKey, title: shell.template.name },
     version: options.published?.version ?? null,
+    participationContext: Boolean(shell.workspace || shell.presentation?.board || model.lanes.some((lane) => lane.entry.access?.group === true)),
+    groupLanes: new Set(model.lanes.filter((lane) => lane.entry.access?.group === true).map((lane) => lane.id)),
+    contributionDescription: shell.presentation?.contribution?.description ?? null,
+  };
+  const evaluationHandler = shell.presentation?.evaluation_handler ?? CONTINUE_HANDLER;
+  /** Le mode de workspace d'un challenge : l'expression du bloc sur ses paramètres, le mode historique sinon. */
+  const workspaceModeFor = (challenge: Challenge): WorkspaceMode => {
+    if (!shell.workspace) return "provided_repo";
+    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+    if (!values) return workspaceModeOf(flowConfigOf(challenge)?.workspace_mode);
+    try {
+      const mode = shell.workspace.mode;
+      return workspaceModeOf(typeof mode === "string" ? evaluateExpr(parseExpr(mode), { params: values }, { now: new Date() }) : mode);
+    } catch {
+      return "provided_repo";
+    }
   };
   const engine = new Engine(compiled);
 
@@ -190,6 +208,19 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     });
   }
 
+  // ── Workspace : déclarer son propre dépôt ───────────────────────────────
+  if (shell.workspace) {
+    actions.push({
+      path: "workspace",
+      method: "PATCH",
+      access: { member: true },
+      async handle({ request, challenge, user }) {
+        const body = await request.json().catch(() => null);
+        return setOwnRepo(challenge.uuid, user.id, body, workspaceModeFor(challenge));
+      },
+    });
+  }
+
   // ── Surfaces générées : release, progress, overview, export ─────────────
   const conflicts = generatedPathConflicts(model.lanes, actions.map((action) => action.path));
   if (conflicts.length > 0) {
@@ -212,7 +243,10 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
     rules: { parse: (raw) => (params.rulesSchema.safeParse(raw ?? {}).success ? params.rulesSchema.parse(raw ?? {}) : null) },
     ruleKeys,
     contributionTypes: [{ key: compiled.contribution.type, countsAsContribution: true }],
-    uses: { board: false, groups: false },
+    uses: { board: Boolean(shell.presentation?.board), groups: compiled.groupLanes.size > 0 },
+    ...(shell.presentation?.contribution?.deliverables?.length
+      ? { deliverables: [{ contributionType: compiled.contribution.type, capabilities: shell.presentation.contribution.deliverables }] }
+      : {}),
     ...(deliverableOf(shell) ? { requires: { deliverableCapability: deliverableOf(shell)! } } : {}),
     rewards: {
       // L'avancement du challenge, comme `overview.resources` : le hero le lit.
@@ -226,9 +260,13 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
       ? {
           evaluationHandlers: [
             {
-              key: CONTINUE_HANDLER,
+              key: evaluationHandler,
               // La relance d'un run échoué : reprendre l'évaluation (toujours une à la fois) et rejouer la suite.
               async retry(payload: Record<string, unknown>) {
+                if (typeof payload.challengeId === "string" && typeof payload.userId === "string" && typeof payload.lane !== "string") {
+                  // Un run du flow écrit à la main que ce template remplace : `{challengeId, userId}`, re-planifié.
+                  return replayLegacyRun(payload.challengeId, payload.userId, compiled, engine, params);
+                }
                 const continuation = payload as Continuation;
                 if (typeof continuation.contributionId !== "string" || typeof continuation.challengeId !== "string") {
                   return { ok: false as const, reason: "invalid_payload" };
@@ -245,16 +283,28 @@ export function compileTemplate(report: TemplateReport, options: CompileOptions 
         }
       : {}),
     hooks:
-      lifecycleAggregates.length > 0
+      lifecycleAggregates.length > 0 || shell.workspace
         ? {
-            async onClose(challenge) {
-              const values = params.valuesOf(challenge, flowConfigOf(challenge));
-              if (!values) return;
-              for (const aggregate of lifecycleAggregates) {
-                const open = await runtime.resources.list({ challengeId: challenge.uuid, type: aggregate.decl.over, state: "open" });
-                for (const instance of open) await engine.resolve(aggregate.decl.id, instance.uuid, challenge, values, true);
-              }
-            },
+            ...(lifecycleAggregates.length > 0
+              ? {
+                  async onClose(challenge: Challenge) {
+                    const values = params.valuesOf(challenge, flowConfigOf(challenge));
+                    if (!values) return;
+                    for (const aggregate of lifecycleAggregates) {
+                      const open = await runtime.resources.list({ challengeId: challenge.uuid, type: aggregate.decl.over, state: "open" });
+                      for (const instance of open) await engine.resolve(aggregate.decl.id, instance.uuid, challenge, values, true);
+                    }
+                  },
+                }
+              : {}),
+            ...(shell.workspace
+              ? {
+                  // La capacité `workspaces` : le dépôt du challenge à sa création, la branche perso au join, sa reprotection en groupe.
+                  onCreate: ({ challenge, input }) => ({ repos: workspaceCreationRepos(challenge, input, workspaceModeFor(challenge)) }),
+                  onJoin: (ctx) => provisionWorkspace(ctx, workspaceModeFor(ctx.challenge)),
+                  onGroupJoin: (ctx) => reprotectGroupBranch(ctx),
+                }
+              : {}),
           }
         : undefined,
   };
@@ -360,6 +410,7 @@ async function runSegment(
   let kept: Record<string, Value> = {};
 
   try {
+    await engine.bindParticipation(state, call.lane.id);
     if (claimAct) {
       const claimId = typeof body.claim_id === "string" ? body.claim_id : null;
       const claim = claimId ? await t.runtime.resources.claim(claimId) : null;
@@ -386,9 +437,10 @@ async function runSegment(
     await engine.run(segment.nodes, state);
     if (segment.final) await engine.deliver(state);
     else kept = await engine.persist(call.persist, state);
+    await engine.settleShares(state);
   } catch (error) {
     if (error instanceof Deferred) return deferEvaluation(error, call.lane, state, t, engine, params);
-    if (error instanceof Refusal) return jsonError(error.status, error.message);
+    if (error instanceof Refusal) return refusalResponse(error);
     if (error instanceof GestureError) return jsonError(400, error.message);
     if (error instanceof EvalError) throw new Error(`[interpreter] ${t.flowKey}: ${error.message}`);
     throw error;
@@ -421,7 +473,10 @@ export interface Continuation {
   [key: string]: unknown;
   version: string | null;
   challengeId: string;
+  /** Le porteur : sa contribution, son ledger. */
   userId: string;
+  /** Qui a lancé l'évaluation. */
+  caller: string;
   lane: string;
   node: string;
   grid: string;
@@ -434,22 +489,42 @@ export const CONTINUE_HANDLER = "continue";
 
 /** Ce qui ne se recalcule pas à la reprise : les liaisons des nœuds passés, sans les paramètres ni l'état du challenge. */
 function carried(bindings: Record<string, Value>): Record<string, Value> {
-  const { params: _params, challenge: _challenge, participation: _participation, counters: _counters, ...rest } = bindings;
+  const { params: _params, challenge: _challenge, participation: _participation, counters: _counters, group: _group, board: _board, ...rest } = bindings;
   return JSON.parse(JSON.stringify(rest)) as Record<string, Value>;
 }
 
 /** Le geste a passé tous ses contrôles : l'évaluation se prend (une à la fois), se planifie, et le geste répond 202. */
 async function deferEvaluation(deferred: Deferred, lane: LaneModel, state: RunState, t: CompiledTemplate, engine: Engine, params: CompiledParams): Promise<Response> {
-  const userId = state.userId!;
-  const contributionId = await t.runtime.ledger.contribution(state.challenge, userId, t.contribution);
-  const artifact = deferred.inputs.map((input) => artifactOf(input)).find(Boolean) ?? null;
-  if (!(await t.runtime.evaluations.claim(contributionId, artifact?.url ?? null))) {
-    return jsonError(409, "An evaluation is already running");
+  const outcome = await scheduleContinuation(deferred, lane, state, t, engine, params);
+  if (!outcome.ok) return Response.json({ error: "Cannot start evaluation", reason: outcome.reason }, { status: 409 });
+  // Un lancement accepté, jamais un refus ; hors transaction : un événement perdu coûte une quête, pas le lancement.
+  try {
+    const { events } = await import("../../capabilities/events.js");
+    await events.emit("evaluation.requested", { challengeId: state.challenge.uuid, userId: state.caller });
+  } catch (error) {
+    console.warn(`[interpreter] ${t.flowKey}: evaluation.requested not recorded:`, error);
   }
+  return Response.json({ scheduled: true }, { status: 202 });
+}
+
+/** Prendre l'évaluation sur la contribution du porteur (une à la fois), puis planifier la suite. */
+async function scheduleContinuation(
+  deferred: Deferred,
+  lane: LaneModel,
+  state: RunState,
+  t: CompiledTemplate,
+  engine: Engine,
+  params: CompiledParams
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const userId = state.userId!;
+  const contributionId = await engine.contributionFor(state, userId);
+  const artifact = deferred.inputs.map((input) => artifactOf(input)).find(Boolean) ?? null;
+  if (!(await t.runtime.evaluations.claim(contributionId, artifact?.url ?? null))) return { ok: false, reason: "already_running" };
   const continuation: Continuation = {
     version: t.version,
     challengeId: state.challenge.uuid,
     userId,
+    caller: state.caller ?? userId,
     lane: lane.id,
     node: deferred.node.id,
     grid: deferred.grid,
@@ -458,7 +533,39 @@ async function deferEvaluation(deferred: Deferred, lane: LaneModel, state: RunSt
     contributionId,
   };
   t.runtime.evaluations.schedule(() => continueEvaluation(continuation, t, engine, params));
-  return Response.json({ scheduled: true }, { status: 202 });
+  return { ok: true };
+}
+
+/**
+ * Un run échoué du flow écrit à la main que ce template remplace, rejoué comme
+ * lui : sans les préconditions du geste (board, statut), l'évaluation reprise
+ * pour le porteur puis la lane rejouée. Seule une lane sans geste avant son
+ * évaluation se re-planifie ainsi.
+ */
+async function replayLegacyRun(challengeId: string, userId: string, t: CompiledTemplate, engine: Engine, params: CompiledParams) {
+  const challenge = (await t.runtime.challengesOf(t.flowKey)).find((candidate) => candidate.uuid === challengeId);
+  if (!challenge) return { ok: false as const, reason: "not_found" };
+  const values = params.valuesOf(challenge, flowConfigOf(challenge));
+  if (!values) return { ok: false as const, reason: "no_rules" };
+  for (const lane of t.model.lanes) {
+    const index = lane.nodes.findIndex((node) => node.family === "assess" && Boolean(node.body.background));
+    if (index < 0) continue;
+    const before = lane.nodes.slice(0, index);
+    if (before.some((node) => node.family !== "gate")) return { ok: false as const, reason: "not_replayable" };
+    const node = lane.nodes[index] as Extract<NodeModel, { family: "assess" }>;
+    const state = newState(challenge, userId, values);
+    await engine.bindParticipation(state, lane.id);
+    const grid = String(await engine.eval(node.body.grid!, state));
+    const inputs = await Promise.all((node.body.input ?? []).map((input) => engine.eval(input, state)));
+    if (!inputs.some((input) => artifactOf(input))) return { ok: false as const, reason: "workspace_not_ready" };
+    return scheduleContinuation(new Deferred(node, grid, inputs), lane, state, t, engine, params);
+  }
+  return { ok: false as const, reason: "no_handler" };
+}
+
+/** Un refus du moteur : son statut, son message, et sa raison quand la lane en donne une. */
+function refusalResponse(error: Refusal): Response {
+  return Response.json({ error: error.message, ...(error.reason ? { reason: error.reason } : {}) }, { status: error.status });
 }
 
 /**
@@ -490,19 +597,24 @@ export async function continueEvaluation(continuation: Continuation, t: Compiled
         inputs: continuation.inputs,
         ...(node.body.snapshot ? { snapshot: node.body.snapshot } : {}),
         contributionId: continuation.contributionId,
-        origin: { handler: CONTINUE_HANDLER, payload: continuation },
+        origin: { handler: t.model.shell.presentation?.evaluation_handler ?? CONTINUE_HANDLER, payload: continuation },
       })
     );
     evaluation = (result.evaluation as EvaluationDetail | null) ?? undefined;
 
-    const state = newState(challenge, continuation.userId, values);
+    // Le groupe se relit au moment du run : les membres présents partagent ce qu'il verse.
+    const state = newState(challenge, continuation.caller ?? continuation.userId, values);
+    await engine.bindParticipation(state, lane.id);
+    state.userId = continuation.userId;
     Object.assign(state.bindings, continuation.bindings, { [node.id]: { score: result.score } });
     try {
       await engine.run(lane.nodes.slice(index + 1), state);
+      await engine.settleShares(state);
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
     }
     await runtime.evaluations.finish(continuation.contributionId, { status: "done", ...(evaluation ? { evaluation } : {}) });
+    await runtime.ledger.syncCompletion(challenge);
   } catch (error) {
     await runtime.evaluations.finish(continuation.contributionId, { status: "failed", ...(evaluation ? { evaluation } : {}) });
     throw error;

@@ -2,7 +2,8 @@ import type { Challenge, RewardEntry, RewardEntryDraft } from "../../database-se
 import { ClaimNotConsumableError, claimState, type ResourceClaim, type ResourceInstance } from "../../capabilities/resources.js";
 import { outOfPoolRuleKeys } from "../../capabilities/pool.js";
 import type { Value } from "../expr/evaluator.js";
-import type { EvaluateBinding, EvaluateResult, EvaluationDetail, RuntimeEvaluations, TemplateRuntime } from "../compile/runtime.js";
+import { workspaceView, type EvaluateBinding, type EvaluateResult, type EvaluationDetail, type RuntimeEvaluations, type TemplateRuntime } from "../compile/runtime.js";
+import { groupContextFrom } from "../../database-service/domain/groupPolicy.js";
 import { scopeKeyOf } from "../../capabilities/resources.js";
 import type { StoredBlob } from "../../capabilities/blobs.js";
 
@@ -31,6 +32,13 @@ export interface MemoryRuntime extends TemplateRuntime {
   /** Les tirages successifs de `random()`, puis 0.99. */
   dice: number[];
   evaluations: RuntimeEvaluationsLog;
+  /** Les participations, comme `challenge_teams` : groupe et workspace. */
+  teams: { challenge_id: string; user_id: string; group_id?: string | null; workspace_provider?: string | null; workspace_url?: string | null; workspace_ref?: string | null; workspace_status?: string | null }[];
+  /** Les tâches personnelles : `user_id` est le porteur du board. */
+  tasks: { challenge_id: string; user_id: string; status: string }[];
+  /** Les parts cumulées par (contribution, membre). */
+  shares: Map<string, number>;
+  completions: Map<string, number>;
 }
 
 /**
@@ -62,6 +70,10 @@ export function memoryRuntime(options: {
     challenges: [],
     clock: new Date("2026-09-16T12:00:00Z"),
     dice: [],
+    teams: [],
+    tasks: [],
+    shares: new Map(),
+    completions: new Map(),
     // Le journal des demandes porte aussi le port `evaluations` : l'état des contributions, les tâches planifiées.
     evaluations: Object.assign([] as EvaluateBinding[], {
       status: new Map(),
@@ -340,6 +352,36 @@ export function memoryRuntime(options: {
       },
       async write(drafts: RewardEntryDraft[]) {
         for (const draft of drafts) runtime.ledgerRows.push({ ...draft, uuid: id("entry"), created_at: runtime.clock });
+      },
+      async syncCompletion(challenge) {
+        const distributed = await runtime.ledger.distributed(challenge.uuid);
+        runtime.completions.set(challenge.uuid, challenge.contribution_points_reward > 0 ? Math.min(1, distributed / challenge.contribution_points_reward) : 0);
+      },
+    },
+
+    participations: {
+      async context(challengeId, userId) {
+        const teams = runtime.teams.filter((team) => team.challenge_id === challengeId);
+        const group = groupContextFrom(teams as never, userId);
+        const row = teams.find((team) => team.user_id === group.ownerId);
+        return {
+          participant: teams.some((team) => team.user_id === userId),
+          holder: group.ownerId,
+          groupId: group.groupId,
+          members: group.memberIds,
+          multiplier: group.multiplier,
+          workspace: row ? workspaceView(row) : null,
+        };
+      },
+      async board(challengeId, holderId) {
+        const tasks = runtime.tasks.filter((task) => task.challenge_id === challengeId && task.user_id === holderId);
+        return { total: tasks.length, done: tasks.filter((task) => task.status === "done").length };
+      },
+      async addShares(contributionId, shares) {
+        for (const share of shares) {
+          const key = `${contributionId}:${share.userId}`;
+          runtime.shares.set(key, (runtime.shares.get(key) ?? 0) + share.points);
+        }
       },
     },
 

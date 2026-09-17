@@ -73,12 +73,19 @@ export async function evaluateGrid(request: EvaluateBinding): Promise<EvaluateRe
   const description = [request.challenge.title, ...context.map((value) => (typeof value === "string" ? value : JSON.stringify(value)))].join("\n");
 
   const { evaluate } = await import("../../capabilities/evaluation.js");
+  // Évaluée sur une contribution : le sujet est le sien, comme le challenge code le présente à l'agent.
+  const contribution = request.contributionId
+    ? await new (await import("../../database-service/repositories/index.js")).ContributionRepository().findById(request.contributionId)
+    : null;
+  const subject = contribution
+    ? { title: contribution.title, type: request.grid, description: contribution.description, ref: request.challenge.uuid, userId: contribution.user_id }
+    : { title: request.challenge.title, type: request.grid, description, ref: request.challenge.uuid, userId: request.userId };
   try {
     const { evaluation } = await evaluate({
       bundle: bundleOf(artifact, request.snapshot ?? (artifact.host === "github" ? "history" : "latest")),
       gridSlug: request.grid,
-      subject: { title: request.challenge.title, type: request.grid, description, ref: request.challenge.uuid, userId: request.userId },
-      hasPriorEvaluation: false,
+      subject,
+      hasPriorEvaluation: Boolean(contribution?.evaluation),
       origin: {
         owner: request.challenge.type,
         handler: request.origin?.handler ?? "template.assess",

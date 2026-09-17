@@ -1,5 +1,6 @@
 import type { PlatformDefinitions } from '../../../../packages/registry/platform';
 import { codeFlow } from '../../../../content/flows/code';
+import { codeTemplateFlow } from '../../../../content/templates/code';
 import { mlFlow } from '../../../../content/flows/ml';
 import { endpointValidationFlow } from '../../../../content/flows/endpoint-validation';
 import { journeyValidationFlow } from '../../../../content/flows/journey-validation';
@@ -25,7 +26,10 @@ export const MEDICAL_PRO = 'medical_pro';
  */
 export const platform: PlatformDefinitions = {
   flows: [
-    codeFlow,
+    // Compilé depuis content/templates/code/template.yaml (parité P3), avec continuité : les challenges code en cours
+    // passent au template. Le flow écrit à la main reste la référence d'équivalence ; la distribution garde ses quêtes
+    // et sa proposition de sandbox.
+    { ...codeTemplateFlow, events: codeFlow.events, quests: codeFlow.quests, proposable: codeFlow.proposable },
     mlFlow,
     // Les validations MyTwin sont jugées par des professionnels de santé.
     // Retiré par attrition : il sert ses challenges existants, les nouveaux prennent endpoint-check.

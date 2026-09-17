@@ -78,3 +78,17 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | generated read `GET <lane>/evaluation` | `{status, running, started_at, score, evaluation, artifact_url, cp}` — what the generated UI polls; the surface marks the segment `evaluates` |
 | `reward: {basis: delta}` | `computeCodeAward`: pays `max(0, round(amount) − already paid on this rule key to the recipient)`, then clamps to the pool; a clamped remainder is paid by a later run, a lower amount pays nothing, nothing is taken back. Its ledger meta carries `rawPoints` and, when clamped, `clampedTo` |
 | `reward: {meta: {<key>: <expr>}}` | the ledger meta the hand-written flows write (`agentScore`); keys may be camelCase |
+
+## Participations, workspaces and boards (template parity, milestone 3)
+
+| Addition | Why |
+|---|---|
+| `entry.access.group: true` | the platform's group policy (3 members, bonus 1 / 1.4 / 1.8), compiled: the holder acts for the group — contribution, evaluation and ledger are the holder's — and the delta a gesture or a background run pays the holder is split between the members present (`splitShares`) on `contribution_members`. A custom policy expression stays a support gap |
+| `participation.holder`, `participation.group.{size, multiplier, members}`, `participation.workspace.{provider, url, ref, status, ready}` | read from `challenge_teams` through the `groups` and `workspaces` capabilities; `ready` is the code flow's evaluable workspace |
+| top-level `workspace: {mode: <expr>}` | the `workspaces` capability: the challenge repo at creation (`provided_repo`), the personal branch provisioned and protected at join, re-protected when a group grows, `PATCH workspace` in `own_repo` |
+| `presentation.board: true`, `board.{total, done}` | the `board` capability: the template tasks copied onto each participant's (holder's) board at join, read as the holder's progress |
+| `presentation.contribution.{description, deliverables}` | the contribution the code flow writes (`Global delivery for "<title>"`) and what a validation challenge can test (`deployed_app`) |
+| `presentation.evaluation_handler` | the handler key a replacing template keeps (`project`); it also replays the hand-written flow's `{challengeId, userId}` runs |
+| `gate: {refuse: 400, message, reason}` | the code flow's refusals: `{error: "Cannot start evaluation", reason: "tasks_not_done"}` |
+| `grid: '"code"'` | a grid named by its slug literal |
+| `challenge.title` | a contribution description reads it |
