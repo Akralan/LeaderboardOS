@@ -27,6 +27,15 @@ The inspector is generated per family (`Inspector.tsx`): typed controls, resourc
 
 With nothing selected, the right panel shows the declarations: **Params** (type, default, editable after creation, checks), **Resources** (fields with visibility, claim policy, closure), **Counters**, **Lifecycle** (aggregates and their emit links) and **Template** (name, summary, presentation).
 
+## Layout: composing a screen
+
+**Layout** (top bar) swaps the canvas for the grid of one screen — **Contributor** (what a participant sees) or **Manage** (the manager's tab). A screen is *generated* by default: the client stacks the template's lanes and panels. Composing it writes a `ui.<screen>` block in the YAML — a list of blocks, each a component of the catalogue, its place and size on a 12-column grid (`at: {x, y, w, h}`) and its arguments — and the client then renders that grid instead of the stack (`GeneratedScreen`), stacking the blocks in reading order on a phone.
+
+- **Catalogue** (`packages/interpreter/ui/catalog.ts`, the palette in layout view): `lane` (one lane, played step by step), `text` (a title and a paragraph), `mine`, `board`, `workspace` on the contributor screen; `lane`, `overview`, `resources` on the manage screen. The catalogue is closed — a template composes, it embeds no code. A component that is unique per screen, or that needs a declaration the template lacks (`board`, `workspace`), shows locked in the palette.
+- **Gestures**: **Start from the generated screen** writes the stack as blocks; drop a component from the palette where it should go (or click it: first free spot); drag a block to move it, its corner to resize it — snapped to the grid, written at release, refused with its reason if it would overlap another block; `Delete` removes the selected block; **Back to the generated screen** deletes the `ui.<screen>` block.
+- **Inspector**: a block's arguments are generated from the catalogue (a lane picker restricted to the screen's lanes, texts), its place and size are also editable as numbers.
+- **Validation** (`validate/ui.ts`): an unknown component, a component on the wrong screen, a duplicate of a unique one, a missing or unknown argument, a lane that does not exist or belongs to the other actor, a block that overflows the grid — errors, mapped to the block on the grid and in the **Problems** drawer. Overlapping or cramped blocks are advisories.
+
 ## Preview, publish, versions
 
 - **Preview** renders "what players will see" from `describeTemplate` on the current text — the same surface the generated UI plays — lane by lane, as soon as the draft validates.

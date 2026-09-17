@@ -58,6 +58,9 @@ lifecycle?:
       resolve: {when: "<expr on inputs>", verdict?: "<expr>", then?: [ {transition: {...}} | {reward: {...}} ]}
       state_visibility?: {count?: everyone | admin | author, split?: everyone | admin | author}
   on_close?: [ effects ]
+ui?:               # composed screens on a 12-column grid; a screen left out stays generated (stacked). Components: lane {lane}, text {title?, body?}, mine, board, workspace (contributor); lane, overview, resources (manage)
+  contributor?: {blocks: [ {id: <snake>, component: <name>, at: {x: 0..11, y: N, w: 1..12, h: N}, props?: {...}} ]}
+  manage?:      {blocks: [ ... ]}
 lanes:             # at least one
   - id: <snake>
     entry: {trigger: user | admin | cron | submission, step?: <submission step>, access?: {mode: open | role | author_of | signed_in, role?: params.<role param>, resource?: <type>, runs_per_participation?: N, group?: true},

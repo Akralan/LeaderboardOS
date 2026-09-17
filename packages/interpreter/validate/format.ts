@@ -18,6 +18,7 @@ import {
   resourceDecl,
   statesDecl,
   templateHeader,
+  uiDecl,
   type ActBody,
   type AggregateDecl,
   type AssessBody,
@@ -295,6 +296,8 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
   const presentation = raw.presentation === undefined ? undefined : section(presentationDecl.optional(), raw.presentation, ["presentation"], undefined, issues);
   const workspace = raw.workspace === undefined ? undefined : section(workspaceDecl.optional(), raw.workspace, ["workspace"], undefined, issues);
   const submissions = raw.submissions === undefined ? undefined : section(submissionsDecl.optional(), raw.submissions, ["submissions"], undefined, issues);
+  // Un bloc `ui` illisible s'écarte en entier : l'écran redevient généré, ses diagnostics restent.
+  const ui = raw.ui === undefined ? undefined : section(uiDecl.optional(), raw.ui, ["ui"], undefined, issues);
 
   const lifecycleRaw = raw.lifecycle === undefined ? {} : raw.lifecycle;
   const lifecycle: DocumentShell["lifecycle"] = { aggregates: [], on_close: [] };
@@ -361,6 +364,6 @@ export function validateFormat(raw: unknown): { model: TemplateModel | null; iss
     });
   }
 
-  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, workspace, submissions, lifecycle, lanes: laneShells };
+  const shell: DocumentShell = { format: "leaderboardos/1", template, params, requires, resources, counters, presentation, workspace, submissions, lifecycle, lanes: laneShells, ui };
   return { model: { shell, lanes, aggregates, onClose, broken }, issues, complete: issues.length === 0 };
 }

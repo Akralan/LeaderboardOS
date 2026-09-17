@@ -1,7 +1,7 @@
 'use client';
 
 import { createContext, useContext, type MutableRefObject } from 'react';
-import type { DeclarationTab, EditorModel, Path } from './model';
+import type { DeclarationTab, EditorModel, Path, UiScreen } from './model';
 import type { DropSource } from './mutations';
 import type { Diagnostic } from './useTemplateDocument';
 
@@ -18,10 +18,19 @@ export interface EditorContextValue {
   /** Les nœuds que la sélection lit : la provenance allumée. */
   provenance: Set<string>;
 
-  /** Les diagnostics par nœud, par lane et par onglet de déclarations. */
+  /** La mise en page : l'écran composé en cours, et le bloc sélectionné (`ui.<screen>.blocks.<i>`). */
+  screen: UiScreen;
+  setScreen: (screen: UiScreen) => void;
+  selectedBlock: string | null;
+  selectBlock: (key: string | null) => void;
+
+  /** Les diagnostics par nœud, par lane, par onglet de déclarations et par bloc d'écran. */
   nodeIssues: Map<string, Diagnostic[]>;
   laneIssues: Map<number, Diagnostic[]>;
   declarationIssues: Map<DeclarationTab, Diagnostic[]>;
+  blockIssues: Map<string, Diagnostic[]>;
+  /** Les diagnostics d'un écran qui ne visent aucun bloc (le bloc `ui` illisible). */
+  screenIssues: Map<UiScreen, Diagnostic[]>;
   /** Les diagnostics dont le chemin commence par celui-ci : les erreurs en ligne d'un champ. */
   issuesAt: (path: Path) => Diagnostic[];
 

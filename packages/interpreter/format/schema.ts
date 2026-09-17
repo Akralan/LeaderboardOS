@@ -415,8 +415,46 @@ export const submissionsDecl = z.strictObject({
 
 export const statesDecl = z.union([z.literal("standard"), z.strictObject({ close_at: exprSource.optional() })]);
 
+/**
+ * Les écrans composés d'un template (note §5, catalogue UI)
+ * ---------------------------------------------------------
+ * Sans bloc `ui`, le client empile ses écrans générés. Avec, un écran
+ * (`contributor`, `manage`) est une grille de 12 colonnes où le template pose
+ * des composants du catalogue (`ui/catalog.ts`) : lequel, où, à quelle taille,
+ * avec quels arguments. Le catalogue est fermé — un template ne porte pas de
+ * code, il compose. Un écran absent reste généré.
+ */
+const gridInt = z.number().int();
+export const uiPlacement = z.strictObject({
+  x: gridInt.min(0).max(11),
+  y: gridInt.min(0),
+  w: gridInt.min(1).max(12),
+  h: gridInt.min(1),
+});
+export type UiPlacement = z.infer<typeof uiPlacement>;
+
+export const uiBlockDecl = z.strictObject({
+  id: identifier,
+  component: identifier,
+  at: uiPlacement,
+  props: z.record(identifier, z.unknown()).optional(),
+});
+export type UiBlockDecl = z.infer<typeof uiBlockDecl>;
+
+export const uiScreenDecl = z.strictObject({ blocks: z.array(uiBlockDecl) });
+export type UiScreenDecl = z.infer<typeof uiScreenDecl>;
+
+export const UI_SCREENS = ["contributor", "manage"] as const;
+export type UiScreen = (typeof UI_SCREENS)[number];
+
+export const uiDecl = z.strictObject({
+  contributor: uiScreenDecl.optional(),
+  manage: uiScreenDecl.optional(),
+});
+export type UiDecl = z.infer<typeof uiDecl>;
+
 /** Les clés d'un document : ce que le parse de sauvetage lit section par section (validate/format.ts). */
-export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "workspace", "submissions", "lifecycle", "lanes"] as const;
+export const DOCUMENT_KEYS = ["format", "template", "params", "requires", "resources", "counters", "presentation", "workspace", "submissions", "lifecycle", "lanes", "ui"] as const;
 export const LIFECYCLE_KEYS = ["states", "aggregates", "on_close"] as const;
 
 export const documentShell = z.strictObject({
@@ -437,5 +475,6 @@ export const documentShell = z.strictObject({
     })
     .default({ aggregates: [], on_close: [] }),
   lanes: z.array(laneShell).min(1),
+  ui: uiDecl.optional(),
 });
 export type DocumentShell = z.infer<typeof documentShell>;

@@ -111,3 +111,30 @@ describe('the graph editor writes', () => {
     expect([bump('1.2.0', 'patch'), bump('1.2.0', 'minor'), bump('1.2.0', 'major')]).toEqual(['1.2.1', '1.3.0', '2.0.0']);
   });
 });
+
+describe('the composed screens', () => {
+  const composed = `${endpointCheck.trimEnd()}\nui:\n  contributor:\n    blocks:\n      - {id: review, component: lane, at: {x: 0, y: 0, w: 8, h: 6}, props: {lane: reviewer}}\n      - {id: mine, component: mine, at: {x: 8, y: 0, w: 4, h: 6}}\n`;
+
+  it('reads a composed screen as blocks, and leaves the other screen generated', () => {
+    const model = buildModel(composed);
+    expect(model.screens.manage).toBeNull();
+    expect(model.screens.contributor?.map((block) => `${block.key} ${block.id}:${block.component}@${block.at.x},${block.at.y} ${block.at.w}x${block.at.h}`)).toEqual([
+      'ui.contributor.blocks.0 review:lane@0,0 8x6',
+      'ui.contributor.blocks.1 mine:mine@8,0 4x6',
+    ]);
+    expect(model.screens.contributor?.[0].props).toEqual({ lane: 'reviewer' });
+    expect(buildModel(endpointCheck).screens).toEqual({ contributor: null, manage: null });
+  });
+
+  it('locates a ui diagnostic on its block, or on its screen', () => {
+    const model = buildModel(composed);
+    expect(locate(model, 'ui.contributor.blocks.1.component')).toEqual({ kind: 'block', screen: 'contributor', key: 'ui.contributor.blocks.1' });
+    expect(locate(model, 'ui.manage')).toEqual({ kind: 'block', screen: 'manage', key: null });
+  });
+
+  it('moves a block by rewriting only its placement', () => {
+    const next = setAt(composed, ['ui', 'contributor', 'blocks', 1, 'at'], { x: 0, y: 6, w: 12, h: 4 });
+    expect(buildModel(next).screens.contributor?.[1].at).toEqual({ x: 0, y: 6, w: 12, h: 4 });
+    expect(next).toContain('- {id: review, component: lane, at: {x: 0, y: 0, w: 8, h: 6}, props: {lane: reviewer}}');
+  });
+});

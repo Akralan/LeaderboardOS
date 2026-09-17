@@ -1,19 +1,20 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
-import type { TemplateDescription } from '../../../../../packages/interpreter/describe';
+import type { SurfaceScreen } from '../../../../../packages/interpreter/describe';
 import type { HeroStat } from '@/components/challenges/HeroStats';
-import type { ChallengeRewards, FlowUiSlots, RulesChallenge, SlotChallenge } from '@/lib/flowSlots';
+import type { ChallengeRewards, ContributorSlotContext, FlowUiSlots, ManageSlotContext, RulesChallenge, SlotChallenge } from '@/lib/flowSlots';
 import { GeneratedLane } from '@/components/generated/GeneratedLane';
 import { GeneratedOverview } from '@/components/generated/GeneratedOverview';
 import { GeneratedMine, GeneratedResources } from '@/components/generated/GeneratedResources';
+import { GeneratedScreen, configOf, laneVisible, useHeldQualifications, type DescribedTemplate } from '@/components/generated/GeneratedScreen';
 import { GeneratedWorkspace } from '@/components/generated/GeneratedWorkspace';
 import { ContributorTaskBoard } from '@/components/contributor/ContributorTaskBoard';
 import { FlowArrow, FlowBox, SectionLabel } from '@/components/challenges/rules/RuleFlow';
 import { fgAt, humanize } from '@/components/generated/format';
 
 /** Ce que les slots générés lisent d'un template : son descripteur et sa surface — ce que `describe` sert en JSON. */
-export type DescribedTemplate = Pick<TemplateDescription, 'descriptor' | 'surface'>;
+export type { DescribedTemplate };
 
 /**
  * Les slots générés d'un template (note §5)
@@ -24,30 +25,15 @@ export type DescribedTemplate = Pick<TemplateDescription, 'descriptor' | 'surfac
  * - l'onglet manager empile ses lanes \`admin\` et l'overview généré ;
  * - le hero lit \`rewards.summarize\` (les instances fermées du type résolu) ;
  * - les règles décrivent les lanes et les paramètres du challenge.
+ * Un template qui compose un écran (\`surface.ui\`) remplace l'empilement de
+ * cet écran par sa grille, sur les mêmes composants.
  */
-
-function configOf(challenge: { flow_config?: unknown }): Record<string, unknown> {
-  return challenge.flow_config && typeof challenge.flow_config === 'object' ? (challenge.flow_config as Record<string, unknown>) : {};
-}
 
 /** Les lanes réservées : visibles seulement de qui détient la qualification que la configuration nomme. */
 function QualifiedLanes({ challenge, lanes, render }: { challenge: SlotChallenge; lanes: DescribedTemplate['surface']['lanes']; render: (lane: DescribedTemplate['surface']['lanes'][number]) => ReactNode }) {
-  const [held, setHeld] = useState<string[] | null>(null);
   const needsQualification = lanes.some((lane) => lane.role);
-
-  useEffect(() => {
-    if (!needsQualification) return;
-    fetch('/api/contributors/me')
-      .then(async (res) => (res.ok ? await res.json() : null))
-      .then((me) => setHeld(Array.isArray(me?.qualifications) ? me.qualifications : []))
-      .catch(() => setHeld([]));
-  }, [needsQualification]);
-
-  const visible = lanes.filter((lane) => {
-    if (!lane.role) return true;
-    const key = configOf(challenge)[lane.role];
-    return held !== null && typeof key === 'string' && held.includes(key);
-  });
+  const held = useHeldQualifications(needsQualification);
+  const visible = lanes.filter((lane) => laneVisible(lane, challenge, held));
   if (visible.length === 0) {
     return (
       <p className="py-6 text-sm" style={{ color: fgAt(0.45) }}>
@@ -121,9 +107,34 @@ function ContributorLanes({ challenge, challengeId, description, lanes }: { chal
   );
 }
 
+/** Un écran composé par le template, joué avec le contexte du contributeur. */
+function ComposedContributor({ ctx, description, screen }: { ctx: ContributorSlotContext; description: DescribedTemplate; screen: SurfaceScreen }) {
+  const [version, setVersion] = useState(0);
+  const lanes = description.surface.lanes;
+  const needsQualification = screen.blocks.some((block) => block.component === 'lane' && lanes.find((lane) => lane.id === block.props.lane)?.role);
+  const held = useHeldQualifications(needsQualification);
+  return (
+    <GeneratedScreen
+      blocks={screen.blocks}
+      runtime={{ screen: 'contributor', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held, contributor: ctx }}
+    />
+  );
+}
+
+function ComposedManage({ ctx, description, screen }: { ctx: ManageSlotContext; description: DescribedTemplate; screen: SurfaceScreen }) {
+  const [version, setVersion] = useState(0);
+  return (
+    <GeneratedScreen
+      blocks={screen.blocks}
+      runtime={{ screen: 'manage', challengeId: ctx.challengeId, challenge: ctx.challenge, description, version, onRecorded: () => setVersion((current) => current + 1), held: null, contributor: null }}
+    />
+  );
+}
+
 export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
   const userLanes = description.surface.lanes.filter((lane) => lane.trigger === 'user');
   const adminLanes = description.surface.lanes.filter((lane) => lane.trigger === 'admin');
+  const composed = description.surface.ui ?? {};
 
   return {
     readsRewards: true,
@@ -131,7 +142,9 @@ export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
     contributorTabs: (ctx) => [
       {
         label: description.descriptor.label,
-        panel: (
+        panel: composed.contributor ? (
+          <ComposedContributor ctx={ctx} description={description} screen={composed.contributor} />
+        ) : (
           <div className="space-y-4">
             {/* Le workspace et le board du porteur (capacités `workspaces` et `board`), avant les lanes qui les lisent. */}
             {ctx.isMember && description.surface.workspace && (
@@ -158,7 +171,9 @@ export function generatedSlots(description: DescribedTemplate): FlowUiSlots {
       ctx.common.overview,
       {
         label: 'Manage',
-        panel: (
+        panel: composed.manage ? (
+          <ComposedManage ctx={ctx} description={description} screen={composed.manage} />
+        ) : (
           <div className="space-y-4">
             {adminLanes.map((lane) => <GeneratedLane key={lane.id} challengeId={ctx.challengeId} lane={lane} />)}
             <GeneratedOverview challengeId={ctx.challengeId} resources={description.surface.resources} />

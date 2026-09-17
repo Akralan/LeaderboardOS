@@ -116,6 +116,21 @@ export interface AggregateView {
   node: CanvasNode;
 }
 
+export type UiScreen = 'contributor' | 'manage';
+export const UI_SCREENS: readonly UiScreen[] = ['contributor', 'manage'];
+
+/** Un bloc d'un écran composé, tel que le document l'écrit — lu sans validation, comme le reste. */
+export interface BlockView {
+  /** `ui.contributor.blocks.2` : la clé est le chemin. */
+  key: string;
+  path: Path;
+  index: number;
+  id: string;
+  component: string;
+  at: { x: number; y: number; w: number; h: number };
+  props: Rec;
+}
+
 export interface EditorModel {
   /** Le YAML ne se lit pas : le canevas reste sur son dernier état lisible. */
   parseError: string | null;
@@ -128,6 +143,8 @@ export interface EditorModel {
   resources: ResourceView[];
   counters: CounterView[];
   aggregates: AggregateView[];
+  /** Les écrans composés (`ui`) ; `null` : l'écran est généré. */
+  screens: Record<UiScreen, BlockView[] | null>;
 }
 
 /** `submit_case` → `Submit case`. */
@@ -576,6 +593,30 @@ export function buildModel(source: string, previous?: EditorModel): EditorModel 
     return { name, type: str(decl.type) || '?', lag: typeof decl.lag === 'number' ? decl.lag : null };
   });
 
+  const uiRaw = isRec(doc.ui) ? doc.ui : {};
+  const int = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback);
+  const screens = Object.fromEntries(
+    UI_SCREENS.map((screen) => {
+      const decl = uiRaw[screen];
+      if (!isRec(decl) || !Array.isArray(decl.blocks)) return [screen, null];
+      const blocks: BlockView[] = decl.blocks.map((raw, index) => {
+        const block = isRec(raw) ? raw : {};
+        const at = isRec(block.at) ? block.at : {};
+        const path: Path = ['ui', screen, 'blocks', index];
+        return {
+          key: pathKey(path),
+          path,
+          index,
+          id: str(block.id) || `block_${index + 1}`,
+          component: str(block.component),
+          at: { x: int(at.x, 0), y: int(at.y, 0), w: int(at.w, 12), h: int(at.h, 2) },
+          props: isRec(block.props) ? block.props : {},
+        };
+      });
+      return [screen, blocks];
+    })
+  ) as EditorModel['screens'];
+
   return {
     parseError: null,
     doc,
@@ -587,6 +628,7 @@ export function buildModel(source: string, previous?: EditorModel): EditorModel 
     resources,
     counters,
     aggregates,
+    screens,
   };
 }
 
@@ -606,6 +648,7 @@ export type DiagnosticTarget =
   | { kind: 'node'; key: string }
   | { kind: 'lane'; index: number }
   | { kind: 'declaration'; tab: DeclarationTab; name: string | null }
+  | { kind: 'block'; screen: UiScreen; key: string | null }
   | { kind: 'document' };
 
 export type DeclarationTab = 'params' | 'resources' | 'counters' | 'lifecycle' | 'template';
@@ -617,6 +660,11 @@ export function locate(model: EditorModel, path: string): DiagnosticTarget {
   }
   if (best) return { kind: 'node', key: best };
   const segments = path.split('.');
+  if (segments[0] === 'ui') {
+    const screen = (UI_SCREENS as readonly string[]).includes(segments[1]) ? (segments[1] as UiScreen) : 'contributor';
+    const key = segments[2] === 'blocks' && segments[3] !== undefined && /^\d+$/.test(segments[3]) ? `ui.${screen}.blocks.${segments[3]}` : null;
+    return { kind: 'block', screen, key };
+  }
   if (segments[0] === 'lanes' && segments[1] !== undefined && /^\d+$/.test(segments[1])) return { kind: 'lane', index: Number(segments[1]) };
   if (segments[0] === 'params' || segments[0] === 'resources' || segments[0] === 'counters') {
     return { kind: 'declaration', tab: segments[0], name: segments[1] ?? null };

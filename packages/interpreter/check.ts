@@ -3,6 +3,7 @@ import { DEFAULT_CATALOG, type CapabilityCatalog } from "./catalog.js";
 import { PASS_ORDER, type SupportGap, type TemplateIssue } from "./issues.js";
 import { analyzeTemplate } from "./validate/analyze.js";
 import { validateFormat, type TemplateModel } from "./validate/format.js";
+import { checkUi } from "./validate/ui.js";
 import type { Type } from "./expr/types.js";
 import type { NodeModel } from "./validate/format.js";
 
@@ -63,7 +64,7 @@ export function checkTemplate(raw: unknown, name: string, options: CheckOptions 
     coreVersion: options.coreVersion ?? CORE_VERSION,
     gridExists: options.gridExists,
   });
-  const issues = [...format.issues, ...analysis.issues];
+  const issues = [...format.issues, ...analysis.issues, ...checkUi(format.model)];
   const { gaps, types } = analysis;
   const errors = issues.filter((issue) => issue.severity === "error").sort(byPass);
   return {

@@ -4,7 +4,7 @@ import { checkTemplateSource, type TemplateTypes } from "./check.js";
 import { compileParams, poolParamOf } from "./compile/params.js";
 import { gestureFields, segmentsOf } from "./compile/segments.js";
 import type { Type } from "./expr/types.js";
-import type { DocumentShell } from "./format/schema.js";
+import { UI_SCREENS, type DocumentShell, type UiPlacement, type UiScreen } from "./format/schema.js";
 import type { TemplateModel } from "./validate/format.js";
 
 /**
@@ -100,6 +100,21 @@ export interface SurfaceParam {
   checks: string[];
 }
 
+/** Un composant du catalogue posé sur un écran : lequel, où, avec quels arguments. */
+export interface SurfaceBlock {
+  id: string;
+  component: string;
+  at: UiPlacement;
+  props: Record<string, unknown>;
+}
+
+export interface SurfaceScreen {
+  blocks: SurfaceBlock[];
+}
+
+/** Les écrans composés du template ; un écran absent est généré (empilé). */
+export type SurfaceUi = Partial<Record<UiScreen, SurfaceScreen>>;
+
 export interface TemplateSurface {
   lanes: SurfaceLane[];
   resources: SurfaceResource[];
@@ -108,6 +123,8 @@ export interface TemplateSurface {
   board?: boolean;
   /** Où le participant livre : le paramètre qui porte le mode (`provided_repo` | `own_repo`), ou le mode écrit. */
   workspace?: { param: string | null; mode: string | null };
+  /** Les écrans que le template compose lui-même (bloc `ui`), sur le catalogue de composants. */
+  ui?: SurfaceUi;
 }
 
 export function descriptorOf(shell: DocumentShell): FlowDescriptor {
@@ -232,5 +249,17 @@ export function surfaceOf(model: TemplateModel, types: TemplateTypes): TemplateS
     params,
     ...(model.shell.presentation?.board ? { board: true } : {}),
     ...(model.shell.workspace ? { workspace: { param: modeParam, mode: modeParam ? null : typeof modeSource === "string" ? modeSource.replace(/^"|"$/g, "") : null } } : {}),
+    ...(model.shell.ui ? { ui: uiOf(model.shell.ui) } : {}),
   };
+}
+
+/** Les écrans composés, tels que le document les écrit, les arguments toujours présents. */
+function uiOf(ui: NonNullable<DocumentShell["ui"]>): SurfaceUi {
+  const screens: SurfaceUi = {};
+  for (const screen of UI_SCREENS) {
+    const decl = ui[screen];
+    if (!decl) continue;
+    screens[screen] = { blocks: decl.blocks.map((block) => ({ id: block.id, component: block.component, at: { ...block.at }, props: { ...(block.props ?? {}) } })) };
+  }
+  return screens;
 }

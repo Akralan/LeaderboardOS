@@ -94,6 +94,23 @@ export function TextInput({ value, onCommit, placeholder, disabled, invalid }: {
   );
 }
 
+/** Un texte sur plusieurs lignes, écrit après une pause ou à la sortie du champ. */
+export function TextAreaInput({ value, onCommit, placeholder, disabled, rows = 4 }: { value: string; onCommit: (next: string) => void; placeholder?: string; disabled?: boolean; rows?: number }) {
+  const state = useDraftValue(value, onCommit);
+  return (
+    <textarea
+      className={`${inputClass} resize-y leading-relaxed`}
+      rows={rows}
+      value={state.draft}
+      placeholder={placeholder}
+      disabled={disabled}
+      onFocus={state.focus}
+      onChange={(event) => state.change(event.target.value)}
+      onBlur={(event) => state.blur(event.target.value)}
+    />
+  );
+}
+
 /** Le jeton en cours de frappe : `grade.` dans `params.rate * grade.`. */
 function tokenBefore(text: string, caret: number): { token: string; start: number } {
   const before = text.slice(0, caret);

@@ -19,6 +19,10 @@ export function ProblemsDrawer({ diagnostics, open, onToggle, onFocus }: { diagn
     if (target.kind === 'node') return model.nodes.get(target.key)?.id ?? diagnostic.path;
     if (target.kind === 'lane') return `lane ${model.lanes[target.index]?.id ?? target.index}`;
     if (target.kind === 'declaration') return target.name ? `${target.tab}.${target.name}` : target.tab;
+    if (target.kind === 'block') {
+      const block = target.key ? model.screens[target.screen]?.find((candidate) => candidate.key === target.key) : undefined;
+      return block ? `${target.screen} · ${block.id}` : `${target.screen} screen`;
+    }
     return diagnostic.path || 'document';
   };
 
@@ -229,7 +233,7 @@ function PreviewNote({ lane }: { lane: SurfaceLane }) {
   );
 }
 
-function PreviewField({ field }: { field: SurfaceField }) {
+export function PreviewField({ field }: { field: SurfaceField }) {
   const label = (
     <span className="text-[10px] font-semibold uppercase tracking-widest text-white/45">
       {humanize(field.name)}

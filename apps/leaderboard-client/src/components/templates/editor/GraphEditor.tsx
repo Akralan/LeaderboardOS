@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, ChevronsLeft, ChevronsRight, Code2, Copy, Eye, Loader2, Redo2, Sparkles, Undo2 } from 'lucide-react';
+import { ArrowLeft, ChevronsLeft, ChevronsRight, Code2, Copy, Eye, LayoutGrid, Loader2, Redo2, Sparkles, Undo2 } from 'lucide-react';
 import { AuthorPanel, takeStashedReport, type AuthorReport } from './AuthorPanel';
 import { useToast } from '@/components/ui/Toast';
 import { Canvas, LockedPaletteItem, PaletteItem } from './Canvas';
@@ -11,7 +11,11 @@ import { Declarations } from './Declarations';
 import { EditorContext, type EditorContextValue } from './EditorContext';
 import { LOCKED_FAMILIES, PALETTE, type Family } from './families';
 import { Inspector } from './Inspector';
-import { locate, pathKey, provenanceOf, type DeclarationTab, type DiagnosticTarget, type Path } from './model';
+import { BlockInspector } from './layout/BlockInspector';
+import { BlockPalette } from './layout/BlockPalette';
+import { LayoutEditor } from './layout/LayoutEditor';
+import { ScreenPanel } from './layout/ScreenPanel';
+import { locate, pathKey, provenanceOf, type DeclarationTab, type DiagnosticTarget, type Path, type UiScreen } from './model';
 import { bump, insertAt, moveNode, newAggregateValue, newLaneValue, newNodeValue, refusalOf, removeAt, setAt, type DropSource } from './mutations';
 import { ProblemsDrawer, PreviewPanel, PublishModal, SourcePanel, type VersionOption } from './Panels';
 import { useTemplateDocument, type Diagnostic } from './useTemplateDocument';
@@ -146,6 +150,10 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
   const [tab, setTab] = useState<DeclarationTab>('params');
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [panel, setPanel] = useState<'preview' | 'source' | 'author' | null>(null);
+  // La vue : le graphe des lanes, ou la mise en page d'un écran composé.
+  const [view, setView] = useState<'graph' | 'layout'>('graph');
+  const [screen, setScreen] = useState<UiScreen>('contributor');
+  const [selectedBlock, setSelectedBlock] = useState<string | null>(null);
   const [authorReports, setAuthorReports] = useState<AuthorReport[]>([]);
   const [authorBusy, setAuthorBusy] = useState(false);
   const [authorError, setAuthorError] = useState('');
@@ -169,6 +177,13 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
 
   // Une sélection que l'écriture a fait disparaître (nœud supprimé, annulé) se relâche.
   const selection = selected && model.nodes.has(selected) ? selected : null;
+  const blockSelection = selectedBlock && (model.screens.contributor ?? []).concat(model.screens.manage ?? []).some((block) => block.key === selectedBlock) ? selectedBlock : null;
+  const selectBlock = useCallback((key: string | null) => {
+    setSelectedBlock(key);
+    // La clé d'un bloc nomme son écran : la sélection y amène la grille.
+    if (key?.startsWith('ui.manage.')) setScreen('manage');
+    else if (key?.startsWith('ui.contributor.')) setScreen('contributor');
+  }, []);
 
   const errors = diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
   const advisories = diagnostics.length - errors.length;
@@ -177,15 +192,20 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
     const nodeIssues = new Map<string, Diagnostic[]>();
     const laneIssues = new Map<number, Diagnostic[]>();
     const declarationIssues = new Map<DeclarationTab, Diagnostic[]>();
+    const blockIssues = new Map<string, Diagnostic[]>();
+    const screenIssues = new Map<UiScreen, Diagnostic[]>();
     const push = <K,>(map: Map<K, Diagnostic[]>, key: K, diagnostic: Diagnostic) => map.set(key, [...(map.get(key) ?? []), diagnostic]);
     for (const diagnostic of diagnostics) {
       const target = locate(model, diagnostic.path);
       if (target.kind === 'node') push(nodeIssues, target.key, diagnostic);
       else if (target.kind === 'lane') push(laneIssues, target.index, diagnostic);
       else if (target.kind === 'declaration') push(declarationIssues, target.tab, diagnostic);
-      else push(declarationIssues, 'template', diagnostic);
+      else if (target.kind === 'block') {
+        if (target.key) push(blockIssues, target.key, diagnostic);
+        else push(screenIssues, target.screen, diagnostic);
+      } else push(declarationIssues, 'template', diagnostic);
     }
-    return { nodeIssues, laneIssues, declarationIssues };
+    return { nodeIssues, laneIssues, declarationIssues, blockIssues, screenIssues };
   }, [diagnostics, model]);
 
   const issuesAt = useCallback(
@@ -269,6 +289,14 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
   );
 
   const focusTarget = useCallback((target: DiagnosticTarget) => {
+    if (target.kind === 'block') {
+      setView('layout');
+      setScreen(target.screen);
+      setSelectedBlock(target.key);
+      requestAnimationFrame(() => target.key && window.document.querySelector(`[data-block="${target.key}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      return;
+    }
+    setView('graph');
     if (target.kind === 'node') {
       setSelected(target.key);
       requestAnimationFrame(() => window.document.getElementById(`node-${target.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }));
@@ -302,6 +330,16 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
         return;
       }
       if (typing || publishOpen) return;
+      if (view === 'layout') {
+        if (event.key === 'Escape') setSelectedBlock(null);
+        if ((event.key === 'Delete' || event.key === 'Backspace') && !readOnly && blockSelection) {
+          event.preventDefault();
+          const block = (model.screens.contributor ?? []).concat(model.screens.manage ?? []).find((candidate) => candidate.key === blockSelection);
+          setSelectedBlock(null);
+          if (block) apply(removeAt(source, block.path));
+        }
+        return;
+      }
       if (event.key === 'Escape') {
         setSelected(null);
         return;
@@ -340,7 +378,7 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [apply, focusTarget, model, publishOpen, readOnly, redo, selection, source, undo]);
+  }, [apply, blockSelection, focusTarget, model, publishOpen, readOnly, redo, selection, source, undo, view]);
 
   const context: EditorContextValue = {
     templateKey,
@@ -352,9 +390,15 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
     selected: selection,
     select: setSelected,
     provenance: new Set(selection ? provenanceOf(model, selection) : []),
+    screen,
+    setScreen,
+    selectedBlock: blockSelection,
+    selectBlock,
     nodeIssues: grouped.nodeIssues,
     laneIssues: grouped.laneIssues,
     declarationIssues: grouped.declarationIssues,
+    blockIssues: grouped.blockIssues,
+    screenIssues: grouped.screenIssues,
     issuesAt,
     dragging,
     refusal,
@@ -478,6 +522,7 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
                 </button>
               </>
             )}
+            <TopButton active={view === 'layout'} onClick={() => setView(view === 'layout' ? 'graph' : 'layout')} icon={<LayoutGrid className="h-3.5 w-3.5" />} label="Layout" />
             <TopButton active={panel === 'source'} onClick={() => setPanel(panel === 'source' ? null : 'source')} icon={<Code2 className="h-3.5 w-3.5" />} label="View source" />
             <TopButton active={panel === 'preview'} onClick={() => setPanel(panel === 'preview' ? null : 'preview')} icon={<Eye className="h-3.5 w-3.5" />} label="Preview" />
             {loaded.mode === 'draft' && (
@@ -541,22 +586,28 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
           {paletteOpen ? (
             <div className="flex w-[214px] shrink-0 flex-col overflow-auto border-r border-white/[0.08]">
               <div className="flex items-center justify-between px-3.5 pb-2 pt-3">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-white/35">Palette</span>
+                <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-white/35">{view === 'layout' ? `Components · ${screen}` : 'Palette'}</span>
                 <button type="button" onClick={() => setPaletteOpen(false)} className="text-white/30 hover:text-white" title="Collapse">
                   <ChevronsLeft className="h-4 w-4" />
                 </button>
               </div>
-              <div className="flex flex-col gap-0.5 px-2 pb-3">
-                {PALETTE.map((family) => (
-                  <PaletteItem key={family} family={family} onPick={() => pick(family)} />
-                ))}
-              </div>
-              <span className="px-3.5 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white/25">Not yet executable</span>
-              <div className="flex flex-col gap-0.5 px-2 pb-4">
-                {LOCKED_FAMILIES.map((locked) => (
-                  <LockedPaletteItem key={locked.label} label={locked.label} tip={locked.tip} />
-                ))}
-              </div>
+              {view === 'layout' ? (
+                <BlockPalette />
+              ) : (
+                <>
+                  <div className="flex flex-col gap-0.5 px-2 pb-3">
+                    {PALETTE.map((family) => (
+                      <PaletteItem key={family} family={family} onPick={() => pick(family)} />
+                    ))}
+                  </div>
+                  <span className="px-3.5 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white/25">Not yet executable</span>
+                  <div className="flex flex-col gap-0.5 px-2 pb-4">
+                    {LOCKED_FAMILIES.map((locked) => (
+                      <LockedPaletteItem key={locked.label} label={locked.label} tip={locked.tip} />
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <button type="button" onClick={() => setPaletteOpen(true)} className="flex w-9 shrink-0 justify-center border-r border-white/[0.08] pt-3.5 text-white/30 hover:text-white" title="Palette">
@@ -566,7 +617,7 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
 
           {/* ── Canvas + problems ── */}
           <div className="flex min-w-0 flex-1 flex-col" onClick={(event) => event.target === event.currentTarget && setSelected(null)}>
-            <Canvas zoom={zoom} setZoom={setZoom} />
+            {view === 'layout' ? <LayoutEditor /> : <Canvas zoom={zoom} setZoom={setZoom} />}
             {loaded.mode === 'draft' && <ProblemsDrawer diagnostics={diagnostics} open={drawerOpen} onToggle={() => setDrawerOpen((open) => !open)} onFocus={focusTarget} />}
           </div>
 
@@ -576,7 +627,16 @@ function GraphEditor({ templateKey, loaded, onReload }: { templateKey: string; l
 
           {/* ── Inspector / declarations ── */}
           <div id="graph-inspector" className={`flex shrink-0 flex-col overflow-auto border-l border-white/[0.08] ${panel ? 'w-[300px]' : 'w-[336px]'}`}>
-            {selection ? <Inspector key={selection} nodeKey={selection} /> : <Declarations tab={tab} setTab={setTab} />}
+            {view === 'layout' ? (
+              (() => {
+                const block = blockSelection ? (model.screens[screen] ?? []).find((candidate) => candidate.key === blockSelection) : undefined;
+                return block ? <BlockInspector key={block.key} block={block} /> : <ScreenPanel />;
+              })()
+            ) : selection ? (
+              <Inspector key={selection} nodeKey={selection} />
+            ) : (
+              <Declarations tab={tab} setTab={setTab} />
+            )}
           </div>
         </div>
       </div>

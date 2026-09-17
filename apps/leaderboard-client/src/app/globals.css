@@ -199,3 +199,28 @@ html[data-mode="light"] .graph-editor :is(.text-amber-200, .text-amber-300) {
 html[data-mode="light"] .graph-editor .text-sky-300 {
   color: #0369a1 !important;
 }
+
+/* Generated screens — a composed template screen is a 12-column grid, its
+   rows a minimum (a taller block stretches its row). On a phone the blocks
+   stack in one column, in reading order. */
+.ui-screen {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-rows: minmax(48px, auto);
+  gap: 16px;
+}
+.ui-screen > .ui-block {
+  grid-column: var(--gx) / span var(--gw);
+  grid-row: var(--gy) / span var(--gh);
+  min-width: 0;
+}
+@media (max-width: 767px) {
+  .ui-screen {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: auto;
+  }
+  .ui-screen > .ui-block {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
