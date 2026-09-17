@@ -160,6 +160,8 @@ export interface LinkedContribution {
   [key: string]: Value;
   id: string;
   author: string;
+  /** Le nom affiché de son auteur : ce qu'une liste de soumissions montre. */
+  author_name: string | null;
   /** Son titre : ce qu'un sélecteur en affiche. */
   title: string | null;
   url: string | null;
@@ -284,7 +286,9 @@ export function defaultRuntime(
         const contribution = await new ContributionRepository().findById(contributionId);
         if (!contribution) return null;
         const members = await new ContributionMemberRepository().findByContribution(contribution.uuid);
-        return linked(contribution, members.map((member) => member.user_id));
+        const { UserRepository } = await repositories();
+        const author = await new UserRepository().findById(contribution.user_id);
+        return linked(contribution, members.map((member) => member.user_id), author?.full_name ?? null);
       },
       async eligible(challenge, capability) {
         if (!challenge.source_challenge_id) return [];
@@ -293,8 +297,11 @@ export function defaultRuntime(
         const source = await new ChallengeRepository().findById(challenge.source_challenge_id);
         const deliverable = (source ? PlatformRegistry.flowFor(source) : undefined)?.deliverables?.find((candidate) => candidate.capabilities.includes(capability));
         if (!source || !deliverable) return [];
-        const contributions = await new ContributionRepository().findByChallenge(source.uuid);
-        return contributions.filter((contribution) => contribution.type === deliverable.contributionType).map((contribution) => linked(contribution));
+        const contributions = (await new ContributionRepository().findByChallenge(source.uuid)).filter((contribution) => contribution.type === deliverable.contributionType);
+        const { UserRepository } = await repositories();
+        const authors = await new UserRepository().findByIds([...new Set(contributions.map((contribution) => contribution.user_id))]);
+        const names = new Map(authors.map((user) => [user.uuid, user.full_name]));
+        return contributions.map((contribution) => linked(contribution, [], names.get(contribution.user_id) ?? null));
       },
     },
     ledger: {
@@ -472,10 +479,11 @@ async function httpProxy(args: Record<string, Value>, context: ObserveContext): 
   return { status: result.status, ok: result.status >= 200 && result.status < 300, content_type: result.contentType, response: response as unknown as Value };
 }
 
-function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }, members: string[] = []): LinkedContribution {
+function linked(contribution: { uuid: string; user_id: string; title?: string | null; artifact_url?: string | null; live_endpoint_url?: string | null; type: string }, members: string[] = [], authorName: string | null = null): LinkedContribution {
   return {
     id: contribution.uuid,
     author: contribution.user_id,
+    author_name: authorName,
     title: contribution.title ?? null,
     url: contribution.live_endpoint_url ?? contribution.artifact_url ?? null,
     kind: contribution.type,

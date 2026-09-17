@@ -39,6 +39,8 @@ const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
  *   octets d'un fichier, sous la même règle de visibilité ; purgé, 410 ;
  * - `GET mine` : les instances que l'appelant a créées, par type, projetées
  *   pour lui — ce qu'un participant reprend (une walkthrough en cours) ;
+ * - `GET counts?type=&by=` : le nombre d'instances d'un type par référence
+ *   (`walkthrough` par `app`), sans rien de leur contenu ;
  * - `GET resources?type=` : toutes les instances d'un type pour un manager,
  *   brouillons compris, avec leur auteur, leur état et leur résolution ;
  * - `GET <lane>/options?field=<geste>.<champ>` : les choix d'un champ `ref` ou
@@ -50,7 +52,7 @@ const EVALUATION_STALE_AFTER_MS = 30 * 60 * 1000;
 
 const MANAGERS: ActionAccess = { roles: ["admin"], manager: true };
 const PARTICIPANTS: ActionAccess = { roles: ["admin"], manager: true, member: true };
-export const GENERATED_PATHS = ["progress", "overview", "export", "file", "mine", "resources"] as const;
+export const GENERATED_PATHS = ["progress", "overview", "export", "file", "mine", "resources", "counts"] as const;
 
 export function generatedActions(
   t: CompiledTemplate,
@@ -427,6 +429,26 @@ export function generatedActions(
         );
       }
       return { resources };
+    },
+  });
+
+  // ── counts : combien d'instances par référence ───────────────────────────
+  actions.push({
+    path: "counts",
+    method: "GET",
+    access: ANYONE_WHO_ENTERS,
+    async handle(ctx) {
+      const query = new URL(ctx.request.url).searchParams;
+      const type = query.get("type") ?? "";
+      const by = query.get("by") ?? "";
+      if (!shell.resources[type]) return jsonError(404, `No resource type ${type}`);
+      if (t.resourceTypes.get(type)?.[by]?.kind !== "resource") return jsonError(400, `${by} is not a reference field of ${type}`);
+      const counts: Record<string, number> = {};
+      for (const instance of await t.runtime.resources.list({ challengeId: ctx.challenge.uuid, type })) {
+        const ref = instance.payload[by];
+        if (typeof ref === "string") counts[ref] = (counts[ref] ?? 0) + 1;
+      }
+      return { counts };
     },
   });
 

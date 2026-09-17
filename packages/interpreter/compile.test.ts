@@ -107,6 +107,7 @@ describe("compiling data-annotation", () => {
       "GET annotator/file",
       "GET file",
       "GET mine",
+      "GET counts",
       "GET resources",
       "GET export",
     ]);

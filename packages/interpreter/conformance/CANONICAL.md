@@ -107,6 +107,7 @@ The catalog's executable half is bound in `compile/bindings.ts`; a test holds ev
 | `<resource>.id`, link `.id`, `.title`, `.members` | comparing references; excluding the author's group (`contribution_members`) |
 | declared `reward.meta` | is the shape of the ledger line (`{targetContributionId, runId}`), only the natural key of a claim or resource is added |
 | generated `GET mine`, `GET resources?type=` | what a participant resumes; every instance, drafts included, for a manager |
+| generated `GET counts?type=&by=`, link `.author_name` | how many walkthroughs each app has, without their content; the submitter's name a list of applications shows |
 
 ## Submitted steps, ledger reads and reuse credit (template parity, milestone 5)
 

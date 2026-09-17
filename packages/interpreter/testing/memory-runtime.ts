@@ -373,12 +373,12 @@ export function memoryRuntime(options: {
     contributions: {
       async find(contributionId) {
         const row = runtime.contributionRows.find((candidate) => candidate.id === contributionId);
-        return row ? { id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] } : null;
+        return row ? { id: row.id, author: row.author, author_name: `name of ${row.author}`, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] } : null;
       },
       async eligible(challenge, capability) {
         return runtime.contributionRows
           .filter((row) => row.challenge === challenge.source_challenge_id && row.capabilities.includes(capability))
-          .map((row) => ({ id: row.id, author: row.author, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] }));
+          .map((row) => ({ id: row.id, author: row.author, author_name: `name of ${row.author}`, title: row.title ?? null, url: row.url, kind: row.kind, members: row.members ?? [] }));
       },
     },
 
